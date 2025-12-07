@@ -1,0 +1,5 @@
+projects/
+.vscode/
+.venv/
+.env
+pytest.ini
