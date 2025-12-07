@@ -1,0 +1,29 @@
+# Auto-generated Dockerfile for Moose Agent
+FROM python:{python_version}-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system packages if specified
+{% if system_packages %}
+RUN apt-get update && apt-get install -y \\
+    {system_packages_str} \\
+    && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
+# Copy agent files
+COPY . /app
+
+# Run setup script if it exists
+{% if has_setup_script %}
+RUN chmod +x setup.sh && ./setup.sh
+{% endif %}
+
+# Install Python dependencies if requirements.txt exists
+{% if has_requirements %}
+RUN pip install --no-cache-dir -r requirements.txt
+{% endif %}
+
+# Set entry point
+CMD ["python", "{entry_point}"]
+
