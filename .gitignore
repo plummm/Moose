@@ -1,5 +1,7 @@
 projects/
 .vscode/
 .venv/
+venv/
 .env
 pytest.ini
+*.pyc

@@ -78,6 +78,19 @@ class ContainerManager:
         Returns:
             Image name/tag
         """
+        
+        # Image name
+        image_name = f"{self.image_prefix}{agent_name}"
+        
+        # Check if image exists
+        if not force_rebuild:
+            try:
+                self.docker_client.images.get(image_name)
+                self.logger.debug(f"Image {image_name} already exists, skipping build")
+                return image_name
+            except ImageNotFound:
+                pass
+            
         self.logger.info(f"Building image for agent: {agent_name}")
         
         # Validate agent
@@ -92,18 +105,6 @@ class ContainerManager:
         if not dockerfile_path.exists():
             self.logger.info(f"Generating Dockerfile for agent: {agent_name}")
             self.dockerfile_generator.generate_dockerfile(agent_path, config)
-        
-        # Image name
-        image_name = f"{self.image_prefix}{agent_name}"
-        
-        # Check if image exists
-        if not force_rebuild:
-            try:
-                self.docker_client.images.get(image_name)
-                self.logger.debug(f"Image {image_name} already exists, skipping build")
-                return image_name
-            except ImageNotFound:
-                pass
         
         # Build image
         try:
@@ -147,8 +148,8 @@ class ContainerManager:
                 network_name,
                 driver="bridge"
             )
-            self.logger.info(f"Created network: {network_name}")
-            return network_name
+            self.logger.info(f"Created network: {network.name}")
+            return network.name
         except DockerException as e:
             self.logger.error(f"Failed to create network: {e}")
             raise
@@ -256,7 +257,7 @@ class ContainerManager:
                 mem_limit=mem_limit,
                 nano_cpus=int(float(cpu_limit) * 1e9) if cpu_limit else None,
                 detach=True,
-                remove=False  # Don't auto-remove so we can manage lifecycle
+                auto_remove=False
             )
             
             container.start()
@@ -380,7 +381,7 @@ class ContainerManager:
         for container_id in containers:
             try:
                 container = self.docker_client.containers.get(container_id)
-                container.stop(timeout=10)
+                container.stop(timeout=60)
                 container.remove()
                 self.logger.debug(f"Removed container {container_id[:12]}")
             except docker.errors.NotFound:

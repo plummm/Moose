@@ -54,7 +54,7 @@ class TestAgentCore:
         
         # Create minimal agent.py
         with open(self.test_agent_dir / "agent.py", 'w') as f:
-            f.write('print("Hello from test agent")\n')
+            f.write('import time\nprint("Hello from test agent")\ntime.sleep(30)')
         
         # Create requirements.txt
         with open(self.test_agent_dir / "requirements.txt", 'w') as f:
@@ -65,6 +65,20 @@ class TestAgentCore:
         # Cleanup
         if self.temp_agents_dir.exists():
             shutil.rmtree(self.temp_agents_dir)
+            
+    @pytest.fixture
+    def cleanup_docker_containers(self):
+        """Cleanup Docker containers before tests."""
+        import docker
+        from docker.errors import NotFound
+        docker_client = docker.from_env()
+        try:
+            container = docker_client.containers.get("moose-agent-test_agent-test_project_123")
+            container.stop()
+            container.remove()
+        except NotFound:
+            pass
+        yield
     
     def test_agent_loader_discovery(self):
         """Test agent discovery."""
@@ -231,7 +245,7 @@ class TestAgentCore:
             pytest.skip(f"Image build test skipped: {e}")
     
     @pytest.mark.docker
-    def test_container_start_stop(self):
+    def test_container_start_stop(self, cleanup_docker_containers):
         """Test container start and stop."""
         try:
             manager = ContainerManager(agents_dir=self.temp_agents_dir)
@@ -261,13 +275,13 @@ class TestAgentCore:
             
         except RuntimeError as e:
             if "Docker daemon" in str(e):
-                pytest.skip("Docker daemon not available")
+                pytest.fail("Docker daemon not available")
             raise
         except Exception as e:
-            pytest.skip(f"Container start/stop test skipped: {e}")
+            pytest.fail(f"Container start/stop test skipped: {e}")
     
     @pytest.mark.docker
-    def test_project_network_creation(self):
+    def test_project_network_creation(self, cleanup_docker_containers):
         """Test project network creation."""
         try:
             manager = ContainerManager(agents_dir=self.temp_agents_dir)
@@ -287,11 +301,11 @@ class TestAgentCore:
                 
         except RuntimeError as e:
             if "Docker daemon" in str(e):
-                pytest.skip("Docker daemon not available")
+                pytest.fail("Docker daemon not available")
             raise
     
     @pytest.mark.docker
-    def test_container_logs(self):
+    def test_container_logs(self, cleanup_docker_containers):
         """Test retrieving container logs."""
         try:
             manager = ContainerManager(agents_dir=self.temp_agents_dir)
@@ -323,13 +337,13 @@ class TestAgentCore:
             
         except RuntimeError as e:
             if "Docker daemon" in str(e):
-                pytest.skip("Docker daemon not available")
+                pytest.fail("Docker daemon not available")
             raise
         except Exception as e:
-            pytest.skip(f"Container logs test skipped: {e}")
+            pytest.fail(f"Container logs test skipped: {e}")
     
     @pytest.mark.docker
-    def test_project_cleanup(self):
+    def test_project_cleanup(self, cleanup_docker_containers):
         """Test project container cleanup."""
         try:
             manager = ContainerManager(agents_dir=self.temp_agents_dir)
@@ -354,8 +368,8 @@ class TestAgentCore:
             
         except RuntimeError as e:
             if "Docker daemon" in str(e):
-                pytest.skip("Docker daemon not available")
+                pytest.fail("Docker daemon not available")
             raise
         except Exception as e:
-            pytest.skip(f"Cleanup test skipped: {e}")
+            pytest.fail(f"Cleanup test skipped: {e}")
 
