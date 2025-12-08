@@ -1,112 +1,47 @@
-# LiteLLM Proxy Configuration Template
-# Copy this file to config.yaml and customize for your needs
+# LLM Model Cost Configuration
+# This config file defines cost rates per token for different models
+# Used for cost calculation when token usage is available
 
-model_list:
+models:
   # OpenAI Models
-  - model_name: gpt-4
-    litellm_params:
-      model: openai/gpt-4
-    model_info:
-      input_cost_per_token: 0.00003
-      output_cost_per_token: 0.00006
+  - model_name: gpt-5
+    input_cost_per_token: 0.00000125
+    output_cost_per_token: 0.00001
   
   - model_name: gpt-4-turbo
-    litellm_params:
-      model: openai/gpt-4-turbo-preview
-    model_info:
-      input_cost_per_token: 0.00001
-      output_cost_per_token: 0.00003
+    input_cost_per_token: 0.00001
+    output_cost_per_token: 0.00003
 
   - model_name: gpt-4o
-    litellm_params:
-      model: openai/gpt-4o
-      api_base: os.environ/AZURE_API_BASE
-    model_info:
-      input_cost_per_token: 0.00001
-      output_cost_per_token: 0.00003
+    input_cost_per_token: 0.000005
+    output_cost_per_token: 0.000015
   
   - model_name: gpt-3.5-turbo
-    litellm_params:
-      model: openai/gpt-3.5-turbo
-    model_info:
-      input_cost_per_token: 0.0000015
-      output_cost_per_token: 0.000002
+    input_cost_per_token: 0.0000015
+    output_cost_per_token: 0.000002
   
   # Anthropic Models
-  - model_name: claude-3-opus
-    litellm_params:
-      model: anthropic/claude-3-opus-20240229
-    model_info:
-      input_cost_per_token: 0.000015
-      output_cost_per_token: 0.000075
+  - model_name: claude-sonnet-4-5-20250929
+    input_cost_per_token: 0.000003
+    output_cost_per_token: 0.000015
+  
+  - model_name: claude-sonnet-4-20250514
+    input_cost_per_token: 0.000003
+    output_cost_per_token: 0.000015
   
   - model_name: claude-3-sonnet
-    litellm_params:
-      model: anthropic/claude-3-sonnet-20240229
-    model_info:
-      input_cost_per_token: 0.000003
-      output_cost_per_token: 0.000015
+    input_cost_per_token: 0.000003
+    output_cost_per_token: 0.000015
   
   - model_name: claude-3-haiku
-    litellm_params:
-      model: anthropic/claude-3-haiku-20240307
-    model_info:
-      input_cost_per_token: 0.00000025
-      output_cost_per_token: 0.00000125
+    input_cost_per_token: 0.00000025
+    output_cost_per_token: 0.00000125
   
   # Google Models
-  - model_name: gemini-pro
-    litellm_params:
-      model: gemini/gemini-pro
-    model_info:
-      input_cost_per_token: 0.0000005
-      output_cost_per_token: 0.0000015
+  - model_name: gemini-2.5-flash
+    input_cost_per_token: 0.000000125
+    output_cost_per_token: 0.0000005
   
   - model_name: gemini-ultra
-    litellm_params:
-      model: gemini/gemini-ultra
-    model_info:
-      input_cost_per_token: 0.00000125
-      output_cost_per_token: 0.000005
-
-# General Settings
-general_settings:
-  # Master key for proxy authentication (change this!)
-  # master_key: "sk-1234_for_testing_kk"
-  
-  # Optional: Database URL for storing logs and costs
-  # database_url: "postgresql://user:password@localhost/litellm"
-  
-  # Optional: Enable/disable features
-  # enable_pre_call_checks: true
-  # enable_post_call_metrics: true
-
-# LiteLLM Settings
-litellm_settings:
-  # Callbacks for logging (optional)
-  # success_callback: ["postgres", "s3"]
-  # failure_callback: ["postgres"]
-  
-  # Set to true for verbose logging
-  # set_verbose: false
-
-# Optional: Load Balancing
-# router_settings:
-#   # Enable load balancing across multiple deployments
-#   enable_load_balancing: true
-#   
-#   # Retry configuration
-#   num_retries: 3
-#   timeout: 60
-#   
-#   # Fallback models
-#   fallbacks:
-#     - ["gpt-4", "gpt-3.5-turbo"]
-#     - ["claude-3-opus", "claude-3-sonnet"]
-
-# Optional: Rate Limiting
-# rate_limit_settings:
-#   # Rate limit per API key
-#   tpm_limit: 1000000  # Tokens per minute
-#   rpm_limit: 10000    # Requests per minute
-
+    input_cost_per_token: 0.00000125
+    output_cost_per_token: 0.000005

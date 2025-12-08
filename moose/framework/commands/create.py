@@ -100,12 +100,12 @@ __all__ = ['app', 'workflow', 'WorkflowState']
             logger.error(f"Failed to create workflow file: {e}")
             raise
     
-    def create_litellm_config(self, project_dir):
-        """Create LiteLLM config.yaml file in project directory."""
+    def create_llm_config(self, project_dir):
+        """Create LLM config.yaml file in project directory."""
         logger = get_core_logger()
         
         # Get config file name from environment variable, default to config.yaml
-        config_name = os.getenv("MOOSE_LITELLM_CONFIG_NAME", "config.yaml")
+        config_name = os.getenv("MOOSE_LLM_CONFIG_NAME", "config.yaml")
         config_path = project_dir / config_name
         
         try:
@@ -119,20 +119,20 @@ __all__ = ['app', 'workflow', 'WorkflowState']
                     config_content = f.read()
             else:
                 # Generate default config if template doesn't exist
-                from framework.llm_core.config import ProxyConfig
-                config_obj = ProxyConfig()
+                from framework.llm_core.config import ModelConfig
+                config_obj = ModelConfig()
                 config_obj.save_template(config_path)
-                logger.info(f"Created LiteLLM config file: {config_path}")
+                logger.info(f"Created LLM config file: {config_path}")
                 return str(config_path)
             
             # Write config file
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(config_content)
             
-            logger.info(f"Created LiteLLM config file: {config_path}")
+            logger.info(f"Created LLM config file: {config_path}")
             return str(config_path)
         except Exception as e:
-            logger.error(f"Failed to create LiteLLM config file: {e}")
+            logger.error(f"Failed to create LLM config file: {e}")
             raise
     
     def run(self, args):
@@ -195,8 +195,8 @@ __all__ = ['app', 'workflow', 'WorkflowState']
             workflow_path = self.create_workflow_file(project_dir)
             proj_logger.info(f"Created workflow file: {workflow_path}")
             
-            litellm_config_path = self.create_litellm_config(project_dir)
-            proj_logger.info(f"Created LiteLLM config: {litellm_config_path}")
+            llm_config_path = self.create_llm_config(project_dir)
+            proj_logger.info(f"Created LLM config: {llm_config_path}")
             
             proj_logger.info(f"Project '{project_name}' created successfully!")
             proj_logger.info(f"Project location: {project_dir}")

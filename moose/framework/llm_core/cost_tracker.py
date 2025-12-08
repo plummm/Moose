@@ -42,7 +42,7 @@ class CostTracker:
         Args:
             model: Model name used
             cost: Cost in USD
-            tokens: Token usage dictionary (prompt_tokens, completion_tokens, total_tokens)
+            tokens: Token usage dictionary (input_tokens, output_tokens, total_tokens)
             request_id: Optional request identifier
             metadata: Optional additional metadata
         """

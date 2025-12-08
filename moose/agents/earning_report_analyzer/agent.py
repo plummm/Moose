@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Union
 from agents import BaseAgent
-from framework.llm_core import LLMClient
+from framework.llm_core import LLMClient, extract_pdf_text
 
 
 class EarningReportAnalyzer(BaseAgent):
@@ -97,61 +97,38 @@ Earning Report:
         
         # Get LLM analysis
         try:
-            if file_path and file_path.suffix.lower() == '.pdf':
-                # Use direct PDF upload for PDF files
-                self.logger.info(f"Sending PDF file directly to LLM: {file_path}")
-                # Create prompt without the report_content placeholder since file is attached
-                prompt_text = """You are a financial analyst expert. Analyze the attached earning report PDF and provide a comprehensive analysis.
-
-Please extract and analyze:
-1. Key Financial Metrics:
-   - Revenue (total and by segment if available)
-   - Net income/profit
-   - Earnings per share (EPS)
-   - Growth rates (YoY, QoQ)
-   
-2. Performance Trends:
-   - Revenue trends
-   - Profitability trends
-   - Market position changes
-   
-3. Management Insights:
-   - Key highlights from management
-   - Strategic initiatives
-   - Guidance or outlook
-   
-4. Risk Factors:
-   - Potential concerns
-   - Market challenges
-   - Competitive pressures
-
-Format your response as a structured JSON object with the following keys:
-- summary: Brief executive summary
-- financial_metrics: Object with key metrics
-- trends: Array of trend observations
-- management_insights: Array of key insights
-- risk_factors: Array of identified risks
-- overall_assessment: Overall assessment and rating"""
-                
-                response = self.llm_client.send_message_with_file(
-                    message=prompt_text,
-                    file_path=file_path,
-                    system_message="You are an expert financial analyst. Provide accurate, detailed analysis of earning reports."
-                )
-            else:
-                # Use text-based analysis for text content
-                if not report_content:
-                    # Read text file if needed
-                    if file_path:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            report_content = f.read()
-                
-                prompt = self.analysis_prompt.format(report_content=report_content)
-                self.logger.info("Sending report text to LLM for analysis...")
-                response = self.llm_client.send_message(
-                    message=prompt,
-                    system_message="You are an expert financial analyst. Provide accurate, detailed analysis of earning reports."
-                )
+            # Extract content from file if needed
+            if file_path and not report_content:
+                if file_path.suffix.lower() == '.pdf':
+                    # Extract text from PDF
+                    self.logger.info(f"Extracting text from PDF: {file_path}")
+                    try:
+                        report_content = extract_pdf_text(file_path)
+                        self.logger.info(f"Extracted {len(report_content)} characters from PDF")
+                    except Exception as e:
+                        self.logger.error(f"Failed to extract text from PDF: {e}")
+                        return {
+                            "status": "error",
+                            "error": f"Failed to extract text from PDF: {e}"
+                        }
+                else:
+                    # Read text file
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        report_content = f.read()
+            
+            if not report_content:
+                return {
+                    "status": "error",
+                    "error": "No report content available to analyze"
+                }
+            
+            # Use text-based analysis
+            prompt = self.analysis_prompt.format(report_content=report_content)
+            self.logger.info("Sending report text to LLM for analysis...")
+            response = self.llm_client.send_message(
+                message=prompt,
+                system_message="You are an expert financial analyst. Provide accurate, detailed analysis of earning reports."
+            )
             
             analysis_text = response.content
             
@@ -184,8 +161,8 @@ Format your response as a structured JSON object with the following keys:
                 "analysis": analysis,
                 "model": response.model,
                 "usage": {
-                    "prompt_tokens": response.usage.get("prompt_tokens", 0) if response.usage else 0,
-                    "completion_tokens": response.usage.get("completion_tokens", 0) if response.usage else 0,
+                    "input_tokens": response.usage.get("input_tokens", 0) if response.usage else 0,
+                    "output_tokens": response.usage.get("output_tokens", 0) if response.usage else 0,
                     "total_tokens": response.usage.get("total_tokens", 0) if response.usage else 0
                 },
                 "cost": response.cost if hasattr(response, 'cost') and response.cost else 0.0

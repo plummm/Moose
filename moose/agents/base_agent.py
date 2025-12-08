@@ -189,15 +189,15 @@ class BaseAgent():
         # Add token cost information
         if token_cost:
             output["token_cost"] = {
-                "prompt_tokens": token_cost.get("prompt_tokens", 0),
-                "completion_tokens": token_cost.get("completion_tokens", 0),
+                "input_tokens": token_cost.get("input_tokens", 0),
+                "output_tokens": token_cost.get("output_tokens", 0),
                 "total_tokens": token_cost.get("total_tokens", 0),
                 "cost_usd": token_cost.get("cost", 0.0) or token_cost.get("cost_usd", 0.0)
             }
         else:
             output["token_cost"] = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
                 "total_tokens": 0,
                 "cost_usd": 0.0
             }
@@ -244,8 +244,8 @@ class BaseAgent():
         
         if usage or cost:
             token_cost = {
-                "prompt_tokens": usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0,
-                "completion_tokens": usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0,
+                "input_tokens": usage.get("input_tokens", 0) if isinstance(usage, dict) else 0,
+                "output_tokens": usage.get("output_tokens", 0) if isinstance(usage, dict) else 0,
                 "total_tokens": usage.get("total_tokens", 0) if isinstance(usage, dict) else 0,
                 "cost": cost or 0.0,
                 "cost_usd": cost or 0.0
