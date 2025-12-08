@@ -11,8 +11,14 @@ RUN apt-get update && apt-get install -y \\
     && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-# Copy agent files
-COPY . /app
+# Install Moose framework
+# The build context should be the moose/ directory, so framework is at ./framework
+COPY framework /tmp/moose/framework
+COPY setup.py /tmp/moose/
+RUN pip install --no-cache-dir /tmp/moose && rm -rf /tmp/moose
+
+# Copy agent files (from agents/<agent_name>/)
+COPY agents/{agent_name} /app
 
 # Run setup script if it exists
 {% if has_setup_script %}

@@ -2,3 +2,4 @@ litellm[proxy]
 docker
 pytest
 pytest-cov
+flask

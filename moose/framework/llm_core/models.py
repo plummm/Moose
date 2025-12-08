@@ -1,7 +1,7 @@
 """Data models for LLM interactions."""
 
 from enum import Enum
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from dataclasses import dataclass
 
 
@@ -17,7 +17,7 @@ class MessageRole(str, Enum):
 class Message:
     """Represents a message in a conversation."""
     role: MessageRole
-    content: str
+    content: Union[str, List[Dict[str, Any]]]  # Can be text or list of content blocks (for multimodal)
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None

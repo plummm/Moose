@@ -42,6 +42,9 @@ class DockerfileGenerator:
         has_setup_script = (agent_path / "setup.sh").exists()
         has_requirements = (agent_path / "requirements.txt").exists()
         
+        # Get agent name from config or path
+        agent_name = config.get("name") or agent_path.name
+        
         # Generate Dockerfile content
         dockerfile_content = self._render_template(
             template=template,
@@ -49,7 +52,8 @@ class DockerfileGenerator:
             system_packages=system_packages,
             entry_point=entry_point,
             has_setup_script=has_setup_script,
-            has_requirements=has_requirements
+            has_requirements=has_requirements,
+            agent_name=agent_name
         )
         
         # Write Dockerfile
@@ -91,8 +95,14 @@ RUN apt-get update && apt-get install -y \\
     && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-# Copy agent files
-COPY . /app
+# Install Moose framework
+# The build context should be the moose/ directory, so framework is at ./framework
+COPY framework /tmp/moose/framework
+COPY setup.py /tmp/moose/
+RUN pip install --no-cache-dir /tmp/moose && rm -rf /tmp/moose
+
+# Copy agent files (from agents/<agent_name>/)
+COPY agents/{agent_name} /app
 
 # Run setup script if it exists
 {% if has_setup_script %}
@@ -115,7 +125,8 @@ CMD ["python", "{entry_point}"]
         system_packages: bool,
         entry_point: str,
         has_setup_script: bool,
-        has_requirements: bool
+        has_requirements: bool,
+        agent_name: str
     ) -> str:
         """Render template with values."""
         import re
@@ -176,6 +187,9 @@ CMD ["python", "{entry_point}"]
         
         # Replace entry point
         content = content.replace("{entry_point}", entry_point)
+        
+        # Replace agent name
+        content = content.replace("{agent_name}", agent_name)
         
         return content
 
