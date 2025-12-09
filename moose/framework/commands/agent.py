@@ -154,7 +154,7 @@ class AgentCommand:
                 port = config["ports"][0].get("host", config["ports"][0].get("container", 8000))
             
             # List endpoints
-            endpoints_info = ["/health", ""]
+            endpoints_info = ["/health"]
             if http_config.get("endpoints"):
                 for ep in http_config["endpoints"]:
                     endpoints_info.append(f"{ep.get('path')}")

@@ -33,6 +33,12 @@
     "max_retrieval_depth": 1,
     "xpath": "/html/body/div[3]"
   },
+  "llm_config": {
+    "model": "gpt-5",
+    "temperature": 0.7,
+    "kwargs": {}
+  },
+  "use_langgraph": true,
   "mode": "http",
   "http_server": {
     "port": 3500,
@@ -41,7 +47,7 @@
       {
         "path": "/start",
         "method": "GET",
-        "handler": "process",
+        "handler": "scrape",
         "description": "Start scraping news from configured URL",
         "auth_required": false
       }

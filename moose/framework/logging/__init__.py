@@ -142,6 +142,8 @@ def get_core_logger():
     Get the core logger instance.
     """
     global _logger_instance
+    if _logger_instance is None:
+        init_core_logger()
     return _logger_instance
 
 def update_core_logger(log_file=None, debug=None):

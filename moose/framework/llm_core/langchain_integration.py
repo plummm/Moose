@@ -261,30 +261,10 @@ class LangChainLLM:
         Returns:
             Cost in USD, or None if unavailable
         """
-        # First, try to extract cost from response metadata
-        if hasattr(response, 'response_metadata'):
-            metadata = response.response_metadata
-            if metadata:
-                # Check various possible cost fields
-                cost = metadata.get('cost') or metadata.get('response_cost') or metadata.get('cost_usd')
-                if cost is not None:
-                    return float(cost)
-        
-        # Try direct attributes
-        if hasattr(response, 'cost'):
-            cost = response.cost
-            if cost is not None:
-                return float(cost)
-        if hasattr(response, 'response_cost'):
-            cost = response.response_cost
-            if cost is not None:
-                return float(cost)
-        
-        # If cost not found in response, calculate from token usage
-        if usage:
-            calculated_cost = self._calculate_cost_from_usage(usage)
-            if calculated_cost is not None:
-                return calculated_cost
+        if hasattr(response, 'usage_metadata'):
+            usage = response.usage_metadata
+            if usage:
+                return self._calculate_cost_from_usage(usage)
         
         return None
     
