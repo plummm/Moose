@@ -1,5 +1,6 @@
 """Registry for tracking running agent containers."""
 
+from pathlib import Path
 from typing import Dict, Set, Optional
 try:
     from moose.framework.logging import get_core_logger
@@ -129,4 +130,73 @@ class AgentRegistry:
             Set of project IDs
         """
         return set(self._project_containers.keys())
+
+    def generate_entry_py(self, agent_path: Path, entry_point: str, entry_class: str = None) -> None:
+        """Generate entry.py file for the agent."""
+        if entry_point.endswith(".py"):
+            entry_point = entry_point[:-3]
+        
+        code = f"""import os
+import json
+import sys
+import {entry_point}
+
+if __name__ == "__main__":
+    debug = os.getenv("MOOSE_AGENT_DEBUG", "false").lower() in ("true", "1", "yes", "on")
+    
+    with open("./agent_config.json", 'r', encoding='utf-8') as f:
+        config = json.load(f)
+        
+    mode = config.get("mode")
+    if mode == "http":
+        port = config["http_server"].get("port", 8000)
+    if mode == "file":
+        watch_dir = config["file"].get("watch_dir", "/project/agent_io")
+"""
+
+        if entry_class is not None and entry_class != "":
+            code += f"""
+    from {entry_point} import {entry_class}
+    agent = {entry_class}(config_path="./agent_config.json", debug=debug)
+    
+    if mode == "http":
+        agent.run(mode="http", port=port)
+    elif mode == "stdin":
+        agent.run(mode="stdin")
+    elif mode == "file":
+        agent.run(mode="file", watch_dir=watch_dir)
+    else:
+        print("Unknown mode: " + mode, file=sys.stderr)
+        sys.exit(1)"""
+        else:
+            code += f"""
+    for name in dir({entry_point}):
+        obj = getattr({entry_point}, name)
+        if (isinstance(obj, type) and 
+            hasattr(obj, '__bases__') and
+            any('BaseAgent' in str(base) for base in obj.__bases__)):
+            agent_class = obj
+            break
+
+    if not agent_class:
+        print("Could not find agent class in agent module")
+        sys.exit(1)
+
+    agent = agent_class(config_path="./agent_config.json", debug=debug)
+    
+    if mode == "http":
+        agent.run(mode="http", port=port)
+    elif mode == "stdin":
+        agent.run(mode="stdin")
+    elif mode == "file":
+        agent.run(mode="file", watch_dir=watch_dir)
+    else:
+        print("Unknown mode: " + mode, file=sys.stderr)
+        sys.exit(1)"""
+
+        with open(agent_path / "entry.py", 'w') as f:
+            f.write(code.format(entry_point=entry_point, entry_class=entry_class))
+
+        return
+    
 

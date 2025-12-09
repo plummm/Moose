@@ -56,6 +56,8 @@ class BaseAgent():
         """
         self.logger = get_logger(name=self.name, label=f"[agent:{self.name}]", debug=debug)
         
+        if type(config_path) == str:
+            config_path = Path(config_path)
         self.config_path = config_path or Path("agent_config.json")
         self.config = self.load_config()
         

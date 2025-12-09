@@ -124,13 +124,18 @@ class AgentCommand:
             
             # Find agent class (look for class that extends BaseAgent)
             agent_class = None
-            for name in dir(agent_module):
-                obj = getattr(agent_module, name)
-                if (isinstance(obj, type) and 
-                    hasattr(obj, '__bases__') and
-                    any('BaseAgent' in str(base) for base in obj.__bases__)):
-                    agent_class = obj
-                    break
+            entry_class = config.get("entry_class", None)
+            if entry_class is not None and entry_class != "":
+                if hasattr(agent_module, entry_class):
+                    agent_class = getattr(agent_module, entry_class)
+            else:
+                for name in dir(agent_module):
+                    obj = getattr(agent_module, name)
+                    if (isinstance(obj, type) and 
+                        hasattr(obj, '__bases__') and
+                        any('BaseAgent' in str(base) for base in obj.__bases__)):
+                        agent_class = obj
+                        break
             
             if not agent_class:
                 logger.error("Could not find agent class in agent module")
@@ -149,10 +154,10 @@ class AgentCommand:
                 port = config["ports"][0].get("host", config["ports"][0].get("container", 8000))
             
             # List endpoints
-            endpoints_info = ["/health", "/process"]
+            endpoints_info = ["/health", ""]
             if http_config.get("endpoints"):
                 for ep in http_config["endpoints"]:
-                    endpoints_info.append(f"{ep.get('method', 'POST')} {ep.get('path')}")
+                    endpoints_info.append(f"{ep.get('path')}")
             
             # Run agent in HTTP mode
             logger.info(f"Starting agent HTTP server on port {port}...")
@@ -259,8 +264,8 @@ class AgentCommand:
             logger.info(f"Health check: http://localhost:{container_port}/health")
             logger.info(f"Process endpoint: http://localhost:{container_port}/process")
             logger.info("=" * 60)
-            logger.info("To view logs: docker logs <container_id>")
-            logger.info("To stop: docker stop <container_id>")
+            logger.info(f"To view logs: docker logs {container_id[:12]}")
+            logger.info(f"To stop: docker stop {container_id[:12]}")
         
         except Exception as e:
             logger.error(f"Failed to deploy agent: {e}")

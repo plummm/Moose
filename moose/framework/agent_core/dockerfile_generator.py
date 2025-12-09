@@ -57,7 +57,7 @@ class DockerfileGenerator:
             entry_point=entry_point,
             has_setup_script=has_setup_script,
             has_requirements=has_requirements,
-            agent_name=agent_name
+            agent_name=agent_name,
         )
         
         # Write Dockerfile
@@ -120,7 +120,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 {% endif %}
 
 # Set entry point
-CMD ["python", "{entry_point}"]
+CMD ["python", "entry.py"]
 """
     
     def _render_template(
@@ -131,7 +131,7 @@ CMD ["python", "{entry_point}"]
         entry_point: str,
         has_setup_script: bool,
         has_requirements: bool,
-        agent_name: str
+        agent_name: str,
     ) -> str:
         """Render template with values."""
         import re
@@ -197,4 +197,3 @@ CMD ["python", "{entry_point}"]
         content = content.replace("{agent_name}", agent_name)
         
         return content
-

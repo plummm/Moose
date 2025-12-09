@@ -204,16 +204,22 @@ class ContainerManager:
         
         # Build image if needed
         image_name = self.build_agent_image(agent_name)
-        
+               
         # Get agent config
         config = self.agent_loader.load_agent_config(agent_name)
         agent_path = self.agent_loader.get_agent_path(agent_name)
         
+        # Generate entry.py file
+        self.registry.generate_entry_py(agent_path, config.get("entry_point", "agent.py"), config.get("entry_class", None))
+ 
         # Ensure network exists
         network_name = self.ensure_project_network(project_id)
         
         # Prepare container configuration
         container_name = f"{self.image_prefix}{agent_name}-{project_id}"
+        container_suffix_name = config.get("container_suffix_name", "")
+        if container_suffix_name != "":
+            container_name = f"{container_name}-{container_suffix_name}"
         
         # Environment variables
         env_vars = config.get("environment", {}).copy()
@@ -258,20 +264,35 @@ class ContainerManager:
             elif isinstance(port_config, (int, str)):
                 ports[str(port_config)] = port_config
         
+        # Delete old container if it exists
+        skip_create = False
+        try:
+            container = self.docker_client.containers.get(container_name)
+            if config.get("container_override", False):
+                container.stop(timeout=10)
+                container.remove()
+                self.logger.debug(f"Removed old container {container_name}")
+            else:
+                self.logger.warning(f"Container {container_name} already exists, skipping start")
+                skip_create = True
+        except NotFound:
+            pass
+        
         # Create and start container
         try:
-            container = self.docker_client.containers.create(
-                image=image_name,
-                name=container_name,
-                environment=env_vars,
-                volumes=volumes,
-                network=network_name,
-                ports=ports if ports else None,
-                mem_limit=mem_limit,
-                nano_cpus=int(float(cpu_limit) * 1e9) if cpu_limit else None,
-                detach=True,
-                auto_remove=False
-            )
+            if not skip_create:
+                container = self.docker_client.containers.create(
+                    image=image_name,
+                    name=container_name,
+                    environment=env_vars,
+                    volumes=volumes,
+                    network=network_name,
+                    ports=ports if ports else None,
+                    mem_limit=mem_limit,
+                    nano_cpus=int(float(cpu_limit) * 1e9) if cpu_limit else None,
+                    detach=True,
+                    auto_remove=False
+                )
             
             container.start()
             

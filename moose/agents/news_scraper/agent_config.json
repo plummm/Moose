@@ -4,6 +4,9 @@
   "version": "1.0.0",
   "python_version": "3.11",
   "entry_point": "agent.py",
+  "entry_class": "NewsScraper",
+  "container_suffix_name": "",
+  "container_override": true,
   "ports": [
     {"container": 3500, "host": 3500}
   ],
@@ -30,6 +33,7 @@
     "max_retrieval_depth": 1,
     "xpath": "/html/body/div[3]"
   },
+  "mode": "http",
   "http_server": {
     "port": 3500,
     "auth_password": "",
