@@ -114,16 +114,17 @@ class ContainerManager:
             self.dockerfile_generator.generate_dockerfile(agent_path, config)
         
         # Build image
-        # Use moose directory as build context so we can access framework
+        # Use project root as build context so we can access moose/ and setup.py
         # The agent_path is relative to moose/agents/<agent_name>
-        moose_dir = agent_path.parent.parent  # Go up from agents/<agent_name> to moose/
+        # Go up: agents/<agent_name> -> agents -> moose -> project root
+        project_root = agent_path.parent.parent.parent  # Go up from agents/<agent_name> to project root
         
         try:
             self.logger.info(f"Building Docker image: {image_name}")
             image, build_logs = self.docker_client.images.build(
-                path=str(moose_dir),
+                path=str(project_root),
                 tag=image_name,
-                dockerfile=str(agent_path.relative_to(moose_dir) / "Dockerfile"),
+                dockerfile=str(agent_path.relative_to(project_root) / "Dockerfile"),
                 rm=True,
                 forcerm=True
             )

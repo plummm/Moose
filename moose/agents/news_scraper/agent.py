@@ -441,15 +441,14 @@ if __name__ == "__main__":
     # Initialize and run agent
     agent = NewsScraper(debug=debug)
     
-    agent.process()
-    # if mode == "http":
-    #     agent.run(mode="http", port=port)
-    # elif mode == "stdin":
-    #     agent.run(mode="stdin")
-    # elif mode == "file":
-    #     watch_dir = os.getenv("MOOSE_AGENT_WATCH_DIR", "/project/agent_io")
-    #     agent.run(mode="file", watch_dir=watch_dir)
-    # else:
-    #     print(f"Unknown mode: {mode}", file=sys.stderr)
-    #    sys.exit(1)
+    if mode == "http":
+        agent.run(mode="http", port=port)
+    elif mode == "stdin":
+        agent.run(mode="stdin")
+    elif mode == "file":
+        watch_dir = os.getenv("MOOSE_AGENT_WATCH_DIR", "/project/agent_io")
+        agent.run(mode="file", watch_dir=watch_dir)
+    else:
+        print(f"Unknown mode: {mode}", file=sys.stderr)
+        sys.exit(1)
 

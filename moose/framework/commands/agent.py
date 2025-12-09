@@ -54,6 +54,11 @@ class AgentCommand:
             help='Host port for agent HTTP server (default: from agent config)'
         )
         deploy_parser.add_argument(
+            '--force-rebuild',
+            action='store_true',
+            help='Force rebuild the agent dockerimage'
+        )
+        deploy_parser.add_argument(
             '--debug',
             action='store_true',
             help='Enable debug logging (default: INFO level)'
@@ -79,7 +84,7 @@ class AgentCommand:
         if args.subcommand == 'debug':
             self._run_debug(args.name, args.debug)
         elif args.subcommand == 'deploy':
-            self._run_deploy(args.name, args.port, args.debug)
+            self._run_deploy(args.name, args.port, args.force_rebuild, args.debug)
         else:
             logger.error(f"Unknown subcommand: {args.subcommand}")
             sys.exit(1)
@@ -168,7 +173,7 @@ class AgentCommand:
             logger.error(traceback.format_exc())
             sys.exit(1)
     
-    def _run_deploy(self, agent_name: str, port: Optional[int], debug: bool):
+    def _run_deploy(self, agent_name: str, port: Optional[int], force_rebuild: bool, debug: bool):
         """Deploy agent in Docker container."""
         logger = get_core_logger()
         
@@ -219,7 +224,7 @@ class AgentCommand:
             # Build image
             logger.info("Building Docker image...")
             try:
-                image_name = manager.build_agent_image(agent_name, force_rebuild=False)
+                image_name = manager.build_agent_image(agent_name, force_rebuild=force_rebuild)
                 logger.info(f"Image built: {image_name}")
             except Exception as e:
                 logger.error(f"Failed to build image: {e}")

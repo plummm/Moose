@@ -5,14 +5,17 @@
   "python_version": "3.11",
   "entry_point": "agent.py",
   "ports": [
-    {"container": 8000, "host": 8000}
+    {"container": 3500, "host": 3500}
   ],
   "environment": {
-    "SCRAPER_DATA_DIR": "/data/scraper/finviz.com"
+    "SCRAPER_DATA_DIR": "/data/scraper/finviz.com",
+    "MOOSE_AGENT_DEBUG": "true",
+    "MOOSE_AGENT_MODE": "http",
+    "MOOSE_AGENT_PORT": "3500"
   },
   "volumes": [
     {
-      "host": "${SCRAPER_DATA_DIR}",
+      "host": "/data/scraper/finviz.com",
       "container": "/data/scraper/finviz.com"
     }
   ],
