@@ -4,12 +4,21 @@ import os
 import uuid
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
-from framework.llm_core.models import Message, MessageRole, LLMResponse
-from framework.llm_core.providers import LLMProvider, get_provider
-from framework.llm_core.cost_tracker import CostTracker
-from framework.llm_core.langchain_integration import LangChainLLM
-from framework.llm_core.config import ModelConfig
-from framework.logging import get_core_logger
+try:
+    from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
+    from moose.framework.llm_core.providers import LLMProvider, get_provider
+    from moose.framework.llm_core.cost_tracker import CostTracker
+    from moose.framework.llm_core.langchain_integration import LangChainLLM
+    from moose.framework.llm_core.config import ModelConfig
+    from moose.framework.logging import get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.llm_core.models import Message, MessageRole, LLMResponse
+    from framework.llm_core.providers import LLMProvider, get_provider
+    from framework.llm_core.cost_tracker import CostTracker
+    from framework.llm_core.langchain_integration import LangChainLLM
+    from framework.llm_core.config import ModelConfig
+    from framework.logging import get_core_logger
 
 
 class LLMClient:

@@ -3,7 +3,11 @@ import os
 import json
 import re
 from pathlib import Path
-from framework.logging import setup_project_logger, init_core_logger, get_core_logger
+try:
+    from moose.framework.logging import setup_project_logger, init_core_logger, get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import setup_project_logger, init_core_logger, get_core_logger
 
 
 class CreateCommand:

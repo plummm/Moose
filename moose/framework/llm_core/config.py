@@ -3,7 +3,11 @@
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from framework.logging import get_core_logger
+try:
+    from moose.framework.logging import get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import get_core_logger
 
 try:
     import yaml

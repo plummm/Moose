@@ -5,7 +5,11 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
-from framework.logging import get_core_logger
+try:
+    from moose.framework.logging import get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import get_core_logger
 
 
 class CostTracker:

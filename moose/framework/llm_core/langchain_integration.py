@@ -7,10 +7,17 @@ This module provides a unified interface to LangChain using native provider clas
 """
 
 from typing import List, Optional, Dict, Any, Union, Iterator
-from framework.llm_core.models import Message, MessageRole, LLMResponse
-from framework.llm_core.providers import LLMProvider, get_provider
-from framework.llm_core.config import ModelConfig
-from framework.logging import get_core_logger
+try:
+    from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
+    from moose.framework.llm_core.providers import LLMProvider, get_provider
+    from moose.framework.llm_core.config import ModelConfig
+    from moose.framework.logging import get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.llm_core.models import Message, MessageRole, LLMResponse
+    from framework.llm_core.providers import LLMProvider, get_provider
+    from framework.llm_core.config import ModelConfig
+    from framework.logging import get_core_logger
 
 try:
     from langchain_openai import ChatOpenAI

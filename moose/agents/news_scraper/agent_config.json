@@ -1,0 +1,44 @@
+{
+  "name": "news_scraper",
+  "description": "Generic news scraper that extracts text content from web pages",
+  "version": "1.0.0",
+  "python_version": "3.11",
+  "entry_point": "agent.py",
+  "ports": [
+    {"container": 8000, "host": 8000}
+  ],
+  "environment": {
+    "SCRAPER_DATA_DIR": "/data/scraper/finviz.com"
+  },
+  "volumes": [
+    {
+      "host": "${SCRAPER_DATA_DIR}",
+      "container": "/data/scraper/finviz.com"
+    }
+  ],
+  "resources": {
+    "memory": "512m",
+    "cpus": "1.0"
+  },
+  "scraper_config": {
+    "start_url": "https://finviz.com/news.ashx",
+    "rate_limit": 60,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "max_retrieval_depth": 1,
+    "xpath": "/html/body/div[3]"
+  },
+  "http_server": {
+    "port": 3500,
+    "auth_password": "",
+    "endpoints": [
+      {
+        "path": "/start",
+        "method": "GET",
+        "handler": "process",
+        "description": "Start scraping news from configured URL",
+        "auth_required": false
+      }
+    ]
+  }
+}
+

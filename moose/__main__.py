@@ -30,7 +30,11 @@ def create_parser():
     for cmd in commands:
         try:
             class_name = "{}{}Command".format(cmd[0].upper(), cmd[1:])
-            module = importlib.import_module("framework.commands.{}".format(cmd))
+            # Try absolute import first (when installed as package), then fallback to relative
+            try:
+                module = importlib.import_module("moose.framework.commands.{}".format(cmd))
+            except ImportError:
+                module = importlib.import_module("framework.commands.{}".format(cmd))
             new_class = getattr(module, class_name)
             A = new_class()
             parser_cmd = A.custom_subparser(subparser, cmd)

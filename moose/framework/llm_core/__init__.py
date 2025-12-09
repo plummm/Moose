@@ -1,14 +1,25 @@
 """Universal LLM interaction layer for Moose Framework."""
 
-from framework.llm_core.client import LLMClient
-from framework.llm_core.models import Message, MessageRole, LLMResponse
-from framework.llm_core.providers import LLMProvider, get_provider
-from framework.llm_core.cost_tracker import CostTracker
-from framework.llm_core.config import ModelConfig
+try:
+    from moose.framework.llm_core.client import LLMClient
+    from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
+    from moose.framework.llm_core.providers import LLMProvider, get_provider
+    from moose.framework.llm_core.cost_tracker import CostTracker
+    from moose.framework.llm_core.config import ModelConfig
+except ImportError:
+    # Fallback for development mode
+    from framework.llm_core.client import LLMClient
+    from framework.llm_core.models import Message, MessageRole, LLMResponse
+    from framework.llm_core.providers import LLMProvider, get_provider
+    from framework.llm_core.cost_tracker import CostTracker
+    from framework.llm_core.config import ModelConfig
 
 # LangChain integration
 try:
-    from framework.llm_core.langchain_integration import LangChainLLM
+    try:
+        from moose.framework.llm_core.langchain_integration import LangChainLLM
+    except ImportError:
+        from framework.llm_core.langchain_integration import LangChainLLM
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LangChainLLM = None
@@ -16,7 +27,10 @@ except ImportError:
 
 # PDF utilities
 try:
-    from framework.llm_core.pdf_utils import extract_pdf_text
+    try:
+        from moose.framework.llm_core.pdf_utils import extract_pdf_text
+    except ImportError:
+        from framework.llm_core.pdf_utils import extract_pdf_text
     PDF_UTILS_AVAILABLE = True
 except ImportError:
     extract_pdf_text = None

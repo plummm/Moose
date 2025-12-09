@@ -7,8 +7,13 @@ financial metrics, and trends.
 import os
 from pathlib import Path
 from typing import Dict, Any, Union
-from agents import BaseAgent
-from framework.llm_core import LLMClient, extract_pdf_text
+try:
+    from moose.agents import BaseAgent
+    from moose.framework.llm_core import LLMClient, extract_pdf_text
+except ImportError:
+    # Fallback for development mode
+    from agents import BaseAgent
+    from framework.llm_core import LLMClient, extract_pdf_text
 
 
 class EarningReportAnalyzer(BaseAgent):

@@ -18,14 +18,13 @@ if requirements_file.exists():
     ]
 
 setup(
-    name="moose-framework",
+    name="moose",
     version="0.1.0",
     description="A modular agent framework built on LangGraph",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="Moose Team",
-    packages=find_packages(where="moose"),
-    package_dir={"": "moose"},
+    author="Xiaochen Zou",
+    packages=find_packages(exclude=["moose/tests/", "moose/agents/"]),
     python_requires=">=3.10",
     install_requires=requirements,
     extras_require={

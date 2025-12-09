@@ -5,11 +5,16 @@ import sys
 import signal
 import time
 import uuid
+import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 from abc import abstractmethod
-from framework.logging import get_logger
+try:
+    from moose.framework.logging import get_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import get_logger
 
 try:
     from flask import Flask, request, jsonify
@@ -17,6 +22,16 @@ try:
 except ImportError:
     FLASK_AVAILABLE = False
     Flask = None
+
+try:
+    from moose.framework.agent_core.agent_web_ui import generate_homepage_html, get_endpoints_list
+except ImportError:
+    # Fallback for development mode
+    try:
+        from framework.agent_core.agent_web_ui import generate_homepage_html, get_endpoints_list
+    except ImportError:
+        generate_homepage_html = None
+        get_endpoints_list = None
 
 
 class BaseAgent():
@@ -39,14 +54,14 @@ class BaseAgent():
             config_path: Path to agent_config.json. If None, looks for it in current directory.
             debug: Enable debug logging
         """
+        self.logger = get_logger(name=self.name, label=f"[agent:{self.name}]", debug=debug)
+        
         self.config_path = config_path or Path("agent_config.json")
         self.config = self.load_config()
         
         # Agent metadata from config
         self.name = self.config.get("name", "unknown_agent")
         self.description = self.config.get("description", "")
-        
-        self.logger = get_logger(name=self.name, label=f"[agent:{self.name}]", debug=debug)
         
         # Communication mode
         self.running = False
@@ -55,6 +70,19 @@ class BaseAgent():
         # HTTP server (if using Flask)
         self.app = None
         self.http_server = None
+        
+        # HTTP server configuration
+        http_config = self.config.get("http_server", {})
+        self.http_port = http_config.get("port") or self._get_default_http_port()
+        self.http_auth_password = http_config.get("auth_password", "")
+        self.http_endpoints = http_config.get("endpoints", [])
+        
+        # Logging storage for web UI
+        self._log_buffer: List[Dict[str, Any]] = []
+        self._max_log_entries = 1000
+        
+        # Add custom log handler to capture logs for web UI
+        self._setup_log_capture()
         
         # Token cost tracking
         self._current_token_cost = None
@@ -65,6 +93,36 @@ class BaseAgent():
         signal.signal(signal.SIGINT, self._signal_handler)
         
         self.logger.info(f"Initialized agent: {self.name} - {self.description}")
+    
+    def _setup_log_capture(self):
+        """Setup custom log handler to capture logs for web UI."""
+        class LogBufferHandler(logging.Handler):
+            def __init__(self, buffer, max_entries):
+                super().__init__()
+                self.buffer = buffer
+                self.max_entries = max_entries
+            
+            def emit(self, record):
+                try:
+                    log_entry = {
+                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'level': record.levelname.lower(),
+                        'message': self.format(record)
+                    }
+                    self.buffer.append(log_entry)
+                    # Keep only last N entries
+                    if len(self.buffer) > self.max_entries:
+                        self.buffer.pop(0)
+                except Exception:
+                    pass  # Don't let logging errors break the app
+        
+        # Add handler to the underlying logger
+        if hasattr(self.logger, 'logger'):
+            handler = LogBufferHandler(self._log_buffer, self._max_log_entries)
+            handler.setLevel(logging.DEBUG)
+            # Use simple format for web UI
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            self.logger.logger.addHandler(handler)
     
     def load_config(self) -> Dict[str, Any]:
         """
@@ -325,12 +383,104 @@ class BaseAgent():
                 processing_time_ms=processing_time_ms
             )
     
-    def run_http_server(self, port: int = 8000, host: str = "0.0.0.0"):
+    def _get_default_http_port(self) -> int:
+        """Get default HTTP port from config or return 8000."""
+        if self.config.get("ports") and len(self.config["ports"]) > 0:
+            return self.config["ports"][0].get("host", self.config["ports"][0].get("container", 8000))
+        return 8000
+    
+    def _check_auth(self, request) -> bool:
+        """
+        Check authentication for request.
+        
+        Args:
+            request: Flask request object
+            
+        Returns:
+            True if authenticated or no auth required, False otherwise
+        """
+        if not self.http_auth_password:
+            return True  # No auth required
+        
+        # Check X-API-Key header
+        api_code = request.headers.get('X-auth-password')
+        if api_code == self.http_auth_password:
+            return True
+        
+        return False
+    
+    def _register_custom_endpoints(self):
+        """Register custom endpoints from config."""
+        if not self.http_endpoints:
+            return
+        
+        for endpoint_config in self.http_endpoints:
+            path = endpoint_config.get('path')
+            method = endpoint_config.get('method', 'POST').upper()
+            handler_name = endpoint_config.get('handler')
+            auth_required = endpoint_config.get('auth_required', bool(self.http_auth_password))
+            
+            if not path or not handler_name:
+                self.logger.warning(f"Invalid endpoint config: missing path or handler")
+                continue
+            
+            # Get handler method
+            if not hasattr(self, handler_name):
+                self.logger.warning(f"Handler method '{handler_name}' not found, skipping endpoint {path}")
+                continue
+            
+            handler_func = getattr(self, handler_name)
+            if not callable(handler_func):
+                self.logger.warning(f"'{handler_name}' is not callable, skipping endpoint {path}")
+                continue
+            
+            # Create route with proper closure
+            # Use default parameters to capture values in closure
+            def create_endpoint_wrapper(ep_path, ep_method, handler_func, requires_auth):
+                def endpoint_wrapper():
+                    # Check auth if required
+                    if requires_auth and not self._check_auth(request):
+                        return jsonify({
+                            "status": "error",
+                            "error": "Unauthorized"
+                        }), 401
+                    
+                    # Call handler with request data
+                    try:
+                        if ep_method in ['POST', 'PUT', 'PATCH']:
+                            data = request.get_json() or {}
+                        else:
+                            data = request.args.to_dict()
+                        
+                        # Call handler function
+                        result = handler_func(data)
+                        
+                        # Ensure result is a dict
+                        if not isinstance(result, dict):
+                            result = {"status": "success", "result": result}
+                        
+                        return jsonify(result)
+                    except Exception as e:
+                        self.logger.error(f"Error in endpoint {ep_path}: {e}", exc_info=True)
+                        return jsonify({
+                            "status": "error",
+                            "error": str(e)
+                        }), 500
+                
+                return endpoint_wrapper
+            
+            # Register the route
+            wrapper = create_endpoint_wrapper(path, method, handler_func, auth_required)
+            self.app.route(path, methods=[method])(wrapper)
+            
+            self.logger.info(f"Registered endpoint: {method} {path} -> {handler_name}")
+    
+    def run_http_server(self, port: Optional[int] = None, host: str = "0.0.0.0"):
         """
         Run agent as HTTP server.
         
         Args:
-            port: Port to listen on
+            port: Port to listen on (overrides config if provided)
             host: Host to bind to
         """
         if not FLASK_AVAILABLE:
@@ -338,9 +488,13 @@ class BaseAgent():
                 "Flask is required for HTTP mode. Install with: pip install flask"
             )
         
-        self.app = Flask(__name__)
+        # Use provided port or config port
+        server_port = port or self.http_port
+        
+        self.app = Flask(self.name)
         self.running = True
         
+        # Health check endpoint (no auth required)
         @self.app.route('/health', methods=['GET'])
         def health():
             """Health check endpoint."""
@@ -350,52 +504,42 @@ class BaseAgent():
                 "description": self.description
             })
         
-        @self.app.route('/process', methods=['POST'])
-        def process_endpoint():
-            """Process input data."""
-            try:
-                raw_data = request.get_json()
-                if raw_data is None:
-                    return jsonify({
-                        "status": "error",
-                        "error": "No JSON data provided"
-                    }), 400
-                
-                # Format input and process
-                formatted_input = self._format_input(raw_data)
-                formatted_output = self._process_with_formatting(formatted_input)
-                
-                return jsonify(formatted_output)
-            except Exception as e:
-                self.logger.error(f"Error processing request: {e}", exc_info=True)
+        # Homepage with web UI (no auth required)
+        @self.app.route('/', methods=['GET'])
+        def homepage():
+            """Agent dashboard homepage."""
+            if generate_homepage_html is None:
                 return jsonify({
                     "status": "error",
-                    "error": str(e)
+                    "error": "Web UI not available"
                 }), 500
-        
-        @self.app.route('/process', methods=['GET'])
-        def process_get():
-            """Process input from query parameters or body."""
-            raw_data = request.args.to_dict()
-            if not raw_data:
-                raw_data = request.get_json() or {}
             
-            try:
-                # Format input and process
-                formatted_input = self._format_input(raw_data)
-                formatted_output = self._process_with_formatting(formatted_input)
-                
-                return jsonify(formatted_output)
-            except Exception as e:
-                self.logger.error(f"Error processing request: {e}", exc_info=True)
-                return jsonify({
-                    "status": "error",
-                    "error": str(e)
-                }), 500
+            endpoints = get_endpoints_list(self) if get_endpoints_list else []
+            html = generate_homepage_html(
+                agent_name=self.name,
+                agent_description=self.description,
+                agent_version=self.config.get("version", "N/A"),
+                endpoints=endpoints,
+                http_port=server_port,
+                auth_enabled=bool(self.http_auth_password)
+            )
+            return html
         
-        self.logger.info(f"Starting HTTP server on {host}:{port}")
+        # Logs endpoint (no auth required)
+        @self.app.route('/logs', methods=['GET'])
+        def logs():
+            """Get agent logs for web UI."""
+            return jsonify({
+                "logs": self._log_buffer[-100:]  # Return last 100 entries
+            })
+        
+        # Register custom endpoints from config
+        self._register_custom_endpoints()
+        
+        auth_info = f" (auth: {'enabled' if self.http_auth_password else 'disabled'})"
+        self.logger.info(f"Starting HTTP server on {host}:{server_port}{auth_info}")
         try:
-            self.app.run(host=host, port=port, debug=False, use_reloader=False)
+            self.app.run(host=host, port=server_port, debug=False, use_reloader=False)
         except KeyboardInterrupt:
             self.logger.info("HTTP server stopped by user")
         finally:

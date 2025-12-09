@@ -1,5 +1,6 @@
 projects/
 .vscode/
+*.venv/
 .venv/
 venv/
 .env

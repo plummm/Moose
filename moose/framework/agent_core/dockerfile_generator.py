@@ -2,7 +2,11 @@
 
 from pathlib import Path
 from typing import Dict, Any, Optional
-from framework.logging import get_core_logger
+try:
+    from moose.framework.logging import get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import get_core_logger
 
 
 class DockerfileGenerator:

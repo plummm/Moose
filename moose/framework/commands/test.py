@@ -5,7 +5,11 @@ import sys
 import subprocess
 import os
 from pathlib import Path
-from framework.logging import init_core_logger, get_core_logger
+try:
+    from moose.framework.logging import init_core_logger, get_core_logger
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import init_core_logger, get_core_logger
 
 
 class TestCommand:

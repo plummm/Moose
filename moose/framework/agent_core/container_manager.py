@@ -3,10 +3,17 @@
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any
-from framework.logging import get_core_logger
-from framework.agent_core.agent_loader import AgentLoader
-from framework.agent_core.dockerfile_generator import DockerfileGenerator
-from framework.agent_core.agent_registry import AgentRegistry
+try:
+    from moose.framework.logging import get_core_logger
+    from moose.framework.agent_core.agent_loader import AgentLoader
+    from moose.framework.agent_core.dockerfile_generator import DockerfileGenerator
+    from moose.framework.agent_core.agent_registry import AgentRegistry
+except ImportError:
+    # Fallback for development mode
+    from framework.logging import get_core_logger
+    from framework.agent_core.agent_loader import AgentLoader
+    from framework.agent_core.dockerfile_generator import DockerfileGenerator
+    from framework.agent_core.agent_registry import AgentRegistry
 
 try:
     import docker
