@@ -114,7 +114,7 @@ class ModelConfig:
                     "model_name": "gpt-4-turbo",
                     "input_cost_per_token": 0.00001,
                     "output_cost_per_token": 0.00003
-                }
+                },
                 {
                     "model_name": "gpt-4",
                     "input_cost_per_token": 0.00003,
