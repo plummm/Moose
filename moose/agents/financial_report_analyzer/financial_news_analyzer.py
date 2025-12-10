@@ -1,4 +1,4 @@
-"""News Summarizer - LLM-based article summarization."""
+"""Financial News Analyzer - LLM-based financial news analysis."""
 
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -16,15 +16,17 @@ except ImportError:
         LLMClient = None
 
 
-class NewsSummarizer:
+class FinancialNewsAnalyzer:
     """
-    Summarizes news articles using LLM.
+    Analyzes financial news articles using LLM.
     
-    Provides structured summarization with:
-    - Title extraction
-    - Summary generation
-    - Key points extraction
-    - Metadata
+    Provides structured financial analysis with:
+    - High-level idea
+    - Covered companies
+    - Sentiment analysis
+    - Impact type assessment
+    - Confidence rating
+    - Trading insights
     """
     
     def __init__(
@@ -35,7 +37,7 @@ class NewsSummarizer:
         **llm_kwargs
     ):
         """
-        Initialize the news summarizer.
+        Initialize the financial news analyzer.
         
         Args:
             model: LLM model name (e.g., "gpt-4", "claude-3-opus-20240229")
@@ -59,20 +61,19 @@ class NewsSummarizer:
         )
         
         if self.logger:
-            self.logger.info(f"Initialized NewsSummarizer with model: {model}")
+            self.logger.info(f"Initialized FinancialNewsAnalyzer with model: {model}")
     
-    def summarize_article(
+    async def analyze_article(
         self,
         url: str,
         file_path: Optional[Path] = None
     ) -> Dict[str, Any]:
         """
-        Summarize an article using LLM.
+        Analyze a financial news article using LLM.
         
         Args:
             url: Article URL
-            file_path: Path to saved article file (if content not provided)
-            content: Article text content (if file_path not provided)
+            file_path: Path to saved article file
             
         Returns:
             Dictionary with financial analysis information:
@@ -82,17 +83,18 @@ class NewsSummarizer:
                 "title": str,
                 "high_level_idea": str,
                 "companies": List[str],
-                "sentiment": str ("positive", "negative", "neutral"),
-                "impact_type": str ("foundation_shaking" or "buy_the_dip"),
+                "sentiment": str ("bullish", "bearish", "neutral"),
+                "sentiment_rating": str (BL0-BL2, BR0-BR2, or null),
+                "impact_type": str ("foundation_changing", "strategic_shift", "short_term_catalyst", "neutral"),
                 "confidence": int (1-10),
                 "trading_insights": str,
-                "summarized_at": str (ISO format),
+                "analyzed_at": str (ISO format),
                 "model": str
             }
         """
         # Load content if not provided
         if file_path is None:
-            raise ValueError("Either file_path or content must be provided")
+            raise ValueError("file_path must be provided")
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -104,7 +106,7 @@ class NewsSummarizer:
                 "url": url,
                 "file_path": str(file_path) if file_path else None,
                 "error": f"Failed to read article: {e}",
-                "summarized_at": datetime.now().isoformat()
+                "analyzed_at": datetime.now().isoformat()
             }
         
         if not content:
@@ -112,15 +114,8 @@ class NewsSummarizer:
                 "url": url,
                 "file_path": str(file_path) if file_path else None,
                 "error": "Empty content",
-                "summarized_at": datetime.now().isoformat()
+                "analyzed_at": datetime.now().isoformat()
             }
-        
-        # Truncate content if too long (to avoid token limits)
-        max_chars = 10000  # Adjust based on model context window
-        if len(content) > max_chars:
-            content = content[:max_chars] + "\n\n[Content truncated...]"
-            if self.logger:
-                self.logger.debug(f"Truncated content to {max_chars} characters")
         
         # Create prompt for financial news analysis
         system_message = """You are a financial news analyst specializing in market-impact evaluation. 
@@ -153,14 +148,14 @@ Follow these rules:
         BR0: A short-term headwind that does not threaten the company's fundamentals. Often creates a dip-buying opportunity.
             - Earnings miss due to one-time expense. (e.g., Microsoft misses EPS due to restructuring charges; cloud revenue growth remains strong.)
             - Product delay but no change in demand outlook. (e.g., Take-two delays the release of GTA 6 to 2026 due to quality concerns.)
-            - Temporary regulatory fines. (e.g., Netflix faces $50M fine for violating the Children’s Online Privacy Protection Act (COPPA) by collecting data from children under 13.)
+            - Temporary regulatory fines. (e.g., Netflix faces $50M fine for violating the Children's Online Privacy Protection Act (COPPA) by collecting data from children under 13.)
             - Short-term macro concerns. (e.g., Rising interest rates pressure fintech valuations, but company fundamentals remain robust.)
             - Non-fanancial incident causing short-term disruption. (e.g., United Healthcare CEO got assassinated and caused a stock price drop.)
         BR1: A medium-term negative issue that signals real risk but can be fixed over time. Worth monitoring; may create long-term pressure.
             - Multiple quarters of declining revenue. (e.g., AMD reports its third consecutive quarter of client CPU revenue drops due to market share loss.)
             - A key product line underperforming. (e.g., Netflix reports its first subscriber decline in years due to competition from new streaming services.)
             - Supply chain disruption. (e.g., Nvidia price drops due toTSMC halts production at one of its factories due to a fire.)
-            - Credit downgrade (but not to junk level). (e.g., Moody’s downgrades Boeing due to rising debt from delayed aircraft deliveries.)
+            - Credit downgrade (but not to junk level). (e.g., Moody's downgrades Boeing due to rising debt from delayed aircraft deliveries.)
         BR2: Severe negative development that jeopardizes the company's core business model, stability, legality, solvency, or long-term viability. Major red flag.
             - Accounting fraud or financial manipulation discovered. (e.g., Enron's collapse due to fraudulent accounting practices.)
             - Key product banned by regulators. (e.g., FDA orders immediate halt of a top-selling drug due to safety issues.)
@@ -212,42 +207,43 @@ Provide a comprehensive financial analysis in JSON format"""
         
         try:
             if self.logger:
-                self.logger.debug(f"Summarizing article: {url}")
+                self.logger.debug(f"Analyzing article: {url}")
             
-            response = self.llm_client.send_message(
+            response = await self.llm_client.send_message(
                 message=user_message,
                 system_message=system_message
             )
             
             # Parse response (try to extract JSON if wrapped in markdown)
-            summary_text = response.content.strip()
+            analysis_text = response.content.strip()
             
             # Try to extract JSON from markdown code blocks
             import json
             import re
             
             # Look for JSON in code blocks
-            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', summary_text, re.DOTALL)
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', analysis_text, re.DOTALL)
             if json_match:
-                summary_text = json_match.group(1)
+                analysis_text = json_match.group(1)
             else:
                 # Try to find JSON object directly
-                json_match = re.search(r'\{.*\}', summary_text, re.DOTALL)
+                json_match = re.search(r'\{.*\}', analysis_text, re.DOTALL)
                 if json_match:
-                    summary_text = json_match.group(0)
+                    analysis_text = json_match.group(0)
             
             try:
-                summary_data = json.loads(summary_text)
+                analysis_data = json.loads(analysis_text)
             except json.JSONDecodeError:
-                # If JSON parsing fails, create a simple summary
+                # If JSON parsing fails, create a simple analysis
                 if self.logger:
                     self.logger.warning(f"Failed to parse JSON from LLM response, using raw text")
-                summary_data = {
-                    "title": "Article Summary",
-                    "high_level_idea": summary_text[:500],  # First 500 chars
+                analysis_data = {
+                    "title": "Article Analysis",
+                    "high_level_idea": analysis_text[:500],  # First 500 chars
                     "companies": [],
                     "sentiment": "neutral",
-                    "impact_type": "buy_the_dip",
+                    "sentiment_rating": None,
+                    "impact_type": "neutral",
                     "confidence": 5,
                     "trading_insights": ""
                 }
@@ -255,31 +251,32 @@ Provide a comprehensive financial analysis in JSON format"""
             result = {
                 "url": url,
                 "file_path": str(file_path) if file_path else None,
-                "title": summary_data.get("title", "Untitled"),
-                "high_level_idea": summary_data.get("high_level_idea", ""),
-                "companies": summary_data.get("companies", []),
-                "sentiment": summary_data.get("sentiment", "neutral"),
-                "impact_type": summary_data.get("impact_type", "buy_the_dip"),
-                "confidence": summary_data.get("confidence", 5),
-                "trading_insights": summary_data.get("trading_insights", ""),
-                "summarized_at": datetime.now().isoformat(),
+                "title": analysis_data.get("title", "Untitled"),
+                "high_level_idea": analysis_data.get("high_level_idea", ""),
+                "companies": analysis_data.get("companies", []),
+                "sentiment": analysis_data.get("sentiment", "neutral"),
+                "sentiment_rating": analysis_data.get("sentiment_rating"),
+                "impact_type": analysis_data.get("impact_type", "neutral"),
+                "confidence": analysis_data.get("confidence", 5),
+                "trading_insights": analysis_data.get("trading_insights", ""),
+                "analyzed_at": datetime.now().isoformat(),
                 "model": self.model,
                 "token_usage": response.usage if hasattr(response, 'usage') else None,
                 "cost": response.cost if hasattr(response, 'cost') else None
             }
             
             if self.logger:
-                self.logger.info(f"Successfully summarized article: {url}")
+                self.logger.info(f"Successfully analyzed article: {url}")
             
             return result
             
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Error summarizing article {url}: {e}", exc_info=True)
+                self.logger.error(f"Error analyzing article {url}: {e}")
             return {
                 "url": url,
                 "file_path": str(file_path) if file_path else None,
                 "error": str(e),
-                "summarized_at": datetime.now().isoformat()
+                "analyzed_at": datetime.now().isoformat()
             }
 

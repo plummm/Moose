@@ -216,13 +216,14 @@ class ContainerManager:
         network_name = self.ensure_project_network(project_id)
         
         # Prepare container configuration
+        docker_config = config.get("docker", {})
         container_name = f"{self.image_prefix}{agent_name}-{project_id}"
-        container_suffix_name = config.get("container_suffix_name", "")
+        container_suffix_name = docker_config.get("container_suffix_name", "")
         if container_suffix_name != "":
             container_name = f"{container_name}-{container_suffix_name}"
         
         # Environment variables
-        env_vars = config.get("environment", {}).copy()
+        env_vars = docker_config.get("environment", {}).copy()
         if environment:
             env_vars.update(environment)
         
@@ -240,7 +241,7 @@ class ContainerManager:
                 "mode": "ro"  # Read-only for security
             }
         # Add custom volumes from config
-        for vol_config in config.get("volumes", []):
+        for vol_config in docker_config.get("volumes", []):
             if isinstance(vol_config, dict):
                 host_path = vol_config.get("host")
                 container_path = vol_config.get("container", host_path)
@@ -249,13 +250,13 @@ class ContainerManager:
                     volumes[host_path] = {"bind": container_path, "mode": mode}
         
         # Resource limits
-        resources = config.get("resources", {})
+        resources = docker_config.get("resources", {})
         mem_limit = resources.get("memory")
         cpu_limit = resources.get("cpus")
         
         # Port mappings
         ports = {}
-        for port_config in config.get("ports", []):
+        for port_config in docker_config.get("ports", []):
             if isinstance(port_config, dict):
                 container_port = port_config.get("container")
                 host_port = port_config.get("host", container_port)
@@ -268,7 +269,8 @@ class ContainerManager:
         skip_create = False
         try:
             container = self.docker_client.containers.get(container_name)
-            if config.get("container_override", False):
+            docker_config = config.get("docker", {})
+            if docker_config.get("container_override", False):
                 container.stop(timeout=10)
                 container.remove()
                 self.logger.debug(f"Removed old container {container_name}")

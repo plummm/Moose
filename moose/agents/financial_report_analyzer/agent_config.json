@@ -1,21 +1,21 @@
 {
-  "name": "news_scraper",
-  "description": "Generic news scraper that extracts text content from web pages",
+  "name": "financial_report_analyzer",
+  "description": "Analyzes financial news articles scraped by news_scraper agent",
   "version": "1.0.0",
   "python_version": "3.11",
   "entry_point": "agent.py",
-  "entry_class": "NewsScraper",
+  "entry_class": "FinancialReportAnalyzer",
   "docker": {
     "container_suffix_name": "",
     "container_override": true,
     "ports": [
-      {"container": 3500, "host": 3500}
+      {"container": 3501, "host": 3501}
     ],
     "environment": {
       "SCRAPER_DATA_DIR": "/data/scraper/finviz.com",
       "MOOSE_AGENT_DEBUG": "true",
       "MOOSE_AGENT_MODE": "http",
-      "MOOSE_AGENT_PORT": "3500"
+      "MOOSE_AGENT_PORT": "3501"
     },
     "volumes": [
       {
@@ -31,29 +31,33 @@
   "interactive_mode": {
     "mode": "http",
     "http_server": {
-      "port": 3500,
+      "port": 3501,
       "auth_password": "",
       "endpoints": [
         {
-          "path": "/start",
+          "path": "/get_financial_new",
+          "method": "POST",
+          "handler": "get_financial_new",
+          "description": "Receive file path from news_scraper for analysis",
+          "auth_required": false
+        },
+        {
+          "path": "/queue_stats",
           "method": "GET",
-          "handler": "scrape",
-          "description": "Start scraping news from configured URL",
+          "handler": "get_queue_stats",
+          "description": "Get queue statistics",
           "auth_required": false
         }
       ]
     }
   },
   "custom": {
-    "scraper_config": {
-      "start_url": "https://finviz.com/news.ashx",
-      "rate_limit": 60,
-      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "max_retrieval_depth": 1,
-      "xpath": "/html/body/div[3]"
+    "llm_config": {
+      "model": "gpt-5",
+      "temperature": 0.7,
+      "kwargs": {}
     },
-    "financial_report_analyzer": {
-      "endpoint": "http://localhost:3501/get_financial_new"
-    }
+    "use_langgraph": true,
+    "max_concurrent_analyses": 20
   }
 }

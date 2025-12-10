@@ -106,6 +106,16 @@ class ModelConfig:
         return {
             "models": [
                 {
+                    "model_name": "gpt-5",
+                    "input_cost_per_token": 0.00000125,
+                    "output_cost_per_token": 0.00001
+                },
+                {
+                    "model_name": "gpt-4-turbo",
+                    "input_cost_per_token": 0.00001,
+                    "output_cost_per_token": 0.00003
+                }
+                {
                     "model_name": "gpt-4",
                     "input_cost_per_token": 0.00003,
                     "output_cost_per_token": 0.00006
@@ -119,6 +129,16 @@ class ModelConfig:
                     "model_name": "gpt-3.5-turbo",
                     "input_cost_per_token": 0.0000015,
                     "output_cost_per_token": 0.000002
+                },
+                {
+                    "model_name": "claude-sonnet-4-5-20250929",
+                    "input_cost_per_token": 0.000003,
+                    "output_cost_per_token": 0.000015
+                },
+                {
+                    "model_name": "claude-sonnet-4-20250514",
+                    "input_cost_per_token": 0.000003,
+                    "output_cost_per_token": 0.000015
                 },
                 {
                     "model_name": "claude-3-opus-20240229",

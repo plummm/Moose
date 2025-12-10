@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
-from queue import Queue
 import re
 
 try:
@@ -246,7 +245,7 @@ class NewsScraperCore:
             return list(article_urls)
             
         except Exception as e:
-            self.logger.error(f"Error scraping feed {url}: {e}", exc_info=True)
+            self.logger.error(f"Error scraping feed {url}: {e}")
             return []
     
     def extract_text_from_url(self, url: str) -> Optional[str]:
@@ -287,7 +286,7 @@ class NewsScraperCore:
             self.logger.error(f"HTTP error fetching {url}: {e}")
             return None
         except Exception as e:
-            self.logger.error(f"Error extracting text from {url}: {e}", exc_info=True)
+            self.logger.error(f"Error extracting text from {url}: {e}")
             return None
     
     def _get_file_path_for_url(self, url: str, article_date: Optional[datetime] = None) -> Path:
@@ -398,7 +397,7 @@ class NewsScraperService:
     """
     High-level scraping service that orchestrates scraping operations.
     
-    Handles both workflow-based and direct scraping modes.
+    Scrapes articles and sends file paths to financial_report_analyzer agent.
     """
     
     @staticmethod
@@ -412,7 +411,8 @@ class NewsScraperService:
         Returns:
             Scraper configuration dictionary with defaults applied
         """
-        scraper_config = config.get("scraper_config", {})
+        custom_config = config.get("custom", {})
+        scraper_config = custom_config.get("scraper_config", {})
         
         # Set defaults
         defaults = {
@@ -431,9 +431,7 @@ class NewsScraperService:
     def __init__(
         self,
         scraper_core: NewsScraperCore,
-        summarizer=None,
-        workflow_app=None,
-        use_langgraph: bool = False,
+        analyzer_endpoint: str = "http://localhost:3501/get_financial_new",
         logger=None
     ):
         """
@@ -441,18 +439,23 @@ class NewsScraperService:
         
         Args:
             scraper_core: NewsScraperCore instance
-            summarizer: Optional NewsSummarizer instance
-            workflow_app: Optional LangGraph workflow app
-            use_langgraph: Whether to use LangGraph workflow
+            analyzer_endpoint: HTTP endpoint URL for financial_report_analyzer
             logger: Logger instance
         """
         self.scraper_core = scraper_core
-        self.summarizer = summarizer
-        self.workflow_app = workflow_app
-        self.use_langgraph = use_langgraph and workflow_app is not None
+        self.analyzer_endpoint = analyzer_endpoint
         self.logger = logger
+        
+        # Import requests for HTTP calls
+        try:
+            import requests
+            self.requests_available = True
+        except ImportError:
+            self.requests_available = False
+            if logger:
+                logger.warning("requests not available, cannot send to analyzer")
     
-    def scrape(self, input_data=None) -> Dict[str, Any]:
+    async def scrape(self, input_data=None) -> Dict[str, Any]:
         """
         Main scraping method.
         
@@ -463,7 +466,7 @@ class NewsScraperService:
                 - Empty/None: uses config defaults
                 
         Returns:
-            Dict with scraping results (and summaries if LangGraph is enabled)
+            Dict with scraping results
         """
         try:
             # Parse input
@@ -484,90 +487,67 @@ class NewsScraperService:
                     "error": "No start_url provided or configured"
                 }
             
-            # Use LangGraph workflow if enabled
-            if self.use_langgraph and self.workflow_app:
-                return self._scrape_with_workflow(start_url, max_depth)
+            return await self._scrape_direct(start_url, max_depth)
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error in scrape: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    def _send_to_analyzer(self, file_path: str, url: str) -> bool:
+        """
+        Send file path to financial_report_analyzer agent.
+        
+        Args:
+            file_path: Path to scraped article file
+            url: Original URL of the article
+            
+        Returns:
+            True if successfully sent
+        """
+        if not self.requests_available:
+            if self.logger:
+                self.logger.warning("requests not available, cannot send to analyzer")
+            return False
+        
+        try:
+            import requests
+            
+            payload = {
+                "file_path": str(file_path),
+                "url": url,
+                "metadata": {}
+            }
+            
+            response = requests.post(
+                self.analyzer_endpoint,
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                if self.logger:
+                    self.logger.debug(f"Sent file path to analyzer: {file_path}")
+                return True
             else:
-                return self._scrape_direct(start_url, max_depth)
-            
+                if self.logger:
+                    self.logger.warning(
+                        f"Failed to send to analyzer (status {response.status_code}): {response.text}"
+                    )
+                return False
+                
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Error in scrape: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "error": str(e)
-            }
+                self.logger.error(f"Error sending to analyzer: {e}")
+            return False
     
-    def _scrape_with_workflow(self, start_url: str, max_depth: int) -> Dict[str, Any]:
-        """Scrape using LangGraph workflow with asynchronous summarization."""
+    async def _scrape_direct(self, start_url: str, max_depth: int) -> Dict[str, Any]:
+        """Scrape articles and send file paths to analyzer."""
         if self.logger:
-            self.logger.info(f"Starting scrape with workflow: {start_url}, max_depth: {max_depth}")
-        
-        # Import here to avoid circular dependency
-        try:
-            from .workflow import NewsScraperState
-        except ImportError:
-            from workflow import NewsScraperState
-        
-        # Initialize state
-        initial_state: NewsScraperState = {
-            "start_url": start_url,
-            "max_depth": max_depth,
-            "article_urls": [],
-            "current_url_index": 0,
-            "articles_scraped": 0,
-            "articles_skipped": 0,
-            "articles_failed": 0,
-            "saved_files": [],
-            "article_queue": Queue(),
-            "summaries": [],
-            "summaries_completed": 0,
-            "summaries_failed": 0,
-            "status": "scraping",
-            "error": None
-        }
-        
-        # Run workflow
-        try:
-            final_state = self.workflow_app.invoke(initial_state)
-            
-            # Build result
-            result = {
-                "status": final_state.get("status", "completed"),
-                "start_url": start_url,
-                "articles_found": len(final_state.get("article_urls", [])),
-                "articles_scraped": final_state.get("articles_scraped", 0),
-                "articles_skipped": final_state.get("articles_skipped", 0),
-                "articles_failed": final_state.get("articles_failed", 0),
-                "saved_files": final_state.get("saved_files", [])[:10],  # Limit to first 10
-                "summaries_completed": final_state.get("summaries_completed", 0),
-                "summaries_failed": final_state.get("summaries_failed", 0),
-                "summaries": final_state.get("summaries", [])[:10]  # Limit to first 10
-            }
-            
-            if final_state.get("error"):
-                result["error"] = final_state["error"]
-            
-            if self.logger:
-                self.logger.info(
-                    f"Workflow complete: {result['articles_scraped']} scraped, "
-                    f"{result['summaries_completed']} summarized"
-                )
-            
-            return result
-            
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error in workflow: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "error": str(e)
-            }
-    
-    def _scrape_direct(self, start_url: str, max_depth: int) -> Dict[str, Any]:
-        """Scrape directly without workflow (backward compatibility)."""
-        if self.logger:
-            self.logger.info(f"Starting direct scrape: {start_url}, max_depth: {max_depth}")
+            self.logger.info(f"Starting scrape: {start_url}, max_depth: {max_depth}")
         
         # Scrape feed to get article URLs
         article_urls = self.scraper_core.scrape_feed(start_url)
@@ -578,15 +558,16 @@ class NewsScraperService:
                 "message": "No articles found",
                 "articles_scraped": 0,
                 "articles_skipped": 0,
-                "articles_failed": 0
+                "articles_failed": 0,
+                "sent_to_analyzer": 0
             }
         
         # Process articles
         articles_scraped = 0
         articles_skipped = 0
         articles_failed = 0
+        sent_to_analyzer = 0
         saved_files = []
-        article_queue = Queue()
         
         for url in article_urls:
             # Check if already scraped (deduplication)
@@ -606,13 +587,9 @@ class NewsScraperService:
                     articles_scraped += 1
                     saved_files.append(str(saved_path))
                     
-                    # Enqueue for summarization if summarizer is available
-                    if self.summarizer:
-                        article_queue.put({
-                            "url": url,
-                            "file_path": saved_path,
-                            "content": text_content
-                        })
+                    # Send to analyzer
+                    if self._send_to_analyzer(saved_path, url):
+                        sent_to_analyzer += 1
                 else:
                     articles_failed += 1
             else:
@@ -621,57 +598,21 @@ class NewsScraperService:
         # Save index after scraping session
         self.scraper_core.save_index()
         
-        # Process queue if summarizer is available (synchronous)
-        summaries = []
-        summaries_completed = 0
-        summaries_failed = 0
-        
-        if self.summarizer and not article_queue.empty():
-            if self.logger:
-                self.logger.info("Processing article queue for summarization...")
-            while not article_queue.empty():
-                try:
-                    article_item = article_queue.get_nowait()
-                    url = article_item["url"]
-                    file_path = article_item["file_path"]
-                    content = article_item.get("content")
-                    
-                    summary = self.summarizer.summarize_article(
-                        url=url,
-                        file_path=file_path,
-                        content=content
-                    )
-                    
-                    if "error" in summary:
-                        summaries_failed += 1
-                    else:
-                        summaries.append(summary)
-                        summaries_completed += 1
-                except Exception as e:
-                    if self.logger:
-                        self.logger.error(f"Error processing queue item: {e}")
-                    summaries_failed += 1
-        
         result = {
             "status": "success",
-            "start_url": start_url,
             "articles_found": len(article_urls),
             "articles_scraped": articles_scraped,
             "articles_skipped": articles_skipped,
             "articles_failed": articles_failed,
-            "saved_files": saved_files[:10],  # Limit to first 10 for response size
-            "summaries_completed": summaries_completed,
-            "summaries_failed": summaries_failed,
-            "summaries": summaries[:10] if summaries else []
+            "sent_to_analyzer": sent_to_analyzer,
         }
         
         if self.logger:
             self.logger.info(
                 f"Scraping complete: {articles_scraped} scraped, "
-                f"{articles_skipped} skipped, {articles_failed} failed"
+                f"{articles_skipped} skipped, {articles_failed} failed, "
+                f"{sent_to_analyzer} sent to analyzer"
             )
-            if summaries_completed > 0:
-                self.logger.info(f"Summarization complete: {summaries_completed} completed, {summaries_failed} failed")
         
         return result
 

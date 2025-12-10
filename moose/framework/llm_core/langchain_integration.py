@@ -6,6 +6,7 @@ This module provides a unified interface to LangChain using native provider clas
 - ChatGoogleGenerativeAI for Gemini models
 """
 
+import asyncio
 from typing import List, Optional, Dict, Any, Union, Iterator
 try:
     from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
@@ -223,7 +224,7 @@ class LangChainLLM:
             model_info = self.config.get_model_info(self.model)
             
             if not model_info:
-                self.logger.debug(f"Model info not found for {self.model}, cannot calculate cost")
+                self.logger.error(f"Model info not found for {self.model}, cannot calculate cost")
                 return None
             
             input_cost_per_token = model_info.get('input_cost_per_token')
@@ -261,12 +262,87 @@ class LangChainLLM:
         Returns:
             Cost in USD, or None if unavailable
         """
-        if hasattr(response, 'usage_metadata'):
-            usage = response.usage_metadata
-            if usage:
-                return self._calculate_cost_from_usage(usage)
+        return self._calculate_cost_from_usage(usage)
+    
+    async def ainvoke(
+        self,
+        message: Union[str, Message],
+        messages: Optional[List[Message]] = None,
+        system_message: Optional[Union[str, Message]] = None,
+        request_id: Optional[str] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Async invoke LLM with a message and return response.
         
-        return None
+        Args:
+            message: User message (string or Message object)
+            messages: Optional list of previous messages for conversation context
+            system_message: Optional system message
+            request_id: Optional request identifier
+            **kwargs: Additional parameters
+            
+        Returns:
+            LLMResponse object
+        """
+        # Build LangChain message list
+        langchain_messages: List[BaseMessage] = []
+        
+        # Add system message if provided
+        if system_message:
+            if isinstance(system_message, str):
+                langchain_messages.append(SystemMessage(content=system_message))
+            else:
+                langchain_messages.append(self._message_to_langchain(system_message))
+        
+        # Add conversation history if provided
+        if messages:
+            for msg in messages:
+                langchain_messages.append(self._message_to_langchain(msg))
+        
+        # Add current message
+        langchain_messages.append(self._message_to_langchain(message))
+        
+        # Invoke LangChain LLM asynchronously
+        try:
+            # Check if LLM has ainvoke method (async)
+            if hasattr(self.llm, 'ainvoke'):
+                response = await self.llm.ainvoke(langchain_messages, **kwargs)
+            else:
+                # Fallback to sync invoke in async context (not ideal but works)
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, lambda: self.llm.invoke(langchain_messages, **kwargs))
+        except Exception as e:
+            if hasattr(e, 'status_code') and e.status_code == 404:
+                self.logger.error(f"Model {self.model} not found")
+            self.logger.fatal(f"Error invoking model {self.model}: {e}")
+            response = None
+        
+        # Extract content
+        content = response.content if hasattr(response, 'content') else str(response)
+        
+        # Extract usage
+        usage = self._extract_usage_from_response(response)
+        
+        # Extract cost (will calculate from usage if not in response)
+        cost = self._extract_cost_from_response(response, usage=usage)
+        
+        # Extract finish reason
+        finish_reason = None
+        if hasattr(response, 'response_metadata'):
+            metadata = response.response_metadata
+            if metadata:
+                finish_reason = metadata.get('finish_reason') or metadata.get('stop_reason')
+        
+        return LLMResponse(
+            content=content or "",
+            model=self.model,
+            finish_reason=finish_reason,
+            usage=usage,
+            cost=cost,
+            raw_response=response,
+            request_id=request_id
+        )
     
     def invoke(
         self,

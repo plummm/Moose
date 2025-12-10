@@ -1,7 +1,8 @@
 """News Scraper Agent.
 
 This agent scrapes news from a configured URL, extracts text content from article URLs,
-saves them to organized folders with SHA256-hashed filenames, and summarizes them using LLM.
+and saves them to organized folders with SHA256-hashed filenames.
+The scraped articles are sent to the financial_report_analyzer agent for analysis.
 """
 
 import os, sys
@@ -13,13 +14,9 @@ from moose.framework import BaseAgent
 # Import local modules
 try:
     from .scraper import NewsScraperCore, NewsScraperService
-    from .summarizer import NewsSummarizer
-    from .workflow import create_workflow, LANGGRAPH_AVAILABLE
 except ImportError:
     # Fallback for direct execution
     from moose.agents.news_scraper.scraper import NewsScraperCore, NewsScraperService
-    from moose.agents.news_scraper.summarizer import NewsSummarizer
-    from moose.agents.news_scraper.workflow import create_workflow, LANGGRAPH_AVAILABLE
 
 
 class NewsScraper(BaseAgent):
@@ -27,8 +24,8 @@ class NewsScraper(BaseAgent):
     Generic news scraper agent.
     
     Scrapes news from a configured URL, extracts text content from article URLs,
-    saves them to organized folders with SHA256-hashed filenames, and optionally
-    summarizes them using LLM via LangGraph workflow.
+    saves them to organized folders with SHA256-hashed filenames.
+    Sends scraped articles to financial_report_analyzer agent for analysis.
     """
     
     name = "news_scraper"
@@ -54,55 +51,22 @@ class NewsScraper(BaseAgent):
             logger=self.logger
         )
         
-        # Initialize summarizer (if LLM config is available)
-        summarizer = None
-        use_langgraph = self.config.get("use_langgraph", False)
+        # Get financial_report_analyzer endpoint URL from config
+        custom_config = self.config.get("custom", {})
+        analyzer_config = custom_config.get("financial_report_analyzer", {})
+        analyzer_endpoint = analyzer_config.get("endpoint", "http://localhost:3501/get_financial_new")
         
-        llm_config = self.config.get("llm_config", {})
-        if llm_config:
-            try:
-                model = llm_config.get("model", "gpt-4")
-                temperature = llm_config.get("temperature", 0.7)
-                summarizer = NewsSummarizer(
-                    model=model,
-                    temperature=temperature,
-                    logger=self.logger,
-                    **llm_config.get("kwargs", {})
-                )
-                self.logger.info(f"Initialized summarizer with model: {model}")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize summarizer: {e}")
-        
-        # Initialize LangGraph workflow if enabled
-        workflow_app = None
-        if use_langgraph and LANGGRAPH_AVAILABLE and summarizer:
-            try:
-                workflow_app = create_workflow(
-                    scraper_core=scraper_core,
-                    summarizer=summarizer,
-                    logger=self.logger
-                )
-                self.logger.info("Initialized LangGraph workflow")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize LangGraph workflow: {e}")
-                use_langgraph = False
-        elif use_langgraph and not LANGGRAPH_AVAILABLE:
-            self.logger.warning("LangGraph not available, workflow disabled")
-            use_langgraph = False
-        
-        # Initialize scraping service (coordinates all components)
+        # Initialize scraping service (no summarizer or workflow)
         self.scraper_service = NewsScraperService(
             scraper_core=scraper_core,
-            summarizer=summarizer,
-            workflow_app=workflow_app,
-            use_langgraph=use_langgraph,
+            analyzer_endpoint=analyzer_endpoint,
             logger=self.logger
         )
         
         self.logger.info(f"Initialized scraper with start_url: {scraper_config.get('start_url')}")
-        self.logger.info(f"LangGraph workflow: {'enabled' if use_langgraph else 'disabled'}")
+        self.logger.info(f"Analyzer endpoint: {analyzer_endpoint}")
     
-    def scrape(self, input_data=None) -> Any:
+    async def scrape(self, input_data=None) -> Any:
         """
         Main scraping method (delegates to scraper service).
         
@@ -113,9 +77,9 @@ class NewsScraper(BaseAgent):
                 - Empty/None: uses config defaults
                 
         Returns:
-            Dict with scraping results (and summaries if LangGraph is enabled)
+            Dict with scraping results
         """
-        return self.scraper_service.scrape(input_data)
+        return await self.scraper_service.scrape(input_data)
     
     def process(self, input_data=None) -> Any:
         """
@@ -132,4 +96,5 @@ class NewsScraper(BaseAgent):
         Returns:
             Dict with scraping results
         """
-        return self.scrape(input_data)
+        import asyncio
+        return asyncio.run(self.scrape(input_data))

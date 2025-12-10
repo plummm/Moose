@@ -6,6 +6,7 @@ import signal
 import time
 import uuid
 import logging
+import inspect
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
@@ -74,7 +75,8 @@ class BaseAgent():
         self.http_server = None
         
         # HTTP server configuration
-        http_config = self.config.get("http_server", {})
+        interactive_mode = self.config.get("interactive_mode", {})
+        http_config = interactive_mode.get("http_server", {})
         self.http_port = http_config.get("port") or self._get_default_http_port()
         self.http_auth_password = http_config.get("auth_password", "")
         self.http_endpoints = http_config.get("endpoints", [])
@@ -374,7 +376,7 @@ class BaseAgent():
             )
             
         except Exception as e:
-            self.logger.error(f"Error processing request {request_id}: {e}", exc_info=True)
+            self.logger.error(f"Error processing request {request_id}: {e}")
             processing_time_ms = (time.time() - start_time) * 1000
             
             return self._format_output(
@@ -387,8 +389,9 @@ class BaseAgent():
     
     def _get_default_http_port(self) -> int:
         """Get default HTTP port from config or return 8000."""
-        if self.config.get("ports") and len(self.config["ports"]) > 0:
-            return self.config["ports"][0].get("host", self.config["ports"][0].get("container", 8000))
+        docker_config = self.config.get("docker", {})
+        if docker_config.get("ports") and len(docker_config["ports"]) > 0:
+            return docker_config["ports"][0].get("host", docker_config["ports"][0].get("container", 8000))
         return 8000
     
     def _check_auth(self, request) -> bool:
@@ -416,6 +419,10 @@ class BaseAgent():
         if not self.http_endpoints:
             return
         
+        # Check if endpoints are already registered
+        if hasattr(self, '_endpoints_registered') and self._endpoints_registered:
+            return
+        
         for endpoint_config in self.http_endpoints:
             path = endpoint_config.get('path')
             method = endpoint_config.get('method', 'POST').upper()
@@ -439,6 +446,11 @@ class BaseAgent():
             # Create route with proper closure
             # Use default parameters to capture values in closure
             def create_endpoint_wrapper(ep_path, ep_method, handler_func, requires_auth):
+                # Create unique function name based on path and method
+                # Replace special chars in path to make valid function name
+                safe_name = ep_path.replace('/', '_').replace('-', '_').replace('.', '_').strip('_')
+                unique_name = f"endpoint_{safe_name}_{ep_method.lower()}"
+                
                 def endpoint_wrapper():
                     # Check auth if required
                     if requires_auth and not self._check_auth(request):
@@ -463,19 +475,61 @@ class BaseAgent():
                         
                         return jsonify(result)
                     except Exception as e:
-                        self.logger.error(f"Error in endpoint {ep_path}: {e}", exc_info=True)
+                        self.logger.error(f"Error in endpoint {ep_path}: {e}")
                         return jsonify({
                             "status": "error",
                             "error": str(e)
                         }), 500
                 
-                return endpoint_wrapper
-            
+                async def endpoint_wrapper_async():
+                    # Check auth if required
+                    if requires_auth and not self._check_auth(request):
+                        return jsonify({
+                            "status": "error",
+                            "error": "Unauthorized"
+                        }), 401
+                    
+                    # Call handler with request data
+                    try:
+                        if ep_method in ['POST', 'PUT', 'PATCH']:
+                            data = request.get_json() or {}
+                        else:
+                            data = request.args.to_dict()
+                        
+                        # Call handler function
+                        result = await handler_func(data)
+                        
+                        # Ensure result is a dict
+                        if not isinstance(result, dict):
+                            result = {"status": "success", "result": result}
+                        
+                        return jsonify(result)
+                    except Exception as e:
+                        self.logger.error(f"Error in endpoint {ep_path}: {e}")
+                        return jsonify({
+                            "status": "error",
+                            "error": str(e)
+                        }), 500
+                
+                # Select the appropriate wrapper
+                if inspect.iscoroutinefunction(handler_func):
+                    wrapper = endpoint_wrapper_async
+                else:
+                    wrapper = endpoint_wrapper
+                
+                # Set unique function name to avoid Flask endpoint conflicts
+                wrapper.__name__ = unique_name
+                
+                return wrapper
+                   
             # Register the route
             wrapper = create_endpoint_wrapper(path, method, handler_func, auth_required)
             self.app.route(path, methods=[method])(wrapper)
             
             self.logger.info(f"Registered endpoint: {method} {path} -> {handler_name}")
+        
+        # Mark endpoints as registered
+        self._endpoints_registered = True
     
     def run_http_server(self, port: Optional[int] = None, host: str = "0.0.0.0"):
         """
@@ -489,6 +543,11 @@ class BaseAgent():
             raise ImportError(
                 "Flask is required for HTTP mode. Install with: pip install flask"
             )
+        
+        # Check if Flask app already exists and is configured
+        if self.app is not None:
+            self.logger.warning("HTTP server already initialized, skipping re-initialization")
+            return
         
         # Use provided port or config port
         server_port = port or self.http_port
@@ -590,7 +649,7 @@ class BaseAgent():
                     )
                     print(json.dumps(error_output), flush=True)
                 except Exception as e:
-                    self.logger.error(f"Error processing input: {e}", exc_info=True)
+                    self.logger.error(f"Error processing input: {e}")
                     error_output = self._format_output(
                         result=None,
                         request_id=str(uuid.uuid4()),

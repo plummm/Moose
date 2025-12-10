@@ -147,11 +147,14 @@ class AgentCommand:
             
             # Get port from HTTP server config, ports config, or default
             port = 8000
-            http_config = config.get("http_server", {})
+            interactive_mode = config.get("interactive_mode", {})
+            http_config = interactive_mode.get("http_server", {})
             if http_config.get("port"):
                 port = http_config["port"]
-            elif config.get("ports") and len(config["ports"]) > 0:
-                port = config["ports"][0].get("host", config["ports"][0].get("container", 8000))
+            else:
+                docker_config = config.get("docker", {})
+                if docker_config.get("ports") and len(docker_config["ports"]) > 0:
+                    port = docker_config["ports"][0].get("host", docker_config["ports"][0].get("container", 8000))
             
             # List endpoints
             endpoints_info = ["/health"]
@@ -216,8 +219,9 @@ class AgentCommand:
                     
                     # Get port from config
                     container_port = 8000
-                    if config.get("ports") and len(config["ports"]) > 0:
-                        container_port = config["ports"][0].get("host", config["ports"][0].get("container", 8000))
+                    docker_config = config.get("docker", {})
+                    if docker_config.get("ports") and len(docker_config["ports"]) > 0:
+                        container_port = docker_config["ports"][0].get("host", docker_config["ports"][0].get("container", 8000))
                     
                     logger.info(f"Agent is accessible at: http://localhost:{container_port}")
                     logger.info("Use 'docker stop <container_id>' to stop the container")
@@ -236,7 +240,8 @@ class AgentCommand:
                 sys.exit(1)
             
             # Prepare environment variables
-            environment = config.get("environment", {}).copy()
+            docker_config = config.get("docker", {})
+            environment = docker_config.get("environment", {}).copy()
             if debug:
                 environment["MOOSE_AGENT_DEBUG"] = "true"
             
@@ -255,8 +260,9 @@ class AgentCommand:
             
             # Get port from config
             container_port = 8000
-            if config.get("ports") and len(config["ports"]) > 0:
-                container_port = config["ports"][0].get("host", config["ports"][0].get("container", 8000))
+            docker_config = config.get("docker", {})
+            if docker_config.get("ports") and len(docker_config["ports"]) > 0:
+                container_port = docker_config["ports"][0].get("host", docker_config["ports"][0].get("container", 8000))
             
             logger.info("=" * 60)
             logger.info(f"Agent '{agent_name}' deployed successfully!")

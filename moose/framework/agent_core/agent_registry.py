@@ -147,11 +147,14 @@ if __name__ == "__main__":
     with open("./agent_config.json", 'r', encoding='utf-8') as f:
         config = json.load(f)
         
-    mode = config.get("mode")
+    interactive_mode = config.get("interactive_mode", {{}})
+    mode = interactive_mode.get("mode", "http")
     if mode == "http":
-        port = config["http_server"].get("port", 8000)
+        http_server = interactive_mode.get("http_server", {{}})
+        port = http_server.get("port", 8000)
     if mode == "file":
-        watch_dir = config["file"].get("watch_dir", "/project/agent_io")
+        file_config = interactive_mode.get("file", {{}})
+        watch_dir = file_config.get("watch_dir", "/project/agent_io")
 """
 
         if entry_class is not None and entry_class != "":

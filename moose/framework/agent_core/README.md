@@ -40,7 +40,9 @@ moose/agents/
 
 ## Agent Configuration
 
-`agent_config.json` structure:
+`agent_config.json` follows a structured format with four main sections:
+
+### Configuration Structure
 
 ```json
 {
@@ -48,40 +50,168 @@ moose/agents/
   "description": "Agent description",
   "version": "1.0.0",
   "python_version": "3.11",
-  "system_packages": ["curl", "git", "build-essential"],
   "entry_point": "agent.py",
-  "ports": [
-    {"container": 8000, "host": 8000}
-  ],
-  "environment": {
-    "CUSTOM_VAR": "value"
-  },
-  "volumes": [
-    {
-      "host": "/path/on/host",
-      "container": "/path/in/container",
-      "mode": "ro"
+  "entry_class": "MyAgent",
+  "docker": {
+    "container_suffix_name": "",
+    "container_override": true,
+    "ports": [
+      {"container": 8000, "host": 8000}
+    ],
+    "environment": {
+      "CUSTOM_VAR": "value"
+    },
+    "volumes": [
+      {
+        "host": "/path/on/host",
+        "container": "/path/in/container",
+        "mode": "ro"
+      }
+    ],
+    "resources": {
+      "memory": "512m",
+      "cpus": "1.0"
     }
-  ],
-  "resources": {
-    "memory": "512m",
-    "cpus": "1.0"
+  },
+  "interactive_mode": {
+    "mode": "http",
+    "http_server": {
+      "port": 8000,
+      "auth_password": "",
+      "endpoints": [
+        {
+          "path": "/process",
+          "method": "POST",
+          "handler": "process",
+          "description": "Process input data",
+          "auth_required": false
+        }
+      ]
+    },
+    "file": {
+      "watch_dir": "/project/agent_io"
+    }
+  },
+  "custom": {
+    "agent_specific_config": "value"
   }
 }
 ```
 
-### Configuration Fields
+### Configuration Sections
 
-- **name**: Agent name (should match directory name)
-- **description**: Human-readable description
-- **version**: Agent version
-- **python_version**: Python version for container (default: "3.11")
-- **system_packages**: List of apt packages to install
-- **entry_point**: Python file to run (default: "agent.py")
-- **ports**: Port mappings (container -> host)
-- **environment**: Environment variables for container
-- **volumes**: Additional volume mounts
-- **resources**: CPU and memory limits
+#### Top-Level Fields (Basic Agent Info)
+
+- **name** (required): Agent name (should match directory name)
+- **description** (required): Human-readable description
+- **version** (required): Agent version
+- **python_version** (required): Python version for container (e.g., "3.11")
+- **entry_point** (required): Python file to run (default: "agent.py")
+- **entry_class** (optional): Class name to instantiate (auto-detected if not specified)
+
+#### `docker` Object (Container Configuration)
+
+All Docker-related settings:
+
+- **container_suffix_name** (optional): Suffix to append to container name
+- **container_override** (optional, default: false): Whether to override existing containers
+- **ports** (optional): Array of port mappings
+  ```json
+  [{"container": 8000, "host": 8000}]
+  ```
+- **environment** (optional): Environment variables for container
+  ```json
+  {"VAR_NAME": "value"}
+  ```
+- **volumes** (optional): Additional volume mounts
+  ```json
+  [{"host": "/host/path", "container": "/container/path", "mode": "ro"}]
+  ```
+- **resources** (optional): CPU and memory limits
+  ```json
+  {"memory": "512m", "cpus": "1.0"}
+  ```
+
+#### `interactive_mode` Object (Communication Mode)
+
+Configuration for how the agent communicates:
+
+- **mode** (required): Communication mode - `"http"`, `"stdin"`, or `"file"`
+- **http_server** (required if mode is "http"): HTTP server configuration
+  - **port** (required): Port to listen on
+  - **auth_password** (optional): Password for HTTP authentication
+  - **endpoints** (optional): Array of custom HTTP endpoints
+    ```json
+    [{
+      "path": "/endpoint",
+      "method": "POST",
+      "handler": "method_name",
+      "description": "Endpoint description",
+      "auth_required": false
+    }]
+    ```
+- **file** (required if mode is "file"): File watch configuration
+  - **watch_dir** (required): Directory to watch for input files
+
+#### `custom` Object (Agent-Specific Configuration)
+
+All agent-specific configuration goes here. This section is free-form and can contain any keys specific to your agent's needs.
+
+Examples:
+- `scraper_config` for scraping agents
+- `llm_config` for LLM-based agents
+- `financial_report_analyzer` for inter-agent communication configs
+- Any other agent-specific settings
+
+### Example: News Scraper Agent
+
+```json
+{
+  "name": "news_scraper",
+  "description": "Generic news scraper",
+  "version": "1.0.0",
+  "python_version": "3.11",
+  "entry_point": "agent.py",
+  "entry_class": "NewsScraper",
+  "docker": {
+    "container_suffix_name": "",
+    "container_override": true,
+    "ports": [{"container": 3500, "host": 3500}],
+    "environment": {
+      "SCRAPER_DATA_DIR": "/data/scraper"
+    },
+    "volumes": [
+      {"host": "/data/scraper", "container": "/data/scraper"}
+    ],
+    "resources": {"memory": "512m", "cpus": "1.0"}
+  },
+  "interactive_mode": {
+    "mode": "http",
+    "http_server": {
+      "port": 3500,
+      "auth_password": "",
+      "endpoints": [
+        {
+          "path": "/start",
+          "method": "GET",
+          "handler": "scrape",
+          "description": "Start scraping",
+          "auth_required": false
+        }
+      ]
+    }
+  },
+  "custom": {
+    "scraper_config": {
+      "start_url": "https://example.com/news",
+      "rate_limit": 60
+    },
+    "financial_report_analyzer": {
+      "endpoint": "http://localhost:3501/get_financial_new"
+    }
+  }
+}
+```
 
 ## Usage
 
