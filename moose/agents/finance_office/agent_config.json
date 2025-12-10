@@ -1,5 +1,5 @@
 {
-  "name": "financial_report_analyzer",
+  "name": "finance_office",
   "description": "Analyzes financial news articles scraped by news_scraper agent",
   "version": "1.0.0",
   "python_version": "3.11",
@@ -21,6 +21,10 @@
       {
         "host": "/data/scraper/finviz.com",
         "container": "/data/scraper/finviz.com"
+      },
+      {
+        "host": "/data/news",
+        "container": "/data/news"
       }
     ],
     "resources": {
@@ -35,9 +39,9 @@
       "auth_password": "",
       "endpoints": [
         {
-          "path": "/get_financial_new",
+          "path": "/get_financial_news",
           "method": "POST",
-          "handler": "get_financial_new",
+          "handler": "get_financial_news",
           "description": "Receive file path from news_scraper for analysis",
           "auth_required": false
         },
@@ -53,11 +57,20 @@
   },
   "custom": {
     "llm_config": {
-      "model": "gpt-5",
+      "model": "claude-opus-4-5-20251101",
       "temperature": 0.7,
       "kwargs": {}
     },
     "use_langgraph": true,
-    "max_concurrent_analyses": 20
+    "max_concurrent_analyses": 20,
+    "edgar_config": {
+      "enabled": true,
+      "use_mcp": true,
+      "model": "claude-opus-4-5-20251101",
+      "temperature": 0.7,
+      "identity": "",
+      "python_command": null,
+      "llm_kwargs": {}
+    }
   }
 }

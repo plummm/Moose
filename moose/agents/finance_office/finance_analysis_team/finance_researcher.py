@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
+import json
+import re
 
 try:
     from moose.framework.llm_core import LLMClient
@@ -16,7 +18,7 @@ except ImportError:
         LLMClient = None
 
 
-class FinancialNewsAnalyzer:
+class FinanceResearcher:
     """
     Analyzes financial news articles using LLM.
     
@@ -61,7 +63,7 @@ class FinancialNewsAnalyzer:
         )
         
         if self.logger:
-            self.logger.info(f"Initialized FinancialNewsAnalyzer with model: {model}")
+            self.logger.info(f"Initialized FinanceResearcher with model: {model}")
     
     async def analyze_article(
         self,
@@ -176,8 +178,8 @@ Follow these rules:
 
 For each article, provide:
 
-1. high_level_idea: A concise 2-3 sentence summary of the core news
-2. companies: Array of companies or tickers mentioned
+1. high_level_idea: A concise 4-5 sentence summary of the core news
+2. companies: Array of tickers mentioned, leave empty array if no tickers are mentioned
 3. sentiment: "bullish", "bearish", or "neutral"
 4. sentiment_rating: One of {BL0, BL1, BL2, BR0, BR1, BR2} or null if neutral
 5. impact_type: One of the categories above
@@ -218,8 +220,6 @@ Provide a comprehensive financial analysis in JSON format"""
             analysis_text = response.content.strip()
             
             # Try to extract JSON from markdown code blocks
-            import json
-            import re
             
             # Look for JSON in code blocks
             json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', analysis_text, re.DOTALL)
@@ -279,4 +279,85 @@ Provide a comprehensive financial analysis in JSON format"""
                 "error": str(e),
                 "analyzed_at": datetime.now().isoformat()
             }
+    
+    def save_analysis_result(
+        self,
+        analysis_result: Dict[str, Any],
+        base_data_dir: Path
+    ) -> None:
+        """
+        Save analysis result to company-specific folders.
+        
+        Args:
+            analysis_result: Analysis result dictionary from analyze_article()
+            base_data_dir: Base directory path (e.g., Path("/data/news"))
+        """
+        if "error" in analysis_result:
+            # Don't save failed analyses
+            return
+        
+        try:
+            # Get current datetime for filename
+            now = datetime.now()
+            filename = now.strftime("%Y_%m_%d_%H_%M.json")
+            year = now.strftime("%Y")
+            month = now.strftime("%m")
+            
+            # Get companies list
+            companies = analysis_result.get("companies", [])
+            
+            # Normalize company symbols: uppercase, strip spaces and special chars
+            def normalize_symbol(symbol: str) -> str:
+                """Normalize company symbol for folder name."""
+                if not symbol:
+                    return ""
+                # Uppercase and remove spaces/special characters except alphanumeric
+                normalized = re.sub(r'[^A-Z0-9]', '', symbol.upper())
+                return normalized
+            
+            # Determine where to save
+            if not companies or len(companies) == 0:
+                # No companies mentioned - save to economy folder
+                save_folders = ["economy"]
+            else:
+                # Normalize and deduplicate company symbols
+                normalized_symbols = []
+                for company in companies:
+                    normalized = normalize_symbol(str(company))
+                    if normalized and normalized not in normalized_symbols:
+                        normalized_symbols.append(normalized)
+                
+                if not normalized_symbols:
+                    # All symbols were invalid, save to economy
+                    self.logger.warning(f"No valid company symbols found, saving to economy folder")
+                    return
+                else:
+                    save_folders = normalized_symbols
+            
+            # Save to each folder
+            for folder_name in save_folders:
+                try:
+                    # Create directory structure: /data/news/{SYMBOL}/{YYYY}/{MM}/
+                    save_dir = base_data_dir / folder_name / year / month
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Full file path
+                    file_path = save_dir / filename
+                    
+                    # Save as JSON
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(analysis_result, f, indent=2, ensure_ascii=False)
+                    
+                    if self.logger:
+                        self.logger.debug(f"Saved analysis result to: {file_path}")
+                        
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"Failed to save analysis to {folder_name}: {e}")
+                    # Continue with other folders even if one fails
+                    
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error saving analysis result: {e}")
+            # Don't raise - this is a non-critical operation
 

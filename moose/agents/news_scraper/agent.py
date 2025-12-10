@@ -2,7 +2,7 @@
 
 This agent scrapes news from a configured URL, extracts text content from article URLs,
 and saves them to organized folders with SHA256-hashed filenames.
-The scraped articles are sent to the financial_report_analyzer agent for analysis.
+The scraped articles are sent to the finance_office agent for analysis.
 """
 
 import os, sys
@@ -25,7 +25,7 @@ class NewsScraper(BaseAgent):
     
     Scrapes news from a configured URL, extracts text content from article URLs,
     saves them to organized folders with SHA256-hashed filenames.
-    Sends scraped articles to financial_report_analyzer agent for analysis.
+    Sends scraped articles to finance_office agent for analysis.
     """
     
     name = "news_scraper"
@@ -51,10 +51,10 @@ class NewsScraper(BaseAgent):
             logger=self.logger
         )
         
-        # Get financial_report_analyzer endpoint URL from config
+        # Get finance_office endpoint URL from config
         custom_config = self.config.get("custom", {})
-        analyzer_config = custom_config.get("financial_report_analyzer", {})
-        analyzer_endpoint = analyzer_config.get("endpoint", "http://localhost:3501/get_financial_new")
+        analyzer_config = custom_config.get("finance_office", {})
+        analyzer_endpoint = analyzer_config.get("endpoint", "http://localhost:3501/get_financial_news")
         
         # Initialize scraping service (no summarizer or workflow)
         self.scraper_service = NewsScraperService(

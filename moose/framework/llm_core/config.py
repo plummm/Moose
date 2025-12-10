@@ -131,6 +131,11 @@ class ModelConfig:
                     "output_cost_per_token": 0.000002
                 },
                 {
+                    "model_name": "claude-opus-4-5-20251101",
+                    "input_cost_per_token": 0.000005,
+                    "output_cost_per_token": 0.000025
+                },
+                {
                     "model_name": "claude-sonnet-4-5-20250929",
                     "input_cost_per_token": 0.000003,
                     "output_cost_per_token": 0.000015

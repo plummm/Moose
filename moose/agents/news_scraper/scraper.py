@@ -397,7 +397,7 @@ class NewsScraperService:
     """
     High-level scraping service that orchestrates scraping operations.
     
-    Scrapes articles and sends file paths to financial_report_analyzer agent.
+    Scrapes articles and sends file paths to finance_office agent.
     """
     
     @staticmethod
@@ -431,7 +431,7 @@ class NewsScraperService:
     def __init__(
         self,
         scraper_core: NewsScraperCore,
-        analyzer_endpoint: str = "http://localhost:3501/get_financial_new",
+        analyzer_endpoint: str = "http://localhost:3501/get_financial_news",
         logger=None
     ):
         """
@@ -439,7 +439,7 @@ class NewsScraperService:
         
         Args:
             scraper_core: NewsScraperCore instance
-            analyzer_endpoint: HTTP endpoint URL for financial_report_analyzer
+            analyzer_endpoint: HTTP endpoint URL for finance_office
             logger: Logger instance
         """
         self.scraper_core = scraper_core
@@ -499,7 +499,7 @@ class NewsScraperService:
     
     def _send_to_analyzer(self, file_path: str, url: str) -> bool:
         """
-        Send file path to financial_report_analyzer agent.
+        Send file path to finance_office agent.
         
         Args:
             file_path: Path to scraped article file

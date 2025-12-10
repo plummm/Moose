@@ -1,57 +1,71 @@
 # LLM Core - Universal LLM Interaction Layer
 
-A unified interface for interacting with multiple LLM providers (OpenAI, Anthropic, Google, etc.) with the same API. Includes centralized cost management and load balancing through LiteLLM proxy.
+A unified interface for interacting with multiple LLM providers (OpenAI, Anthropic, Google, etc.) using LangChain. Includes automatic token counting, intelligent chunking for large inputs, cost tracking, and async support.
 
 ## Installation
 
-Install the required dependency:
+Install the required dependencies:
 
 ```bash
-pip install 'litellm[proxy]'
+pip install langchain langchain-openai langchain-anthropic langchain-google-genai tiktoken pyyaml
 ```
 
 ## Architecture
 
-The LLM Core uses **LiteLLM Proxy** to provide:
-- **Centralized Cost Management**: Automatic cost tracking for all LLM calls
-- **Load Balancing**: Distribute requests across multiple model deployments
-- **Rate Limiting**: Control request rates per API key or model
+The LLM Core uses **LangChain** with native provider classes to provide:
 - **Unified API**: Same interface regardless of provider
+- **Automatic Token Counting**: Uses `tiktoken` to accurately count tokens
+- **Intelligent Chunking**: Automatically splits large inputs (>90% of model limit) with 10% overlap
+- **Cost Tracking**: Automatic cost calculation based on token usage and model rates
+- **Async Support**: Full async/await support for non-blocking operations
+- **Streaming**: Support for streaming responses
 
-The proxy server is automatically managed by the framework - it starts on first use and stops when the framework shuts down.
+The framework uses native LangChain provider classes:
+- **OpenAI** → `ChatOpenAI`
+- **Anthropic** → `ChatAnthropic`
+- **Google Gemini** → `ChatGoogleGenerativeAI`
 
 ## Supported Providers
 
-- **OpenAI** (GPT-4, GPT-3.5, etc.)
-- **Anthropic** (Claude 3 Opus, Sonnet, Haiku)
-- **Google** (Gemini Pro, Gemini Ultra)
-- **Cohere** (Command, Command R+)
-- **Mistral** (Mistral Large, Medium, Small)
-- **Ollama** (Local models)
-- **Azure OpenAI**
-- **AWS Bedrock**
+- **OpenAI** (GPT-4, GPT-4 Turbo, GPT-3.5, GPT-4o, etc.)
+- **Anthropic** (Claude 3 Opus, Sonnet, Haiku, Claude 3.5 Sonnet, etc.)
+- **Google** (Gemini Pro, Gemini 2.5 Flash, etc.)
 
 ## Basic Usage
 
 ### Simple Message
 
 ```python
-from framework.llm_core import LLMClient
+from moose.framework.llm_core import LLMClient
 
 # Initialize client (provider is auto-detected from model name)
 client = LLMClient(model="gpt-4")
 
-# Send a message
-response = client.send_message("Hello, how are you?")
+# Send a message (async)
+response = await client.send_message("Hello, how are you?")
+print(response.content)
+```
+
+### Synchronous Wrapper
+
+For convenience, synchronous wrappers are available:
+
+```python
+from moose.framework.llm_core import LLMClient
+
+client = LLMClient(model="gpt-4")
+
+# Synchronous call (uses asyncio.run internally)
+response = client.send_message_sync("Hello, how are you?")
 print(response.content)
 ```
 
 ### With System Message
 
 ```python
-client = LLMClient(model="claude-3-opus")
+client = LLMClient(model="claude-3-opus-20240229")
 
-response = client.send_message(
+response = await client.send_message(
     message="What is the capital of France?",
     system_message="You are a helpful assistant."
 )
@@ -61,12 +75,12 @@ print(response.content)
 ### Conversation with History
 
 ```python
-from framework.llm_core import Message, MessageRole
+from moose.framework.llm_core import Message, MessageRole
 
 client = LLMClient(model="gemini-pro")
 
 # First message
-response1 = client.send_message("My name is Alice")
+response1 = await client.send_message("My name is Alice")
 print(response1.content)
 
 # Continue conversation
@@ -75,7 +89,7 @@ messages = [
     Message(role=MessageRole.ASSISTANT, content=response1.content)
 ]
 
-response2 = client.send_message(
+response2 = await client.send_message(
     message="What's my name?",
     messages=messages
 )
@@ -87,17 +101,17 @@ print(response2.content)
 ```python
 client = LLMClient(model="gpt-4")
 
-for chunk in client.stream_message("Tell me a story"):
+async for chunk in client.stream_message("Tell me a story"):
     print(chunk, end="", flush=True)
 ```
 
 ### Explicit Provider
 
 ```python
-from framework.llm_core import LLMClient, LLMProvider
+from moose.framework.llm_core import LLMClient, LLMProvider
 
 client = LLMClient(
-    model="claude-3-opus",
+    model="claude-3-opus-20240229",
     provider=LLMProvider.ANTHROPIC,
     api_key="your-api-key"
 )
@@ -110,10 +124,65 @@ client = LLMClient(
     model="gpt-4",
     temperature=0.7,
     max_tokens=500,
+    max_input_tokens=128000,  # Default: 128000
     timeout=30.0
 )
 
-response = client.send_message("Explain quantum computing", temperature=0.5)
+response = await client.send_message("Explain quantum computing", temperature=0.5)
+```
+
+## Automatic Chunking
+
+The LLM client automatically handles large inputs that exceed 90% of the model's maximum input tokens:
+
+1. **Token Counting**: Uses `tiktoken` to accurately count tokens
+2. **Chunking**: Splits content into chunks (90% of max tokens per chunk)
+3. **Overlap**: Each chunk has 10% overlap with the previous chunk for context
+4. **Parallel Processing**: All chunks are processed in parallel using `asyncio.gather`
+5. **Summarization**: Chunk responses are aggregated and sent to a final summarization step
+
+### Chunking Example
+
+```python
+client = LLMClient(model="gpt-4", max_input_tokens=128000)
+
+# Large input that exceeds 90% of max_input_tokens will be automatically chunked
+large_content = "..."  # Very long text
+
+response = await client.send_message(
+    message=large_content,
+    system_message="Summarize the key points"
+)
+# The client automatically:
+# 1. Detects the input is too large
+# 2. Splits it into chunks with 10% overlap
+# 3. Processes chunks in parallel
+# 4. Summarizes the chunk responses into a final answer
+```
+
+## Async Operations
+
+All LLM operations support async/await for non-blocking execution:
+
+```python
+import asyncio
+
+async def process_multiple_queries():
+    client = LLMClient(model="gpt-4")
+    
+    # Process multiple queries concurrently
+    tasks = [
+        client.send_message("What is AI?"),
+        client.send_message("What is ML?"),
+        client.send_message("What is NLP?")
+    ]
+    
+    responses = await asyncio.gather(*tasks)
+    for response in responses:
+        print(response.content)
+
+# Run async function
+asyncio.run(process_multiple_queries())
 ```
 
 ## API Reference
@@ -125,59 +194,86 @@ response = client.send_message("Explain quantum computing", temperature=0.5)
 Initialize the LLM client.
 
 **Parameters:**
-- `model` (str): Model name (e.g., "gpt-4", "claude-3-opus")
+- `model` (str): Model name (e.g., "gpt-4", "claude-3-opus-20240229", "gemini-pro")
 - `provider` (LLMProvider, optional): Explicit provider. Auto-detected if None.
 - `api_key` (str, optional): API key. Uses environment variables if None.
 - `temperature` (float): Sampling temperature (default: 1.0)
 - `max_tokens` (int, optional): Maximum tokens to generate
+- `max_input_tokens` (int, optional): Maximum input tokens for the model (default: 128000)
 - `timeout` (float, optional): Request timeout in seconds
+- `config` (ModelConfig, optional): ModelConfig instance for cost calculation
 
-#### `send_message(message, messages=None, system_message=None, **kwargs)`
+#### `async send_message(message, messages=None, system_message=None, **kwargs)`
 
-Send a message and receive a response.
+Send a message and receive a response (async).
 
 **Returns:** `LLMResponse` object with:
 - `content` (str): Response text
 - `model` (str): Model used
 - `finish_reason` (str): Reason for completion
-- `usage` (dict): Token usage statistics
-- `raw_response`: Raw API response
+- `usage` (dict): Token usage statistics (`input_tokens`, `output_tokens`)
+- `cost` (float): Calculated cost in USD
+- `raw_response`: Raw LangChain response
+- `request_id` (str): Unique request identifier
 
-#### `send_messages(messages, system_message=None, **kwargs)`
+**Synchronous wrapper:** `send_message_sync()` - same parameters, synchronous execution
 
-Send multiple messages in a conversation.
+#### `async send_messages(messages, system_message=None, **kwargs)`
 
-#### `stream_message(message, messages=None, system_message=None, **kwargs)`
+Send multiple messages in a conversation (async).
 
-Stream response chunks as they arrive.
+**Synchronous wrapper:** `send_messages_sync()` - same parameters, synchronous execution
+
+#### `async stream_message(message, messages=None, system_message=None, **kwargs)`
+
+Stream response chunks as they arrive (async generator).
+
+#### `async ainvoke(message, messages=None, system_message=None, **kwargs)`
+
+Low-level async invoke method (used internally).
+
+### LangChainLLM
+
+Direct access to the LangChain wrapper:
+
+```python
+from moose.framework.llm_core import LangChainLLM
+
+llm = LangChainLLM(model="gpt-4", temperature=0.7)
+
+# Synchronous
+response = llm.invoke("Hello!")
+
+# Async
+response = await llm.ainvoke("Hello!")
+```
 
 ## Configuration
 
 ### Config File Setup
 
-The framework uses a `config.yaml` file to configure models, costs, and proxy settings. 
+The framework uses a `config.yaml` file to configure model cost rates.
 
 1. **Create config file**: Copy the template or create `config.yaml` in your project directory:
    ```bash
-   cp framework/llm_core/config.yaml.template config.yaml
+   cp moose/framework/llm_core/config.yaml.template config.yaml
    ```
 
 2. **Customize models**: Edit `config.yaml` to add your models and set cost per token:
    ```yaml
-   model_list:
+   models:
      - model_name: gpt-4
-       litellm_params:
-         model: openai/gpt-4
-       model_info:
-         input_cost_per_token: 0.00003
-         output_cost_per_token: 0.00006
+       input_cost_per_token: 0.00003
+       output_cost_per_token: 0.00006
+     - model_name: claude-3-opus-20240229
+       input_cost_per_token: 0.000015
+       output_cost_per_token: 0.000075
    ```
 
-3. **Set master key**: Change the `master_key` in `general_settings` for security.
-
 The framework will automatically:
-- Find `config.yaml` in current directory, framework directory, or project directory
-- Use environment variable `LITELLM_CONFIG_PATH` to override location
+- Find `config.yaml` in current directory
+- Use environment variable `MOOSE_LLM_CONFIG_PATH` to override location
+- Use environment variable `MOOSE_LLM_CONFIG_NAME` to override filename (default: `config.yaml`)
 - Generate default config if none found
 
 ### Environment Variables
@@ -188,16 +284,22 @@ Set API keys as environment variables:
 export OPENAI_API_KEY="your-key"
 export ANTHROPIC_API_KEY="your-key"
 export GOOGLE_API_KEY="your-key"
-export COHERE_API_KEY="your-key"
-export MISTRAL_API_KEY="your-key"
 
 # Optional: Override config file location
-export LITELLM_CONFIG_PATH="/path/to/config.yaml"
+export MOOSE_LLM_CONFIG_PATH="/path/to/config.yaml"
+
+# Optional: Override config file name
+export MOOSE_LLM_CONFIG_NAME="my_config.yaml"
 ```
 
 ## Cost Tracking
 
-Cost tracking is automatic when using the proxy. Costs are logged to daily log files:
+Cost tracking is automatic when using the client. Costs are calculated based on:
+- Token usage (input and output tokens)
+- Model-specific cost rates from `config.yaml`
+- Logged to daily log files
+
+### Cost Logging
 
 - **Location**: `llm_costs_YYYY-MM-DD.log` in current directory
 - **Format**: JSON lines with timestamp, model, cost, tokens, request_id
@@ -206,7 +308,7 @@ Cost tracking is automatic when using the proxy. Costs are logged to daily log f
 ### Viewing Costs
 
 ```python
-from framework.llm_core import CostTracker
+from moose.framework.llm_core import CostTracker
 
 tracker = CostTracker()
 
@@ -224,35 +326,36 @@ print(f"GPT-4 cost today: ${model_cost:.2f}")
 Cost is automatically included in `LLMResponse`:
 
 ```python
-response = client.send_message("Hello")
+response = await client.send_message("Hello")
 print(f"Cost: ${response.cost:.6f}")
-print(f"Tokens: {response.usage}")
+print(f"Input tokens: {response.usage.get('input_tokens', 0)}")
+print(f"Output tokens: {response.usage.get('output_tokens', 0)}")
 ```
 
-## Proxy Management
+## Token Counting
 
-The proxy is automatically managed, but you can control it manually:
+The client uses `tiktoken` for accurate token counting:
 
-```python
-from framework.llm_core import ProxyManager
+- Automatically selects the appropriate encoding based on model
+- Falls back to `cl100k_base` (GPT-3.5/4, Claude) if model-specific encoding not found
+- Estimates token count if `tiktoken` is unavailable (1 token ≈ 4 characters)
 
-proxy_manager = ProxyManager.get_instance()
-
-# Check if running
-if proxy_manager.is_running():
-    print("Proxy is running")
-    print(f"URL: {proxy_manager.get_proxy_url()}")
-
-# Stop proxy (usually not needed - auto-stops on exit)
-# proxy_manager.stop()
-```
-
-## Disabling Proxy
-
-To use direct API calls instead of proxy:
+### Manual Token Counting
 
 ```python
-client = LLMClient(model="gpt-4", use_proxy=False)
+client = LLMClient(model="gpt-4")
+
+# Count tokens in text
+token_count = client._count_tokens("Hello, world!")
+print(f"Tokens: {token_count}")
+
+# Count tokens for a full message request
+total_tokens = client._count_message_tokens(
+    message="Hello",
+    system_message="You are helpful",
+    messages=[...]
+)
+print(f"Total tokens: {total_tokens}")
 ```
 
 ## Examples
@@ -262,26 +365,104 @@ client = LLMClient(model="gpt-4", use_proxy=False)
 ```python
 # Same API, different providers
 openai_client = LLMClient(model="gpt-4")
-claude_client = LLMClient(model="claude-3-opus")
+claude_client = LLMClient(model="claude-3-opus-20240229")
 gemini_client = LLMClient(model="gemini-pro")
 
 # All use the same interface
-response1 = openai_client.send_message("Hello")
-response2 = claude_client.send_message("Hello")
-response3 = gemini_client.send_message("Hello")
+response1 = await openai_client.send_message("Hello")
+response2 = await claude_client.send_message("Hello")
+response3 = await gemini_client.send_message("Hello")
+```
+
+### Parallel Processing
+
+```python
+import asyncio
+
+async def analyze_multiple_articles(articles):
+    client = LLMClient(model="gpt-4")
+    
+    tasks = [
+        client.send_message(
+            message=article,
+            system_message="Summarize this article"
+        )
+        for article in articles
+    ]
+    
+    responses = await asyncio.gather(*tasks)
+    return [r.content for r in responses]
+
+# Process 10 articles concurrently
+articles = ["Article 1...", "Article 2...", ...]
+summaries = asyncio.run(analyze_multiple_articles(articles))
 ```
 
 ### Error Handling
 
 ```python
-from framework.llm_core import LLMClient
+from moose.framework.llm_core import LLMClient
 
 try:
     client = LLMClient(model="gpt-4")
-    response = client.send_message("Hello")
+    response = await client.send_message("Hello")
 except ImportError:
-    print("Please install litellm: pip install litellm")
+    print("Please install langchain: pip install langchain langchain-openai")
 except Exception as e:
     print(f"Error: {e}")
 ```
 
+### Using LangChain Directly
+
+If you need direct access to LangChain classes:
+
+```python
+from moose.framework.llm_core import LangChainLLM
+
+llm = LangChainLLM(model="gpt-4", temperature=0.7)
+
+# Use LangChain's native methods
+response = await llm.ainvoke("Hello!")
+print(response.content)
+```
+
+## Model Configuration
+
+### Supported Models
+
+The framework supports models from three providers:
+
+**OpenAI:**
+- `gpt-4`, `gpt-4-turbo`, `gpt-4o`
+- `gpt-3.5-turbo`
+
+**Anthropic:**
+- `claude-3-opus-20240229`
+- `claude-3-sonnet-20240229`
+- `claude-3-5-sonnet-20241022`
+- `claude-sonnet-4-20250514`
+- `claude-sonnet-4-5-20250929`
+
+**Google:**
+- `gemini-pro`
+- `gemini-2.5-flash`
+
+### Adding Custom Models
+
+Add your model to `config.yaml`:
+
+```yaml
+models:
+  - model_name: your-custom-model
+    input_cost_per_token: 0.00001
+    output_cost_per_token: 0.00002
+```
+
+The provider will be auto-detected from the model name, or you can specify it explicitly:
+
+```python
+client = LLMClient(
+    model="your-custom-model",
+    provider=LLMProvider.OPENAI  # or ANTHROPIC, GOOGLE
+)
+```

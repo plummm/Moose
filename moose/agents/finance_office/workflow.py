@@ -37,16 +37,18 @@ def create_workflow(
     queue_manager,
     analyzer,
     logger,
-    max_concurrent_analyses: int = 20
+    max_concurrent_analyses: int = 20,
+    news_data_dir: Optional[Path] = None
 ) -> Any:
     """
     Create the LangGraph workflow for financial report analysis.
     
     Args:
         queue_manager: FilePathQueue instance
-        analyzer: FinancialNewsAnalyzer instance
+        analyzer: FinanceResearcher instance
         logger: Logger instance
         max_concurrent_analyses: Maximum number of concurrent LLM analysis calls (default: 20)
+        news_data_dir: Base directory for saving analysis results (default: None)
         
     Returns:
         Compiled LangGraph app
@@ -119,6 +121,13 @@ def create_workflow(
                         analyses_completed += 1
                         logger.debug(f"Successfully analyzed: {file_path}")
                         queue_manager.mark_processed()
+                        
+                        if news_data_dir:
+                            try:
+                                analyzer.save_analysis_result(analysis, news_data_dir)
+                            except Exception as save_error:
+                                # Log but don't fail the analysis
+                                logger.warning(f"Failed to save analysis result: {save_error}")
                         
                 except Exception as e:
                     logger.error(f"Error analyzing {file_path}: {e}")

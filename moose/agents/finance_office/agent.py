@@ -13,14 +13,14 @@ from moose.framework import BaseAgent
 
 # Import local modules
 try:
-    from .financial_news_analyzer import FinancialNewsAnalyzer
+    from .finance_analysis_team.finance_researcher import FinanceResearcher
     from .queue_manager import FilePathQueue
     from .workflow import create_workflow, LANGGRAPH_AVAILABLE
 except ImportError:
     # Fallback for direct execution
-    from moose.agents.financial_report_analyzer.financial_news_analyzer import FinancialNewsAnalyzer
-    from moose.agents.financial_report_analyzer.queue_manager import FilePathQueue
-    from moose.agents.financial_report_analyzer.workflow import create_workflow, LANGGRAPH_AVAILABLE
+    from moose.agents.finance_office.finance_analysis_team.finance_researcher import FinanceResearcher
+    from moose.agents.finance_office.queue_manager import FilePathQueue
+    from moose.agents.finance_office.workflow import create_workflow, LANGGRAPH_AVAILABLE
 
 
 class FinancialReportAnalyzer(BaseAgent):
@@ -31,7 +31,7 @@ class FinancialReportAnalyzer(BaseAgent):
     maintains a queue, and analyzes articles using LLM with LangGraph workflow.
     """
     
-    name = "financial_report_analyzer"
+    name = "finance_office"
     description = "Analyzes financial news articles scraped by news_scraper agent"
     
     def __init__(self, config_path=None, debug=False):
@@ -43,6 +43,12 @@ class FinancialReportAnalyzer(BaseAgent):
         data_dir_path = Path(data_dir)
         data_dir_path.mkdir(parents=True, exist_ok=True)
         self.logger.info(f"Data directory: {data_dir_path}")
+        
+        # Initialize news data directory for saving analysis results
+        news_dir = os.getenv("NEWS_RESULT_DIR", "/data/news")
+        news_data_dir = Path(news_dir)
+        news_data_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"News data directory: {news_data_dir}")
         
         # Initialize queue manager
         self.queue_manager = FilePathQueue(logger=self.logger)
@@ -58,7 +64,7 @@ class FinancialReportAnalyzer(BaseAgent):
             try:
                 model = llm_config.get("model", "gpt-5")
                 temperature = llm_config.get("temperature", 0.7)
-                analyzer = FinancialNewsAnalyzer(
+                analyzer = FinanceResearcher(
                     model=model,
                     temperature=temperature,
                     logger=self.logger,
@@ -81,7 +87,8 @@ class FinancialReportAnalyzer(BaseAgent):
                     queue_manager=self.queue_manager,
                     analyzer=analyzer,
                     logger=self.logger,
-                    max_concurrent_analyses=max_concurrent
+                    max_concurrent_analyses=max_concurrent,
+                    news_data_dir=news_data_dir
                 )
                 self.logger.info("Initialized LangGraph workflow")
                 
@@ -210,7 +217,7 @@ class FinancialReportAnalyzer(BaseAgent):
         # Call parent's run_http_server
         super().run_http_server(port=port, host=host)
     
-    async def get_financial_new(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def get_financial_news(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         HTTP endpoint handler for receiving file paths from news_scraper.
         
@@ -271,7 +278,7 @@ class FinancialReportAnalyzer(BaseAgent):
                 }
                 
         except Exception as e:
-            self.logger.error(f"Error in get_financial_new endpoint: {e}")
+            self.logger.error(f"Error in get_financial_news endpoint: {e}")
             return {
                 "status": "error",
                 "error": str(e),

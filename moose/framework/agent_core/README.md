@@ -160,7 +160,7 @@ All agent-specific configuration goes here. This section is free-form and can co
 Examples:
 - `scraper_config` for scraping agents
 - `llm_config` for LLM-based agents
-- `financial_report_analyzer` for inter-agent communication configs
+- `finance_office` for inter-agent communication configs
 - Any other agent-specific settings
 
 ### Example: News Scraper Agent
@@ -206,8 +206,8 @@ Examples:
       "start_url": "https://example.com/news",
       "rate_limit": 60
     },
-    "financial_report_analyzer": {
-      "endpoint": "http://localhost:3501/get_financial_new"
+    "finance_office": {
+      "endpoint": "http://localhost:3501/get_financial_news"
     }
   }
 }

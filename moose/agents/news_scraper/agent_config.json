@@ -52,8 +52,8 @@
       "max_retrieval_depth": 1,
       "xpath": "/html/body/div[3]"
     },
-    "financial_report_analyzer": {
-      "endpoint": "http://localhost:3501/get_financial_new"
+    "finance_office": {
+      "endpoint": "http://localhost:3501/get_financial_news"
     }
   }
 }
