@@ -165,19 +165,6 @@ class LangChainLLM:
             else:
                 return HumanMessage(content=message.content)
         elif message.role == MessageRole.ASSISTANT:
-            # #region debug log
-            import json
-            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "tool-exec",
-                    "hypothesisId": "D",
-                    "location": "langchain_integration.py:_message_to_langchain",
-                    "message": "Converting ASSISTANT message",
-                    "data": {"has_tool_calls": message.tool_calls is not None, "tool_calls_count": len(message.tool_calls) if message.tool_calls else 0},
-                    "timestamp": int(__import__('time').time() * 1000)
-                }) + "\n")
-            # #endregion
             # For ASSISTANT messages with tool calls, need to preserve them
             if message.tool_calls:
                 # Convert tool_calls to LangChain format
@@ -195,19 +182,6 @@ class LangChainLLM:
                 )
             return AIMessage(content=message.content if isinstance(message.content, str) else str(message.content))
         elif message.role == MessageRole.TOOL:
-            # #region debug log
-            import json
-            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "tool-exec",
-                    "hypothesisId": "E",
-                    "location": "langchain_integration.py:_message_to_langchain",
-                    "message": "Converting TOOL message",
-                    "data": {"tool_call_id": message.tool_call_id, "content_length": len(str(message.content))},
-                    "timestamp": int(__import__('time').time() * 1000)
-                }) + "\n")
-            # #endregion
             return ToolMessage(
                 content=message.content if isinstance(message.content, str) else str(message.content),
                 tool_call_id=message.tool_call_id or ""
@@ -352,57 +326,15 @@ class LangChainLLM:
         
         # Add conversation history if provided
         if messages:
-            for i, msg in enumerate(messages):
-                # #region debug log
-                import json
-                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({
-                        "sessionId": "debug-session",
-                        "runId": "tool-exec",
-                        "hypothesisId": "F",
-                        "location": "langchain_integration.py:ainvoke",
-                        "message": "Converting history message",
-                        "data": {"index": i, "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role), "has_tool_calls": msg.tool_calls is not None, "tool_call_id": msg.tool_call_id},
-                        "timestamp": int(__import__('time').time() * 1000)
-                    }) + "\n")
-                # #endregion
+            for msg in messages:
                 langchain_msg = self._message_to_langchain(msg)
-                # #region debug log
-                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                    tool_calls_info = []
-                    if hasattr(langchain_msg, 'tool_calls') and langchain_msg.tool_calls:
-                        for tc in langchain_msg.tool_calls:
-                            tc_id = tc.get('id') if isinstance(tc, dict) else getattr(tc, 'id', None)
-                            tool_calls_info.append(tc_id)
-                    f.write(json.dumps({
-                        "sessionId": "debug-session",
-                        "runId": "tool-exec",
-                        "hypothesisId": "F",
-                        "location": "langchain_integration.py:ainvoke",
-                        "message": "Converted history message",
-                        "data": {"index": i, "langchain_type": type(langchain_msg).__name__, "has_tool_calls": hasattr(langchain_msg, 'tool_calls'), "tool_call_ids_in_msg": tool_calls_info, "tool_call_id": getattr(langchain_msg, 'tool_call_id', None)},
-                        "timestamp": int(__import__('time').time() * 1000)
-                    }) + "\n")
-                # #endregion
                 langchain_messages.append(langchain_msg)
         
-        # Add current message
-        current_langchain_msg = self._message_to_langchain(message)
-        langchain_messages.append(current_langchain_msg)
-        
-        # #region debug log
-        import json
-        with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-            f.write(json.dumps({
-                "sessionId": "debug-session",
-                "runId": "tool-exec",
-                "hypothesisId": "G",
-                "location": "langchain_integration.py:ainvoke",
-                "message": "Full message list before LLM invoke",
-                "data": {"total_messages": len(langchain_messages), "message_types": [type(m).__name__ for m in langchain_messages]},
-                "timestamp": int(__import__('time').time() * 1000)
-            }) + "\n")
-        # #endregion
+        # Add current message only if message is provided and not None
+        # If messages already contains everything, we don't need to add message separately
+        if message is not None:
+            current_langchain_msg = self._message_to_langchain(message)
+            langchain_messages.append(current_langchain_msg)
         
         # Invoke LangChain LLM asynchronously
         try:

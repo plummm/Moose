@@ -146,7 +146,7 @@ def create_workflow(
             }
             
         except Exception as e:
-            logger.error(f"Error in analyze node: {e}", exc_info=True)
+            logger.error(f"Error in analyze node: {e}")
             return {
                 **state,
                 "status": "error",

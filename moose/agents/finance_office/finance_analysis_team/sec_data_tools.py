@@ -101,12 +101,7 @@ class SECDataTools:
             try:
                 # Determine python command
                 if python_command is None:
-                    if shutil.which("python3"):
-                        python_cmd = "python3"
-                    elif shutil.which("python"):
-                        python_cmd = "python"
-                    else:
-                        raise RuntimeError("Python not found in PATH")
+                    python_cmd = "python3"
                 else:
                     python_cmd = python_command
                 

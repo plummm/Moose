@@ -113,8 +113,7 @@ class FinancialReportAnalyzer(BaseAgent):
                 )
                 self.logger.info("Initialized LangGraph workflow")
                 
-                # Start workflow in background
-                self._start_workflow()
+                self._workflow_started = False
             except Exception as e:
                 self.logger.warning(f"Failed to initialize LangGraph workflow: {e}")
                 use_langgraph = False
@@ -124,65 +123,13 @@ class FinancialReportAnalyzer(BaseAgent):
         
         self.logger.info(f"LangGraph workflow: {'enabled' if use_langgraph else 'disabled'}")
     
-    def _start_workflow(self):
-        """Start the LangGraph workflow in background."""
-        if not self.workflow_app:
-            return
-        
-        async def run_workflow():
-            """Run workflow continuously."""
-            try:
-                initial_state = {
-                    "current_item": None,
-                    "analyses": [],
-                    "analyses_completed": 0,
-                    "analyses_failed": 0,
-                    "status": "processing",
-                    "error": None,
-                    "queue_manager": self.queue_manager,
-                    "analyzer": self.analyzer,
-                    "logger": self.logger
-                }
-                
-                # Run workflow continuously - invoke once and it will loop internally via routing
-                # But we need to keep invoking it as LangGraph workflows complete after one pass
-                while self.running:
-                    try:
-                        # Check if workflow app has async invoke method
-                        if hasattr(self.workflow_app, 'ainvoke'):
-                            # Invoke workflow - it will process one item and route back
-                            result = await self.workflow_app.ainvoke(initial_state)
-                            # Update initial_state with result for next iteration
-                            initial_state = result
-                        else:
-                            # Fallback to sync invoke in async context
-                            loop = asyncio.get_event_loop()
-                            result = await loop.run_in_executor(
-                                None,
-                                lambda: self.workflow_app.invoke(initial_state)
-                            )
-                            initial_state = result
-                        
-                        # Small delay to prevent tight loop
-                        await asyncio.sleep(0.1)
-                    except Exception as e:
-                        self.logger.error(f"Error in workflow execution: {e}")
-                        await asyncio.sleep(1)
-            except Exception as e:
-                self.logger.error(f"Workflow task error: {e}")
-        
-        # Start workflow task in background
-        # Note: This requires the agent to be running in an async context
-        # We'll start it when the HTTP server starts
-        self._workflow_started = False
-        self._workflow_loop = None
-    
     def run_http_server(self, port=None, host="0.0.0.0"):
         """Override to start workflow task when HTTP server starts."""
         # Start workflow task in background
         if self.workflow_app and not self._workflow_started:
             async def run_workflow():
                 """Run workflow continuously."""
+                self.logger.info("Running workflow")
                 try:
                     initial_state = {
                         "current_item": None,

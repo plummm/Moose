@@ -683,19 +683,6 @@ Provide your final combined response:"""
         tool_messages = []
         
         for tool_call in tool_calls:
-            # #region debug log
-            import json
-            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "tool-exec",
-                    "hypothesisId": "A",
-                    "location": "client.py:_execute_tool_calls",
-                    "message": "Processing tool call",
-                    "data": {"tool_call_type": type(tool_call).__name__, "tool_call_repr": str(tool_call)[:200]},
-                    "timestamp": int(__import__('time').time() * 1000)
-                }) + "\n")
-            # #endregion
             # Handle both dict format and LangChain tool call object format
             if isinstance(tool_call, dict):
                 tool_name = tool_call.get('name')
@@ -709,19 +696,6 @@ Provide your final combined response:"""
                 # Convert tool_args to dict if it's not already
                 if not isinstance(tool_args, dict):
                     tool_args = dict(tool_args) if hasattr(tool_args, '__dict__') else {}
-            
-            # #region debug log
-            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "tool-exec",
-                    "hypothesisId": "A",
-                    "location": "client.py:_execute_tool_calls",
-                    "message": "Extracted tool call details",
-                    "data": {"tool_name": tool_name, "tool_call_id": tool_call_id, "tool_args_keys": list(tool_args.keys()) if isinstance(tool_args, dict) else str(tool_args)},
-                    "timestamp": int(__import__('time').time() * 1000)
-                }) + "\n")
-            # #endregion
             
             if not tool_name or tool_name not in self.tool_map:
                 error_msg = f"Tool '{tool_name}' not found or not available"
@@ -770,25 +744,11 @@ Provide your final combined response:"""
                 )
                 tool_messages.append(tool_msg)
                 
-                # #region debug log
-                import json
-                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({
-                        "sessionId": "debug-session",
-                        "runId": "tool-exec",
-                        "hypothesisId": "B",
-                        "location": "client.py:_execute_tool_calls",
-                        "message": "Created tool result message",
-                        "data": {"tool_name": tool_name, "tool_call_id": tool_call_id, "result_length": len(result_str)},
-                        "timestamp": int(__import__('time').time() * 1000)
-                    }) + "\n")
-                # #endregion
-                
                 self.logger.debug(f"Tool {tool_name} executed successfully")
                 
             except Exception as e:
                 error_msg = f"Error executing tool {tool_name}: {str(e)}"
-                self.logger.error(error_msg, exc_info=True)
+                self.logger.error(error_msg)
                 tool_messages.append(Message(
                     role=MessageRole.TOOL,
                     content=f"Error: {error_msg}",
@@ -843,8 +803,8 @@ Provide your final combined response:"""
         for iteration in range(max_tool_iterations):
             # Use LangChain LLM wrapper asynchronously
             response = await self.langchain_llm.ainvoke(
-                message=conversation_messages[-1] if conversation_messages else message,
-                messages=conversation_messages[:-1] if len(conversation_messages) > 1 else None,
+                message=None,  # Don't split - pass everything in messages
+                messages=conversation_messages,  # Pass full conversation history
                 system_message=system_message,
                 request_id=f"{request_id}_iter_{iteration}",
                 **kwargs
@@ -869,35 +829,8 @@ Provide your final combined response:"""
             if response.tool_calls and self.tools:
                 self.logger.debug(f"Iteration {iteration + 1}: LLM requested {len(response.tool_calls)} tool calls")
                 
-                # #region debug log
-                import json
-                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({
-                        "sessionId": "debug-session",
-                        "runId": "tool-exec",
-                        "hypothesisId": "C",
-                        "location": "client.py:_send_message_direct",
-                        "message": "Before tool execution - tool calls from response",
-                        "data": {"iteration": iteration, "tool_calls_count": len(response.tool_calls), "tool_call_ids": [tc.get('id') if isinstance(tc, dict) else getattr(tc, 'id', None) for tc in response.tool_calls]},
-                        "timestamp": int(__import__('time').time() * 1000)
-                    }) + "\n")
-                # #endregion
-                
                 # Execute tools
                 tool_messages = await self._execute_tool_calls(response.tool_calls, conversation_messages)
-                
-                # #region debug log
-                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
-                    f.write(json.dumps({
-                        "sessionId": "debug-session",
-                        "runId": "tool-exec",
-                        "hypothesisId": "C",
-                        "location": "client.py:_send_message_direct",
-                        "message": "After tool execution - tool result messages",
-                        "data": {"tool_results_count": len(tool_messages), "tool_call_ids_in_results": [msg.tool_call_id for msg in tool_messages]},
-                        "timestamp": int(__import__('time').time() * 1000)
-                    }) + "\n")
-                # #endregion
                 
                 conversation_messages.extend(tool_messages)
                 
