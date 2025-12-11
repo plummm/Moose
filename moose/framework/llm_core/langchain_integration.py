@@ -68,6 +68,7 @@ class LangChainLLM:
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         config: Optional[ModelConfig] = None,
+        tools: Optional[List[Any]] = None,
         **kwargs
     ):
         """
@@ -79,6 +80,7 @@ class LangChainLLM:
             max_tokens: Maximum tokens to generate
             timeout: Request timeout in seconds
             config: Optional ModelConfig instance (for cost calculation)
+            tools: Optional list of LangChain tools to bind to the LLM
             **kwargs: Additional parameters for the LangChain LLM
         """
         if not LANGCHAIN_AVAILABLE:
@@ -90,9 +92,10 @@ class LangChainLLM:
         self.model = model
         self.provider = get_provider(model)
         self.config = config
+        self.tools = tools or []
         
         # Initialize appropriate LangChain class based on provider
-        self.llm = self._create_langchain_llm(
+        base_llm = self._create_langchain_llm(
             provider=self.provider,
             model=model,
             temperature=temperature,
@@ -100,6 +103,17 @@ class LangChainLLM:
             timeout=timeout,
             **kwargs
         )
+        
+        # Bind tools if provided
+        if self.tools:
+            try:
+                self.llm = base_llm.bind_tools(self.tools)
+                self.logger.debug(f"Bound {len(self.tools)} tools to LLM")
+            except Exception as e:
+                self.logger.warning(f"Failed to bind tools to LLM: {e}. Continuing without tools.")
+                self.llm = base_llm
+        else:
+            self.llm = base_llm
         
         self.logger.debug(f"Initialized LangChainLLM for {self.provider.value} model: {model}")
     
@@ -151,8 +165,49 @@ class LangChainLLM:
             else:
                 return HumanMessage(content=message.content)
         elif message.role == MessageRole.ASSISTANT:
+            # #region debug log
+            import json
+            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "tool-exec",
+                    "hypothesisId": "D",
+                    "location": "langchain_integration.py:_message_to_langchain",
+                    "message": "Converting ASSISTANT message",
+                    "data": {"has_tool_calls": message.tool_calls is not None, "tool_calls_count": len(message.tool_calls) if message.tool_calls else 0},
+                    "timestamp": int(__import__('time').time() * 1000)
+                }) + "\n")
+            # #endregion
+            # For ASSISTANT messages with tool calls, need to preserve them
+            if message.tool_calls:
+                # Convert tool_calls to LangChain format
+                # LangChain AIMessage expects tool_calls in a specific format
+                langchain_tool_calls = []
+                for tc in message.tool_calls:
+                    if isinstance(tc, dict):
+                        langchain_tool_calls.append(tc)
+                    else:
+                        # If it's already a LangChain tool call object, use as-is
+                        langchain_tool_calls.append(tc)
+                return AIMessage(
+                    content=message.content if isinstance(message.content, str) else str(message.content),
+                    tool_calls=langchain_tool_calls
+                )
             return AIMessage(content=message.content if isinstance(message.content, str) else str(message.content))
         elif message.role == MessageRole.TOOL:
+            # #region debug log
+            import json
+            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "tool-exec",
+                    "hypothesisId": "E",
+                    "location": "langchain_integration.py:_message_to_langchain",
+                    "message": "Converting TOOL message",
+                    "data": {"tool_call_id": message.tool_call_id, "content_length": len(str(message.content))},
+                    "timestamp": int(__import__('time').time() * 1000)
+                }) + "\n")
+            # #endregion
             return ToolMessage(
                 content=message.content if isinstance(message.content, str) else str(message.content),
                 tool_call_id=message.tool_call_id or ""
@@ -297,11 +352,57 @@ class LangChainLLM:
         
         # Add conversation history if provided
         if messages:
-            for msg in messages:
-                langchain_messages.append(self._message_to_langchain(msg))
+            for i, msg in enumerate(messages):
+                # #region debug log
+                import json
+                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "tool-exec",
+                        "hypothesisId": "F",
+                        "location": "langchain_integration.py:ainvoke",
+                        "message": "Converting history message",
+                        "data": {"index": i, "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role), "has_tool_calls": msg.tool_calls is not None, "tool_call_id": msg.tool_call_id},
+                        "timestamp": int(__import__('time').time() * 1000)
+                    }) + "\n")
+                # #endregion
+                langchain_msg = self._message_to_langchain(msg)
+                # #region debug log
+                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                    tool_calls_info = []
+                    if hasattr(langchain_msg, 'tool_calls') and langchain_msg.tool_calls:
+                        for tc in langchain_msg.tool_calls:
+                            tc_id = tc.get('id') if isinstance(tc, dict) else getattr(tc, 'id', None)
+                            tool_calls_info.append(tc_id)
+                    f.write(json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "tool-exec",
+                        "hypothesisId": "F",
+                        "location": "langchain_integration.py:ainvoke",
+                        "message": "Converted history message",
+                        "data": {"index": i, "langchain_type": type(langchain_msg).__name__, "has_tool_calls": hasattr(langchain_msg, 'tool_calls'), "tool_call_ids_in_msg": tool_calls_info, "tool_call_id": getattr(langchain_msg, 'tool_call_id', None)},
+                        "timestamp": int(__import__('time').time() * 1000)
+                    }) + "\n")
+                # #endregion
+                langchain_messages.append(langchain_msg)
         
         # Add current message
-        langchain_messages.append(self._message_to_langchain(message))
+        current_langchain_msg = self._message_to_langchain(message)
+        langchain_messages.append(current_langchain_msg)
+        
+        # #region debug log
+        import json
+        with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+            f.write(json.dumps({
+                "sessionId": "debug-session",
+                "runId": "tool-exec",
+                "hypothesisId": "G",
+                "location": "langchain_integration.py:ainvoke",
+                "message": "Full message list before LLM invoke",
+                "data": {"total_messages": len(langchain_messages), "message_types": [type(m).__name__ for m in langchain_messages]},
+                "timestamp": int(__import__('time').time() * 1000)
+            }) + "\n")
+        # #endregion
         
         # Invoke LangChain LLM asynchronously
         try:
@@ -315,11 +416,27 @@ class LangChainLLM:
         except Exception as e:
             if hasattr(e, 'status_code') and e.status_code == 404:
                 self.logger.error(f"Model {self.model} not found")
-            self.logger.fatal(f"Error invoking model {self.model}: {e}")
+            self.logger.critical(f"Error invoking model {self.model}: {e}")
             response = None
         
         # Extract content
         content = response.content if hasattr(response, 'content') else str(response)
+        
+        # Extract tool calls if present
+        tool_calls = None
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            # Convert LangChain tool call objects to dict format for easier handling
+            tool_calls = []
+            for tc in response.tool_calls:
+                if isinstance(tc, dict):
+                    tool_calls.append(tc)
+                else:
+                    # Convert LangChain tool call object to dict
+                    tool_calls.append({
+                        'id': getattr(tc, 'id', None),
+                        'name': getattr(tc, 'name', None),
+                        'args': dict(getattr(tc, 'args', {})) if hasattr(tc, 'args') else {}
+                    })
         
         # Extract usage
         usage = self._extract_usage_from_response(response)
@@ -341,7 +458,8 @@ class LangChainLLM:
             usage=usage,
             cost=cost,
             raw_response=response,
-            request_id=request_id
+            request_id=request_id,
+            tool_calls=tool_calls
         )
     
     def invoke(
@@ -389,11 +507,27 @@ class LangChainLLM:
         except Exception as e:
             if hasattr(e, 'status_code') and e.status_code == 404:
                 self.logger.error(f"Model {self.model} not found")
-            self.logger.fatal(f"Error invoking model {self.model}: {e}")
+            self.logger.critical(f"Error invoking model {self.model}: {e}")
             response = None
         
         # Extract content
         content = response.content if hasattr(response, 'content') else str(response)
+        
+        # Extract tool calls if present
+        tool_calls = None
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            # Convert LangChain tool call objects to dict format for easier handling
+            tool_calls = []
+            for tc in response.tool_calls:
+                if isinstance(tc, dict):
+                    tool_calls.append(tc)
+                else:
+                    # Convert LangChain tool call object to dict
+                    tool_calls.append({
+                        'id': getattr(tc, 'id', None),
+                        'name': getattr(tc, 'name', None),
+                        'args': dict(getattr(tc, 'args', {})) if hasattr(tc, 'args') else {}
+                    })
         
         # Extract usage
         usage = self._extract_usage_from_response(response)
@@ -415,7 +549,8 @@ class LangChainLLM:
             usage=usage,
             cost=cost,
             raw_response=response,
-            request_id=request_id
+            request_id=request_id,
+            tool_calls=tool_calls
         )
     
     def stream(

@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from framework.llm_core import LLMClient, Message, MessageRole, LLMResponse
 from framework.llm_core.cost_tracker import CostTracker
-from framework.logging import init_core_logger
+from framework.logging import init_core_logger, set_global_debug
 
 
 pytestmark = pytest.mark.llm
@@ -19,7 +19,8 @@ class TestLLMCore:
     def setup(self):
         """Setup test environment."""
         # Initialize logger
-        init_core_logger(debug=True)
+        set_global_debug(True)
+        init_core_logger()
         
         # Check for required API keys
         self.has_openai_key = bool(os.getenv("OPENAI_API_KEY"))

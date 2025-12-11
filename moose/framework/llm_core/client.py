@@ -50,6 +50,7 @@ class LLMClient:
         max_input_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         config: Optional[ModelConfig] = None,
+        tools: Optional[List[Any]] = None,
         **kwargs
     ):
         """
@@ -64,6 +65,7 @@ class LLMClient:
             max_input_tokens: Maximum input tokens for the model (default: 128000)
             timeout: Request timeout in seconds
             config: Optional ModelConfig instance (for cost calculation)
+            tools: Optional list of LangChain tools to bind to the LLM
             **kwargs: Additional provider-specific parameters
         """
         self.logger = get_core_logger()
@@ -100,6 +102,15 @@ class LLMClient:
                 self.logger.warning(f"Failed to load config: {e}, cost calculation may not work")
                 config = None
         
+        # Store tools for potential tool execution
+        self.tools = tools or []
+        self.tool_map = {}
+        if self.tools:
+            # Create a map of tool names to tool instances for easy lookup
+            for tool in self.tools:
+                if hasattr(tool, 'name'):
+                    self.tool_map[tool.name] = tool
+        
         # Initialize LangChain LLM wrapper
         try:
             self.langchain_llm = LangChainLLM(
@@ -108,9 +119,12 @@ class LLMClient:
                 max_tokens=max_tokens,
                 timeout=timeout,
                 config=config,
+                tools=tools,
                 **kwargs
             )
             self.logger.debug(f"Initialized LangChain LLM wrapper for {model}")
+            if self.tools:
+                self.logger.debug(f"Bound {len(self.tools)} tools to LLM")
         except Exception as e:
             self.logger.error(f"Failed to initialize LangChain LLM: {e}")
             raise
@@ -651,22 +665,158 @@ Provide your final combined response:"""
         
         return final_response
     
+    async def _execute_tool_calls(
+        self,
+        tool_calls: List[Any],
+        messages: Optional[List[Message]] = None
+    ) -> List[Message]:
+        """
+        Execute tool calls and return tool result messages.
+        
+        Args:
+            tool_calls: List of tool call objects from LLM response (can be dicts or LangChain tool call objects)
+            messages: Current conversation messages
+            
+        Returns:
+            List of ToolMessage objects with tool results
+        """
+        tool_messages = []
+        
+        for tool_call in tool_calls:
+            # #region debug log
+            import json
+            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "tool-exec",
+                    "hypothesisId": "A",
+                    "location": "client.py:_execute_tool_calls",
+                    "message": "Processing tool call",
+                    "data": {"tool_call_type": type(tool_call).__name__, "tool_call_repr": str(tool_call)[:200]},
+                    "timestamp": int(__import__('time').time() * 1000)
+                }) + "\n")
+            # #endregion
+            # Handle both dict format and LangChain tool call object format
+            if isinstance(tool_call, dict):
+                tool_name = tool_call.get('name')
+                tool_call_id = tool_call.get('id')
+                tool_args = tool_call.get('args', {})
+            else:
+                # LangChain tool call object
+                tool_name = getattr(tool_call, 'name', None)
+                tool_call_id = getattr(tool_call, 'id', None)
+                tool_args = getattr(tool_call, 'args', {})
+                # Convert tool_args to dict if it's not already
+                if not isinstance(tool_args, dict):
+                    tool_args = dict(tool_args) if hasattr(tool_args, '__dict__') else {}
+            
+            # #region debug log
+            with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "tool-exec",
+                    "hypothesisId": "A",
+                    "location": "client.py:_execute_tool_calls",
+                    "message": "Extracted tool call details",
+                    "data": {"tool_name": tool_name, "tool_call_id": tool_call_id, "tool_args_keys": list(tool_args.keys()) if isinstance(tool_args, dict) else str(tool_args)},
+                    "timestamp": int(__import__('time').time() * 1000)
+                }) + "\n")
+            # #endregion
+            
+            if not tool_name or tool_name not in self.tool_map:
+                error_msg = f"Tool '{tool_name}' not found or not available"
+                self.logger.warning(error_msg)
+                tool_messages.append(Message(
+                    role=MessageRole.TOOL,
+                    content=f"Error: {error_msg}",
+                    tool_call_id=tool_call_id
+                ))
+                continue
+            
+            tool = self.tool_map[tool_name]
+            
+            try:
+                self.logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
+                
+                # Execute tool (LangChain tools support both sync and async)
+                # LangChain StructuredTool has invoke/ainvoke methods
+                if hasattr(tool, 'ainvoke'):
+                    # Async invoke
+                    result = await tool.ainvoke(tool_args)
+                elif hasattr(tool, 'invoke'):
+                    # Sync invoke - run in executor for async context
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, lambda: tool.invoke(tool_args))
+                elif callable(tool):
+                    # Direct function call (fallback)
+                    if asyncio.iscoroutinefunction(tool):
+                        result = await tool(**tool_args)
+                    else:
+                        loop = asyncio.get_event_loop()
+                        result = await loop.run_in_executor(None, lambda: tool(**tool_args))
+                else:
+                    raise ValueError(f"Tool {tool_name} is not callable")
+                
+                # Convert result to string
+                if isinstance(result, str):
+                    result_str = result
+                else:
+                    result_str = str(result)
+                
+                tool_msg = Message(
+                    role=MessageRole.TOOL,
+                    content=result_str,
+                    tool_call_id=tool_call_id
+                )
+                tool_messages.append(tool_msg)
+                
+                # #region debug log
+                import json
+                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "tool-exec",
+                        "hypothesisId": "B",
+                        "location": "client.py:_execute_tool_calls",
+                        "message": "Created tool result message",
+                        "data": {"tool_name": tool_name, "tool_call_id": tool_call_id, "result_length": len(result_str)},
+                        "timestamp": int(__import__('time').time() * 1000)
+                    }) + "\n")
+                # #endregion
+                
+                self.logger.debug(f"Tool {tool_name} executed successfully")
+                
+            except Exception as e:
+                error_msg = f"Error executing tool {tool_name}: {str(e)}"
+                self.logger.error(error_msg, exc_info=True)
+                tool_messages.append(Message(
+                    role=MessageRole.TOOL,
+                    content=f"Error: {error_msg}",
+                    tool_call_id=tool_call_id
+                ))
+        
+        return tool_messages
+    
     async def _send_message_direct(
         self,
         message: Union[str, Message],
         messages: Optional[List[Message]] = None,
         system_message: Optional[Union[str, Message]] = None,
         request_id: str = None,
+        max_tool_iterations: int = 20,
         **kwargs
     ) -> LLMResponse:
         """
         Send message directly without chunking (internal async method).
+        
+        Supports tool calling with automatic execution and multi-turn conversations.
         
         Args:
             message: User message
             messages: Optional conversation history
             system_message: Optional system message
             request_id: Request ID
+            max_tool_iterations: Maximum number of tool call iterations (default: 10)
             **kwargs: Additional parameters
             
         Returns:
@@ -675,31 +825,114 @@ Provide your final combined response:"""
         if request_id is None:
             request_id = str(uuid.uuid4())
         
-        # Use LangChain LLM wrapper asynchronously
-        response = await self.langchain_llm.ainvoke(
-            message=message,
-            messages=messages,
-            system_message=system_message,
-            request_id=request_id,
-            **kwargs
-        )
+        # Build conversation history
+        conversation_messages = list(messages) if messages else []
+        
+        # Add current message
+        if isinstance(message, str):
+            conversation_messages.append(Message(role=MessageRole.USER, content=message))
+        else:
+            conversation_messages.append(message)
+        
+        # Track total cost and usage across tool calls
+        total_cost = 0.0
+        total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        final_response = None
+        
+        # Iterate until we get a final response (no more tool calls) or hit max iterations
+        for iteration in range(max_tool_iterations):
+            # Use LangChain LLM wrapper asynchronously
+            response = await self.langchain_llm.ainvoke(
+                message=conversation_messages[-1] if conversation_messages else message,
+                messages=conversation_messages[:-1] if len(conversation_messages) > 1 else None,
+                system_message=system_message,
+                request_id=f"{request_id}_iter_{iteration}",
+                **kwargs
+            )
+            
+            # Accumulate cost and usage
+            if response.cost:
+                total_cost += response.cost
+            if response.usage:
+                total_usage["input_tokens"] += response.usage.get("input_tokens", 0)
+                total_usage["output_tokens"] += response.usage.get("output_tokens", 0)
+                total_usage["total_tokens"] += response.usage.get("total_tokens", 0)
+            
+            # Add assistant response to conversation
+            conversation_messages.append(Message(
+                role=MessageRole.ASSISTANT,
+                content=response.content,
+                tool_calls=response.tool_calls
+            ))
+            
+            # Check if there are tool calls
+            if response.tool_calls and self.tools:
+                self.logger.debug(f"Iteration {iteration + 1}: LLM requested {len(response.tool_calls)} tool calls")
+                
+                # #region debug log
+                import json
+                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "tool-exec",
+                        "hypothesisId": "C",
+                        "location": "client.py:_send_message_direct",
+                        "message": "Before tool execution - tool calls from response",
+                        "data": {"iteration": iteration, "tool_calls_count": len(response.tool_calls), "tool_call_ids": [tc.get('id') if isinstance(tc, dict) else getattr(tc, 'id', None) for tc in response.tool_calls]},
+                        "timestamp": int(__import__('time').time() * 1000)
+                    }) + "\n")
+                # #endregion
+                
+                # Execute tools
+                tool_messages = await self._execute_tool_calls(response.tool_calls, conversation_messages)
+                
+                # #region debug log
+                with open('/home/etenal/projects/Moose/.cursor/debug.log', 'a') as f:
+                    f.write(json.dumps({
+                        "sessionId": "debug-session",
+                        "runId": "tool-exec",
+                        "hypothesisId": "C",
+                        "location": "client.py:_send_message_direct",
+                        "message": "After tool execution - tool result messages",
+                        "data": {"tool_results_count": len(tool_messages), "tool_call_ids_in_results": [msg.tool_call_id for msg in tool_messages]},
+                        "timestamp": int(__import__('time').time() * 1000)
+                    }) + "\n")
+                # #endregion
+                
+                conversation_messages.extend(tool_messages)
+                
+                # Continue loop to get final response with tool results
+                continue
+            else:
+                # No more tool calls, this is the final response
+                final_response = response
+                break
+        
+        if final_response is None:
+            # Hit max iterations, use last response
+            self.logger.warning(f"Reached max tool iterations ({max_tool_iterations}), using last response")
+            final_response = response
+        
+        # Update final response with accumulated cost and usage
+        final_response.cost = total_cost if total_cost > 0 else final_response.cost
+        final_response.usage = total_usage if any(total_usage.values()) else final_response.usage
         
         # Log cost if available
-        if response.cost is not None and LLMClient._cost_tracker:
+        if final_response.cost is not None and LLMClient._cost_tracker:
             LLMClient._cost_tracker.log_cost(
                 model=self.model,
-                cost=response.cost,
-                tokens=response.usage,
+                cost=final_response.cost,
+                tokens=final_response.usage,
                 request_id=request_id
             )
         
         self.logger.debug(f"Received response from {self.model}")
-        if response.usage:
-            self.logger.debug(f"Token usage: {response.usage}")
-        if response.cost is not None:
-            self.logger.debug(f"Cost: ${response.cost:.6f}")
+        if final_response.usage:
+            self.logger.debug(f"Token usage: {final_response.usage}")
+        if final_response.cost is not None:
+            self.logger.debug(f"Cost: ${final_response.cost:.6f}")
         
-        return response
+        return final_response
     
     def send_messages_sync(
         self,

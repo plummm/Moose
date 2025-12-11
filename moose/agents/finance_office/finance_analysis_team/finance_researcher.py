@@ -36,6 +36,7 @@ class FinanceResearcher:
         model: str = "gpt-5",
         temperature: float = 0.7,
         logger=None,
+        sec_data_tools=None,
         **llm_kwargs
     ):
         """
@@ -45,6 +46,7 @@ class FinanceResearcher:
             model: LLM model name (e.g., "gpt-4", "claude-3-opus-20240229")
             temperature: Sampling temperature for LLM
             logger: Logger instance
+            sec_data_tools: Optional SECDataTools instance for SEC data access
             **llm_kwargs: Additional arguments for LLMClient
         """
         if not LLM_AVAILABLE:
@@ -56,14 +58,31 @@ class FinanceResearcher:
         self.model = model
         self.temperature = temperature
         self.logger = logger
+        self.sec_data_tools = sec_data_tools
+        
+        # Get tools from SECDataTools if provided
+        tools = None
+        if sec_data_tools:
+            try:
+                tools = sec_data_tools.get_langchain_tools()
+                if self.logger:
+                    self.logger.info(f"Loaded {len(tools)} SEC data tools")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to load SEC data tools: {e}")
+                tools = None
+        
         self.llm_client = LLMClient(
             model=model,
             temperature=temperature,
+            tools=tools,
             **llm_kwargs
         )
         
         if self.logger:
             self.logger.info(f"Initialized FinanceResearcher with model: {model}")
+            if tools:
+                self.logger.info(f"SEC data tools enabled: {len(tools)} tools available")
     
     async def analyze_article(
         self,
@@ -120,8 +139,33 @@ class FinanceResearcher:
             }
         
         # Create prompt for financial news analysis
-        system_message = """You are a financial news analyst specializing in market-impact evaluation. 
+        tools_instruction = ""
+        if self.sec_data_tools:
+            tools_instruction = """
+
+**Available Tools:**
+You have access to SEC data tools that can provide detailed company information, financial statements, and filings:
+- get_company_research: Get comprehensive company intelligence (profile, financials, filings, ownership)
+- analyze_financials: Perform multi-period financial statement analysis for trend analysis
+- get_company_info: Get basic company information from SEC filings
+
+When analyzing companies mentioned in the article, you may use these tools to gather additional context about:
+- Company financial health and recent performance
+- Recent SEC filings and regulatory activity
+- Financial trends and comparisons
+- Company profile and business information
+
+Use tools when you need additional context to make more informed analysis, especially for:
+- Verifying company information
+- Understanding financial implications of news
+- Assessing company fundamentals
+- Comparing current performance to historical data
+
+"""
+        
+        system_message = f"""You are a financial news analyst specializing in market-impact evaluation. 
 Your goal is to analyze financial news articles and provide structured insights for trading decisions.
+{tools_instruction}
 
 Follow these rules:
 
@@ -181,13 +225,13 @@ For each article, provide:
 1. high_level_idea: A concise 4-5 sentence summary of the core news
 2. companies: Array of tickers mentioned, leave empty array if no tickers are mentioned
 3. sentiment: "bullish", "bearish", or "neutral"
-4. sentiment_rating: One of {BL0, BL1, BL2, BR0, BR1, BR2} or null if neutral
+4. sentiment_rating: One of {{BL0, BL1, BL2, BR0, BR1, BR2}} or null if neutral
 5. impact_type: One of the categories above
 6. confidence: Integer 1-10
 7. trading_insights: Brief actionable notes (e.g., expected market reaction, regulatory risk, upside drivers)
 
 Format the output strictly as JSON:
-{
+{{
   "title": "",
   "high_level_idea": "",
   "companies": [],
@@ -196,7 +240,7 @@ Format the output strictly as JSON:
   "impact_type": "",
   "confidence": 1,
   "trading_insights": ""
-}"""
+}}"""
         
         user_message = f"""Analyze the following financial news article for trading decision-making:
 

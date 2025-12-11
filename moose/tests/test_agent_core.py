@@ -12,7 +12,7 @@ from framework.agent_core import (
     DockerfileGenerator,
     AgentRegistry
 )
-from framework.logging import init_core_logger
+from framework.logging import init_core_logger, set_global_debug
 
 
 class TestAgentCore:
@@ -22,7 +22,8 @@ class TestAgentCore:
     def setup(self):
         """Setup test environment."""
         # Initialize logger
-        init_core_logger(debug=True)
+        set_global_debug(True)
+        init_core_logger()
         
         # Create temporary agents directory
         self.temp_agents_dir = Path(tempfile.mkdtemp())

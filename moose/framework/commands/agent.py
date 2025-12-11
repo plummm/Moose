@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Optional
 try:
     from moose.framework.agent_core import AgentLoader, ContainerManager
-    from moose.framework.logging import init_core_logger, get_core_logger
+    from moose.framework.logging import init_core_logger, get_core_logger, set_global_debug
 except ImportError:
     # Fallback for development mode
     from framework.agent_core import AgentLoader, ContainerManager
-    from framework.logging import init_core_logger, get_core_logger
+    from framework.logging import init_core_logger, get_core_logger, set_global_debug
 
 
 class AgentCommand:
@@ -73,8 +73,9 @@ class AgentCommand:
     
     def run(self, args):
         """Run the agent command."""
-        # Initialize logging
-        init_core_logger(debug=args.debug)
+        # Set global debug flag before initializing logger
+        set_global_debug(args.debug)
+        init_core_logger()
         logger = get_core_logger()
         
         if not hasattr(args, 'subcommand') or args.subcommand is None:

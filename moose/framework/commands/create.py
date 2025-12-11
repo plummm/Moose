@@ -4,10 +4,10 @@ import json
 import re
 from pathlib import Path
 try:
-    from moose.framework.logging import setup_project_logger, init_core_logger, get_core_logger
+    from moose.framework.logging import setup_project_logger, init_core_logger, get_core_logger, set_global_debug
 except ImportError:
     # Fallback for development mode
-    from framework.logging import setup_project_logger, init_core_logger, get_core_logger
+    from framework.logging import setup_project_logger, init_core_logger, get_core_logger, set_global_debug
 
 
 class CreateCommand:
@@ -143,7 +143,8 @@ __all__ = ['app', 'workflow', 'WorkflowState']
         """Execute the create command."""
         project_name = args.project_name
         debug = getattr(args, 'debug', False)
-        logger = init_core_logger(debug=debug)
+        set_global_debug(debug)
+        logger = init_core_logger()
         logger.info(f"Creating project: {project_name}")
         
         # Get projects directory from environment variable

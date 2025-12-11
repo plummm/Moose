@@ -6,10 +6,10 @@ import subprocess
 import os
 from pathlib import Path
 try:
-    from moose.framework.logging import init_core_logger, get_core_logger
+    from moose.framework.logging import init_core_logger, get_core_logger, set_global_debug
 except ImportError:
     # Fallback for development mode
-    from framework.logging import init_core_logger, get_core_logger
+    from framework.logging import init_core_logger, get_core_logger, set_global_debug
 
 
 class TestCommand:
@@ -41,7 +41,8 @@ class TestCommand:
     def run(self, args):
         """Execute the test command."""
         debug = getattr(args, 'debug', False)
-        logger = init_core_logger(debug=debug)
+        set_global_debug(debug)
+        logger = init_core_logger()
         logger.info(f"Running tests for component: {args.component}")
         
         # Get test directory (moose/tests/)

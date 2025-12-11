@@ -58,6 +58,7 @@ class LLMResponse:
     cost: Optional[float] = None
     raw_response: Optional[Any] = None
     request_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert response to dictionary."""
@@ -68,6 +69,7 @@ class LLMResponse:
             "usage": self.usage,
             "cost": self.cost,
             "request_id": self.request_id,
+            "tool_calls": self.tool_calls,
             "raw_response": self.raw_response,
         }
 

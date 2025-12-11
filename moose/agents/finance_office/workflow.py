@@ -73,6 +73,7 @@ def create_workflow(
             analyzer = state["analyzer"]
             logger = state["logger"]
             
+            logger.info("Analyze node started")
             # Get next item from queue
             current_item = state.get("current_item")
             

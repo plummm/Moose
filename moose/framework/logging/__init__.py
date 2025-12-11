@@ -128,13 +128,36 @@ class MooseLogger:
 
 # Global logger instance (console only by default)
 _logger_instance: Optional[MooseLogger] = None
+_debug: bool = False
 
-def init_core_logger(debug: bool = False):
+def set_global_debug(debug: bool):
+    """
+    Set the global debug flag.
+    
+    Args:
+        debug: Debug flag value
+    """
+    global _debug
+    _debug = debug
+    # If logger is already initialized, update its log level
+    if _logger_instance is not None:
+        _logger_instance.update_log_level(debug)
+
+def get_global_debug() -> bool:
+    """
+    Get the current global debug flag value.
+    
+    Returns:
+        Current debug flag value
+    """
+    return _debug
+
+def init_core_logger():
     """
     Initialize the core logger.
     """
     global _logger_instance
-    _logger_instance = MooseLogger(name="moose", log_file=None, debug=debug, label="[core]")
+    _logger_instance = MooseLogger(name="moose", log_file=None, debug=_debug, label="[core]")
     return _logger_instance
 
 def get_core_logger():

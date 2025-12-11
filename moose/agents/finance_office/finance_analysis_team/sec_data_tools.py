@@ -128,6 +128,9 @@ class SECDataTools:
                 # Initialize MCP client
                 self.mcp_client = MultiServerMCPClient(mcp_config)
                 
+                import asyncio
+                asyncio.run(self._ensure_tools_loaded())
+                
                 if self.logger:
                     self.logger.info(f"Initialized MCP client for edgartools (python: {python_cmd})")
                 
@@ -196,129 +199,16 @@ class SECDataTools:
         
         tools = []
         
-        if self.use_mcp and self.mcp_client:
-            # Create tools from MCP tools
-            # We'll create wrapper functions that call MCP tools
-            async def get_company_research(
-                identifier: str,
-                include_financials: bool = True,
-                include_filings: bool = True,
-                include_ownership: bool = False,
-                detail_level: str = "standard"
-            ) -> str:
-                """Get comprehensive company research including profile, financials, and filings."""
-                await self._ensure_tools_loaded()
-                if "edgar_company_research" in self.mcp_tools:
-                    tool = self.mcp_tools["edgar_company_research"]
-                    result = await tool.ainvoke({
-                        "identifier": identifier,
-                        "include_financials": include_financials,
-                        "include_filings": include_filings,
-                        "include_ownership": include_ownership,
-                        "detail_level": detail_level
-                    })
-                    return str(result)
-                else:
-                    return f"Tool edgar_company_research not available for {identifier}"
-            
-            async def analyze_financials(
-                company: str,
-                periods: int = 4,
-                annual: bool = True,
-                statement_types: List[str] = None
-            ) -> str:
-                """Analyze company financials over multiple periods."""
-                if statement_types is None:
-                    statement_types = ["income", "balance", "cash_flow"]
-                await self._ensure_tools_loaded()
-                if "edgar_analyze_financials" in self.mcp_tools:
-                    tool = self.mcp_tools["edgar_analyze_financials"]
-                    result = await tool.ainvoke({
-                        "company": company,
-                        "periods": periods,
-                        "annual": annual,
-                        "statement_types": statement_types
-                    })
-                    return str(result)
-                else:
-                    return f"Tool edgar_analyze_financials not available for {company}"
-            
-            async def get_company_info(
-                identifier: str,
-                include_financials: bool = True
-            ) -> str:
-                """Get basic company information from SEC filings."""
-                await self._ensure_tools_loaded()
-                if "edgar_get_company" in self.mcp_tools:
-                    tool = self.mcp_tools["edgar_get_company"]
-                    result = await tool.ainvoke({
-                        "identifier": identifier,
-                        "include_financials": include_financials
-                    })
-                    return str(result)
-                else:
-                    return f"Tool edgar_get_company not available for {identifier}"
-            
-            # Create Pydantic models for tool schemas
-            class GetCompanyResearchInput(BaseModel):
-                identifier: str = Field(description="Company ticker, CIK, or name")
-                include_financials: bool = Field(default=True, description="Include latest financial statements")
-                include_filings: bool = Field(default=True, description="Include recent filing activity summary")
-                include_ownership: bool = Field(default=False, description="Include insider/institutional ownership highlights")
-                detail_level: str = Field(default="standard", description="Response detail level: minimal, standard, or detailed")
-            
-            class AnalyzeFinancialsInput(BaseModel):
-                company: str = Field(description="Company ticker, CIK, or name")
-                periods: int = Field(default=4, description="Number of periods to analyze")
-                annual: bool = Field(default=True, description="Annual (true) or quarterly (false) periods")
-                statement_types: List[str] = Field(default=["income"], description="Statements to include: income, balance, cash_flow")
-            
-            class GetCompanyInfoInput(BaseModel):
-                identifier: str = Field(description="Company ticker, CIK, or name")
-                include_financials: bool = Field(default=True, description="Include latest financial statements")
-            
-            # Create LangChain tools
-            tools.append(StructuredTool.from_function(
-                func=get_company_research,
-                name="get_company_research",
-                description="Get comprehensive company intelligence combining profile, financials, recent activity, and ownership. Use this for detailed company research.",
-                args_schema=GetCompanyResearchInput
-            ))
-            
-            tools.append(StructuredTool.from_function(
-                func=analyze_financials,
-                name="analyze_financials",
-                description="Perform multi-period financial statement analysis for trend analysis and comparisons. Use this to analyze financial trends over time.",
-                args_schema=AnalyzeFinancialsInput
-            ))
-            
-            tools.append(StructuredTool.from_function(
-                func=get_company_info,
-                name="get_company_info",
-                description="Get basic company information from SEC filings. Use this for quick company lookups.",
-                args_schema=GetCompanyInfoInput
-            ))
-        else:
-            # Fallback: create tools that use direct edgartools
-            # For now, we'll create simple wrapper tools
-            async def get_company_direct(identifier: str) -> str:
-                """Get company information using direct edgartools."""
-                try:
-                    company = Company(identifier)
-                    financials = company.get_financials()
-                    return f"Company: {identifier}\nFinancials available: {financials is not None}"
-                except Exception as e:
-                    return f"Error getting company info: {str(e)}"
-            
-            class GetCompanyDirectInput(BaseModel):
-                identifier: str = Field(description="Company ticker, CIK, or name")
-            
-            tools.append(StructuredTool.from_function(
-                func=get_company_direct,
-                name="get_company_info",
-                description="Get company information using direct edgartools (fallback mode)",
-                args_schema=GetCompanyDirectInput
-            ))
+        if self.use_mcp and self.mcp_client and self.mcp_tools:
+            mcp_tool_list = list(self.mcp_tools.keys())
+            for tool_name in mcp_tool_list:
+                if tool_name.startswith('edgar_'):
+                    tool: StructuredTool = self.mcp_tools[tool_name]
+                    tool.name = tool_name[len('edgar_'):]
+                    self.mcp_tools.pop(tool_name)
+                    self.mcp_tools[tool.name] = tool
+                    
+            tools.extend(self.mcp_tools.values())
         
         self._langchain_tools = tools
         if self.logger:
