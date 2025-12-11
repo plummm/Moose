@@ -141,27 +141,7 @@ class FinanceResearcher:
         # Create prompt for financial news analysis
         tools_instruction = ""
         if self.sec_data_tools:
-            tools_instruction = """
-
-**Available Tools:**
-You have access to SEC data tools that can provide detailed company information, financial statements, and filings:
-- get_company_research: Get comprehensive company intelligence (profile, financials, filings, ownership)
-- analyze_financials: Perform multi-period financial statement analysis for trend analysis
-- get_company_info: Get basic company information from SEC filings
-
-When analyzing companies mentioned in the article, you may use these tools to gather additional context about:
-- Company financial health and recent performance
-- Recent SEC filings and regulatory activity
-- Financial trends and comparisons
-- Company profile and business information
-
-Use tools when you need additional context to make more informed analysis, especially for:
-- Verifying company information
-- Understanding financial implications of news
-- Assessing company fundamentals
-- Comparing current performance to historical data
-
-"""
+            tools_instruction = self._summarize_tools()
         
         system_message = f"""You are a financial news analyst specializing in market-impact evaluation. 
 Your goal is to analyze financial news articles and provide structured insights for trading decisions.
@@ -405,3 +385,32 @@ Provide a comprehensive financial analysis in JSON format"""
                 self.logger.error(f"Error saving analysis result: {e}")
             # Don't raise - this is a non-critical operation
 
+    def _summarize_tools(self) -> str:
+        """Summarize the tools available to the LLM."""
+        self.mcp_tools = self.sec_data_tools.mcp_tools
+        tool_descriptions = []
+        for tool_name in self.mcp_tools:
+            description = self.mcp_tools[tool_name].description
+            tool_descriptions.append(f"- {tool_name}: {description}")
+        ret = """
+
+**Available Tools:**
+You have access to SEC data tools that can provide detailed company information, financial statements, and filings:
+{}
+
+When analyzing companies mentioned in the article, you may use these tools to gather additional context about:
+- Company financial health and recent performance
+- Recent SEC filings and regulatory activity
+- Financial trends and comparisons
+- Company profile and business information
+- Quarterly financial reports
+
+Use tools when you need additional context to make more informed analysis, especially for:
+- Verifying company information
+- Understanding financial implications of news
+- Assessing company fundamentals
+- Comparing current performance to historical data
+- Predicting company future growth and profitability
+- Identifying company risks and opportunities
+""".format("\n".join(tool_descriptions))
+        return ret

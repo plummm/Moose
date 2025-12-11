@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
 from abc import abstractmethod
 try:
-    from moose.framework.logging import get_logger
+    from moose.framework.logging import get_agent_logger, get_project_id, set_global_debug
 except ImportError:
     # Fallback for development mode
-    from framework.logging import get_logger
+    from framework.logging import get_agent_logger, get_project_id, set_global_debug
 
 try:
     from flask import Flask, request, jsonify
@@ -55,16 +55,28 @@ class BaseAgent():
             config_path: Path to agent_config.json. If None, looks for it in current directory.
             debug: Enable debug logging
         """
-        self.logger = get_logger(name=self.name, label=f"[agent:{self.name}]", debug=debug)
+        set_global_debug(debug)
         
         if type(config_path) == str:
             config_path = Path(config_path)
         self.config_path = config_path or Path("agent_config.json")
-        self.config = self.load_config()
+        self.config = self._load_config_early()
         
-        # Agent metadata from config
+        # Agent metadata from config (set before logger initialization)
         self.name = self.config.get("name", "unknown_agent")
         self.description = self.config.get("description", "")
+        
+        # Use hierarchical agent logger (moose.project.<id>.agent.<name>)
+        # This ensures logs go to:
+        # 1. Console (streamed)
+        # 2. moose.log (via propagation)
+        # 3. agents/<agent_name>.log (dedicated agent log)
+        project_id = get_project_id() or "default"
+        self.logger = get_agent_logger(
+            agent_name=self.name,
+            project_id=project_id,
+            debug=debug
+        )
         
         # Communication mode
         self.running = False
@@ -127,6 +139,34 @@ class BaseAgent():
             # Use simple format for web UI
             handler.setFormatter(logging.Formatter('%(message)s'))
             self.logger.logger.addHandler(handler)
+    
+    def _load_config_early(self) -> Dict[str, Any]:
+        """
+        Load agent configuration early (before logger is initialized).
+        
+        This is called during __init__ to get agent name for logger setup.
+        
+        Returns:
+            Configuration dictionary
+            
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            ValueError: If config is invalid
+        """
+        if not self.config_path.exists():
+            raise FileNotFoundError(
+                f"Agent config not found: {self.config_path}. "
+                f"Each agent must have an agent_config.json file."
+            )
+        
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            return config
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in agent config {self.config_path}: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to load agent config: {e}")
     
     def load_config(self) -> Dict[str, Any]:
         """

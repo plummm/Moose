@@ -12,13 +12,13 @@ try:
     from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
     from moose.framework.llm_core.providers import LLMProvider, get_provider
     from moose.framework.llm_core.config import ModelConfig
-    from moose.framework.logging import get_core_logger
+    from moose.framework.logging import get_core_logger, get_llm_logger
 except ImportError:
     # Fallback for development mode
     from framework.llm_core.models import Message, MessageRole, LLMResponse
     from framework.llm_core.providers import LLMProvider, get_provider
     from framework.llm_core.config import ModelConfig
-    from framework.logging import get_core_logger
+    from framework.logging import get_core_logger, get_llm_logger
 
 try:
     from langchain_openai import ChatOpenAI
@@ -89,6 +89,7 @@ class LangChainLLM:
             )
         
         self.logger = get_core_logger()
+        self.llm_logger = get_llm_logger()
         self.model = model
         self.provider = get_provider(model)
         self.config = config
@@ -336,6 +337,13 @@ class LangChainLLM:
             current_langchain_msg = self._message_to_langchain(message)
             langchain_messages.append(current_langchain_msg)
         
+        # Log LLM request with all messages
+        self.llm_logger.log_request(
+            messages=langchain_messages,
+            request_id=request_id or "unknown",
+            model=self.model
+        )
+        
         # Invoke LangChain LLM asynchronously
         try:
             # Check if LLM has ainvoke method (async)
@@ -382,6 +390,15 @@ class LangChainLLM:
             metadata = response.response_metadata
             if metadata:
                 finish_reason = metadata.get('finish_reason') or metadata.get('stop_reason')
+        
+        # Log LLM response
+        self.llm_logger.log_response(
+            response=response,
+            request_id=request_id or "unknown",
+            model=self.model,
+            usage=usage,
+            cost=cost
+        )
         
         return LLMResponse(
             content=content or "",
@@ -433,6 +450,13 @@ class LangChainLLM:
         # Add current message
         langchain_messages.append(self._message_to_langchain(message))
         
+        # Log LLM request with all messages
+        self.llm_logger.log_request(
+            messages=langchain_messages,
+            request_id=request_id or "unknown",
+            model=self.model
+        )
+        
         # Invoke LangChain LLM
         try:
             response = self.llm.invoke(langchain_messages, **kwargs)
@@ -473,6 +497,15 @@ class LangChainLLM:
             metadata = response.response_metadata
             if metadata:
                 finish_reason = metadata.get('finish_reason') or metadata.get('stop_reason')
+        
+        # Log LLM response
+        self.llm_logger.log_response(
+            response=response,
+            request_id=request_id or "unknown",
+            model=self.model,
+            usage=usage,
+            cost=cost
+        )
         
         return LLMResponse(
             content=content or "",
@@ -523,14 +556,35 @@ class LangChainLLM:
         # Add current message
         langchain_messages.append(self._message_to_langchain(message))
         
+        # Log LLM request with all messages
+        self.llm_logger.log_request(
+            messages=langchain_messages,
+            request_id=request_id or "unknown",
+            model=self.model,
+            streaming=True
+        )
+        
+        # Collect full response for logging
+        full_response_content = []
+        
         # Stream from LangChain LLM
         for chunk in self.llm.stream(langchain_messages, **kwargs):
             if hasattr(chunk, 'content'):
                 content = chunk.content
                 if content:
+                    full_response_content.append(content)
                     yield content
             elif isinstance(chunk, str):
+                full_response_content.append(chunk)
                 yield chunk
+        
+        # Log the complete streamed response
+        self.llm_logger.log_response(
+            response={"content": "".join(full_response_content), "type": "StreamedResponse"},
+            request_id=request_id or "unknown",
+            model=self.model,
+            streaming=True
+        )
     
     def get_langchain_llm(self):
         """

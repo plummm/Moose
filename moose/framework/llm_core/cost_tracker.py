@@ -6,24 +6,38 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 try:
-    from moose.framework.logging import get_core_logger
+    from moose.framework.logging import get_core_logger, get_project_log_dir
 except ImportError:
     # Fallback for development mode
-    from framework.logging import get_core_logger
+    from framework.logging import get_core_logger, get_project_log_dir
 
 
 class CostTracker:
-    """Tracks and logs LLM call costs to files."""
+    """Tracks and logs LLM call costs to files.
+    
+    Cost logs are stored in the project log directory if available:
+    projects/<project_id>/logs/llm_costs_<date>.log
+    """
     
     def __init__(self, log_dir: Optional[Path] = None):
         """
         Initialize the cost tracker.
         
         Args:
-            log_dir: Directory to store cost logs. If None, uses current directory.
+            log_dir: Directory to store cost logs. If None, uses project log directory
+                     or falls back to current directory.
         """
         self.logger = get_core_logger()
-        self.log_dir = log_dir or Path.cwd()
+        
+        # Use project log directory if available
+        if log_dir is None:
+            project_log_dir = get_project_log_dir()
+            if project_log_dir:
+                log_dir = project_log_dir
+            else:
+                log_dir = Path.cwd()
+        
+        self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # Cost log file (daily rotation)

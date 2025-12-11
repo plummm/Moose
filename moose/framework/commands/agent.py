@@ -8,11 +8,17 @@ from pathlib import Path
 from typing import Optional
 try:
     from moose.framework.agent_core import AgentLoader, ContainerManager
-    from moose.framework.logging import init_core_logger, get_core_logger, set_global_debug
+    from moose.framework.logging import (
+        init_core_logger, get_core_logger, set_global_debug,
+        set_project, reinit_llm_logger
+    )
 except ImportError:
     # Fallback for development mode
     from framework.agent_core import AgentLoader, ContainerManager
-    from framework.logging import init_core_logger, get_core_logger, set_global_debug
+    from framework.logging import (
+        init_core_logger, get_core_logger, set_global_debug,
+        set_project, reinit_llm_logger
+    )
 
 
 class AgentCommand:
@@ -76,6 +82,14 @@ class AgentCommand:
         # Set global debug flag before initializing logger
         set_global_debug(args.debug)
         init_core_logger()
+        
+        # Set up default project for logging
+        # All logs will go to projects/default/logs/
+        set_project("default", Path.cwd() / "projects")
+        
+        # Reinitialize LLM logger to use project log directory
+        reinit_llm_logger()
+        
         logger = get_core_logger()
         
         if not hasattr(args, 'subcommand') or args.subcommand is None:

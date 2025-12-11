@@ -129,7 +129,7 @@ class FinancialReportAnalyzer(BaseAgent):
         if self.workflow_app and not self._workflow_started:
             async def run_workflow():
                 """Run workflow continuously."""
-                self.logger.info("Running workflow")
+                self.logger.debug("Running workflow")
                 try:
                     initial_state = {
                         "current_item": None,
@@ -146,11 +146,13 @@ class FinancialReportAnalyzer(BaseAgent):
                     # Run workflow continuously
                     while self.running:
                         try:
+                            self.logger.debug("Invoking workflow")
                             # Check if workflow app has async invoke method
                             if hasattr(self.workflow_app, 'ainvoke'):
                                 # Invoke workflow - it will process one item and route back
                                 result = await self.workflow_app.ainvoke(initial_state)
                                 # Update initial_state with result for next iteration
+                                self.logger.debug("Workflow finished: {}".format(result))
                                 initial_state = result
                             else:
                                 # Fallback to sync invoke in async context
