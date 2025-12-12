@@ -362,6 +362,88 @@ class LLMLogger:
         """Serialize a list of messages."""
         return [self._serialize_message(msg) for msg in messages]
     
+    def log_message(
+        self,
+        message: Any,
+        direction: str,
+        request_id: str,
+        model: str,
+        usage: Optional[Dict[str, int]] = None,
+        cost: Optional[float] = None,
+        **kwargs
+    ):
+        """Log a single message (request or response).
+        
+        Args:
+            message: Single LangChain message object
+            direction: 'request' or 'response'
+            request_id: Unique request identifier
+            model: Model name being used
+            usage: Token usage dictionary (for responses)
+            cost: Cost in USD (for responses)
+            **kwargs: Additional metadata
+        """
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "request_id": request_id,
+            "direction": direction,
+            "model": model,
+            "message": self._serialize_message(message),
+        }
+        
+        if usage:
+            log_entry["usage"] = usage
+        
+        if cost is not None:
+            log_entry["cost"] = cost
+        
+        if kwargs:
+            log_entry["metadata"] = kwargs
+        
+        # Log as JSON for structured logging
+        self.logger.debug(json.dumps(log_entry, default=str))
+        
+        # Also write to dedicated LLM log file in JSON format
+        self._write_to_llm_log(log_entry)
+    
+    def log_tool_result(
+        self,
+        tool_message: Any,
+        request_id: str,
+        model: str,
+        tool_name: Optional[str] = None,
+        **kwargs
+    ):
+        """Log a tool call result (ToolMessage).
+        
+        Args:
+            tool_message: ToolMessage object with the result
+            request_id: Unique request identifier
+            model: Model name being used
+            tool_name: Name of the tool that was called
+            **kwargs: Additional metadata
+        """
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "request_id": request_id,
+            "direction": "tool_result",
+            "model": model,
+            "message": self._serialize_message(tool_message),
+        }
+        
+        if tool_name:
+            log_entry["tool_name"] = tool_name
+        
+        if kwargs:
+            log_entry["metadata"] = kwargs
+        
+        # Log as JSON for structured logging
+        self.logger.debug(json.dumps(log_entry, default=str))
+        
+        # Also write to dedicated LLM log file in JSON format
+        self._write_to_llm_log(log_entry)
+    
+    # Keep old methods for backward compatibility
     def log_request(
         self, 
         messages: List[Any], 
@@ -369,30 +451,54 @@ class LLMLogger:
         model: str,
         **kwargs
     ):
-        """Log an LLM request with all message objects.
+        """Log an LLM request - only logs NEW messages, not historical ones.
         
-        Args:
-            messages: List of LangChain message objects
-            request_id: Unique request identifier
-            model: Model name being used
-            **kwargs: Additional metadata
+        This method intelligently detects what's new:
+        - If last message is HumanMessage: log it as a request
+        - If last messages are ToolMessages: log each as tool_result
+        - SystemMessage at start is NOT logged (assumed to be static)
         """
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "request_id": request_id,
-            "direction": "request",
-            "model": model,
-            "messages": self._serialize_messages(messages),
-        }
+        if not messages:
+            return
         
-        if kwargs:
-            log_entry["metadata"] = kwargs
+        last_msg = messages[-1]
+        msg_type = type(last_msg).__name__
         
-        # Log as JSON for structured logging
-        self.logger.debug(f"LLM Request: {json.dumps(log_entry, default=str)}")
-        
-        # Also write to dedicated LLM log file in JSON format
-        self._write_to_llm_log(log_entry)
+        if msg_type == 'ToolMessage':
+            # Find all consecutive ToolMessages at the end
+            tool_messages = []
+            for msg in reversed(messages):
+                if type(msg).__name__ == 'ToolMessage':
+                    tool_messages.insert(0, msg)
+                else:
+                    break
+            
+            # Log each tool result
+            for tool_msg in tool_messages:
+                tool_name = None
+                if hasattr(tool_msg, 'name'):
+                    tool_name = tool_msg.name
+                elif hasattr(tool_msg, 'tool_call_id'):
+                    tool_name = tool_msg.tool_call_id
+                
+                self.log_tool_result(
+                    tool_message=tool_msg,
+                    request_id=request_id,
+                    model=model,
+                    tool_name=tool_name,
+                    **kwargs
+                )
+        elif msg_type in ('HumanMessage', 'SystemMessage'):
+            # Log the user's message as request
+            self.log_message(
+                message=last_msg,
+                direction="request",
+                request_id=request_id,
+                model=model,
+                **kwargs
+            )
+        # AIMessage as last message is unusual for a request - skip it
+        # (it would be from history)
     
     def log_response(
         self,
@@ -413,28 +519,15 @@ class LLMLogger:
             cost: Cost in USD
             **kwargs: Additional metadata
         """
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "request_id": request_id,
-            "direction": "response",
-            "model": model,
-            "response": self._serialize_message(response),
-        }
-        
-        if usage:
-            log_entry["usage"] = usage
-        
-        if cost is not None:
-            log_entry["cost"] = cost
-        
-        if kwargs:
-            log_entry["metadata"] = kwargs
-        
-        # Log as JSON for structured logging
-        self.logger.debug(f"LLM Response: {json.dumps(log_entry, default=str)}")
-        
-        # Also write to dedicated LLM log file in JSON format
-        self._write_to_llm_log(log_entry)
+        self.log_message(
+            message=response,
+            direction="response",
+            request_id=request_id,
+            model=model,
+            usage=usage,
+            cost=cost,
+            **kwargs
+        )
     
     def _write_to_llm_log(self, entry: Dict[str, Any]):
         """Write a structured entry directly to the LLM log file."""
@@ -451,6 +544,105 @@ class LLMLogger:
                     f.write(json.dumps(entry, default=str) + '\n')
             except Exception as e:
                 self.logger.error(f"Failed to write to LLM log: {e}")
+
+        # Note: Real-time streaming is handled by ChatManager's file tailing
+        # No need to forward here - the log file is the single source of truth
+
+    def _legacy_forward_to_chat_manager(self, entry: Dict[str, Any]):
+        """Forward LLM log entry to ChatManager for real-time web UI streaming.
+        
+        Args:
+            entry: LLM log entry dict
+        """
+        try:
+            # Lazy import to avoid circular imports
+            try:
+                from moose.web_ui import get_chat_manager
+            except ImportError:
+                try:
+                    from web_ui import get_chat_manager
+                except ImportError:
+                    return  # Web UI not available
+            
+            project_id = self.project_id or _current_project_id
+            if not project_id:
+                return
+            
+            chat_manager = get_chat_manager()
+            
+            # Convert entry to chat message
+            direction = entry.get('direction', '')
+            timestamp = entry.get('timestamp', datetime.now().isoformat())
+            request_id = entry.get('request_id', '')
+            
+            # New format: single 'message' field
+            message = entry.get('message')
+            if message:
+                chat_msg = self._convert_to_chat_message(message, timestamp, request_id)
+                if chat_msg:
+                    # Add direction info
+                    chat_msg['direction'] = direction
+                    
+                    # Add usage and cost info for responses
+                    if entry.get('usage'):
+                        chat_msg['usage'] = entry['usage']
+                    if entry.get('cost'):
+                        chat_msg['cost'] = entry['cost']
+                    
+                    # Add tool name for tool results
+                    if entry.get('tool_name'):
+                        chat_msg['tool_name'] = entry['tool_name']
+                    
+                    chat_manager.add_message(project_id, chat_msg)
+        
+        except Exception:
+            # Don't let chat forwarding errors break logging
+            pass
+    
+    def _convert_to_chat_message(self, msg: Dict[str, Any], timestamp: str, request_id: str) -> Optional[Dict[str, Any]]:
+        """Convert a serialized message to chat format.
+        
+        Args:
+            msg: Serialized message dict
+            timestamp: Timestamp string
+            request_id: Request ID
+            
+        Returns:
+            Chat message dict or None
+        """
+        if not msg:
+            return None
+        
+        msg_type = msg.get('type', 'unknown')
+        content = msg.get('content', '')
+        
+        # Map message types
+        type_map = {
+            'SystemMessage': 'system',
+            'HumanMessage': 'human',
+            'AIMessage': 'ai',
+            'ToolMessage': 'tool'
+        }
+        
+        chat_type = type_map.get(msg_type, msg_type.lower() if isinstance(msg_type, str) else 'unknown')
+        
+        result = {
+            'id': f"{request_id}_{timestamp}_{chat_type}_{id(msg)}",
+            'type': chat_type,
+            'content': content,
+            'timestamp': timestamp,
+            'request_id': request_id
+        }
+        
+        # Include tool calls if present (for AI messages)
+        if msg.get('tool_calls'):
+            result['tool_calls'] = msg['tool_calls']
+        
+        # Include tool_call_id if present (for Tool messages)
+        if msg.get('tool_call_id'):
+            result['tool_call_id'] = msg['tool_call_id']
+        
+        return result
 
 
 # =============================================================================
@@ -717,6 +909,118 @@ def reinit_llm_logger():
     global _llm_logger
     _llm_logger = None
     return get_llm_logger()
+
+
+# =============================================================================
+# Web UI Integration
+# =============================================================================
+
+class WebUILogHandler(logging.Handler):
+    """Handler that forwards log records to the Web UI LogManager.
+
+    Note: This handler is kept for backward compatibility but is now mostly a no-op.
+    Real-time log streaming is handled by LogManager's file tailing mechanism,
+    which reads from the moose.log file directly. This works across process
+    boundaries (e.g., when agents run in Docker containers).
+    """
+    
+    def __init__(self, project_id: Optional[str] = None):
+        """Initialize the handler.
+        
+        Args:
+            project_id: Project ID for log routing (uses current project if not specified)
+        """
+        super().__init__()
+        self._project_id = project_id
+    
+    def emit(self, record):
+        """Forward log record to LogManager.
+        
+        Args:
+            record: The log record to forward
+        """
+        try:
+            # Lazy import to avoid circular imports
+            from moose.web_ui import get_log_manager
+        except ImportError:
+            try:
+                from web_ui import get_log_manager
+            except ImportError:
+                return  # Web UI not available
+        
+        project_id = self._project_id or _current_project_id
+        if not project_id:
+            return
+        
+        try:
+            log_manager = get_log_manager()
+            
+            # Format the log entry
+            entry = {
+                'time': self.format_time(record),
+                'level': record.levelname,
+                'message': record.getMessage(),
+                'path': record.pathname,
+                'line': record.lineno,
+                'label': getattr(record, 'label', '[core]')
+            }
+            
+            log_manager.add_log(project_id, entry)
+        except Exception:
+            # Don't let logging errors break the application
+            pass
+    
+    def format_time(self, record) -> str:
+        """Format the timestamp for the record.
+        
+        Args:
+            record: The log record
+            
+        Returns:
+            Formatted timestamp string
+        """
+        from datetime import datetime
+        return datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
+
+
+# Global WebUI handler
+_webui_handler: Optional[WebUILogHandler] = None
+
+
+def enable_webui_logging(project_id: Optional[str] = None):
+    """Enable log forwarding to the Web UI.
+    
+    This adds a WebUILogHandler to the core logger, enabling real-time
+    log streaming to the web dashboard.
+    
+    Args:
+        project_id: Project ID for log routing (uses current project if not specified)
+    """
+    global _webui_handler
+    
+    if _webui_handler is not None:
+        return  # Already enabled
+    
+    _webui_handler = WebUILogHandler(project_id)
+    _webui_handler.setLevel(logging.DEBUG)  # Capture all logs
+    
+    # Add to core logger
+    core_logger = get_core_logger()
+    core_logger.logger.addHandler(_webui_handler)
+
+
+def disable_webui_logging():
+    """Disable log forwarding to the Web UI."""
+    global _webui_handler
+    
+    if _webui_handler is None:
+        return
+    
+    # Remove from core logger
+    core_logger = get_core_logger()
+    core_logger.logger.removeHandler(_webui_handler)
+    
+    _webui_handler = None
 
 
 # =============================================================================

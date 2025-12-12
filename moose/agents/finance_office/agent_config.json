@@ -25,6 +25,10 @@
       {
         "host": "/data/news",
         "container": "/data/news"
+      },
+      {
+        "host": "/home/etenal/projects/Moose/projects",
+        "container": "/app/projects"
       }
     ],
     "resources": {

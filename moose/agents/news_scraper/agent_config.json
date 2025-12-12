@@ -21,6 +21,10 @@
       {
         "host": "/data/scraper/finviz.com",
         "container": "/data/scraper/finviz.com"
+      },
+      {
+        "host": "/home/etenal/projects/Moose/projects",
+        "container": "/app/projects"
       }
     ],
     "resources": {

@@ -10,15 +10,17 @@ try:
     from moose.framework.agent_core import AgentLoader, ContainerManager
     from moose.framework.logging import (
         init_core_logger, get_core_logger, set_global_debug,
-        set_project, reinit_llm_logger
+        set_project, reinit_llm_logger, enable_webui_logging
     )
+    from moose.web_ui import register_project
 except ImportError:
     # Fallback for development mode
     from framework.agent_core import AgentLoader, ContainerManager
     from framework.logging import (
         init_core_logger, get_core_logger, set_global_debug,
-        set_project, reinit_llm_logger
+        set_project, reinit_llm_logger, enable_webui_logging
     )
+    from web_ui import register_project
 
 
 class AgentCommand:
@@ -44,6 +46,11 @@ class AgentCommand:
             action='store_true',
             help='Enable debug logging (default: INFO level)'
         )
+        debug_parser.add_argument(
+            '--no-web',
+            action='store_true',
+            help='Disable the web UI server'
+        )
         
         # Deploy subcommand
         deploy_parser = subparsers.add_parser('deploy', help='Deploy agent in Docker container')
@@ -68,6 +75,11 @@ class AgentCommand:
             '--debug',
             action='store_true',
             help='Enable debug logging (default: INFO level)'
+        )
+        deploy_parser.add_argument(
+            '--no-web',
+            action='store_true',
+            help='Disable the web UI server'
         )
         
         return parser
@@ -95,6 +107,28 @@ class AgentCommand:
         if not hasattr(args, 'subcommand') or args.subcommand is None:
             logger.error("Subcommand required. Use 'debug' or 'deploy'")
             sys.exit(1)
+        
+        # Start web UI server unless disabled
+        web_port_str = os.environ.get('MOOSE_WEB_UI_PORT')
+        no_web = getattr(args, 'no_web', False)
+        
+        if no_web:
+            logger.info("Web UI disabled via --no-web flag")
+        elif not web_port_str:
+            logger.info("MOOSE_WEB_UI_PORT not set, web UI will be disabled")
+        else:
+            try:
+                web_port = int(web_port_str)
+                server = register_project("default", port=web_port)
+                enable_webui_logging("default")
+                logger.info(f"Web UI available at http://localhost:{web_port}")
+            except ValueError:
+                logger.warning(f"Invalid MOOSE_WEB_UI_PORT value: {web_port_str}, web UI disabled")
+            except ImportError as e:
+                logger.warning(f"Could not start web UI: {e}")
+                logger.warning("Install Flask with: pip install flask")
+            except Exception as e:
+                logger.warning(f"Could not start web UI: {e}")
         
         if args.subcommand == 'debug':
             self._run_debug(args.name, args.debug)

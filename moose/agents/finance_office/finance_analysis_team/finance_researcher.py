@@ -354,7 +354,7 @@ Provide a comprehensive financial analysis in JSON format"""
                 if not normalized_symbols:
                     # All symbols were invalid, save to economy
                     self.logger.warning(f"No valid company symbols found, saving to economy folder")
-                    return
+                    save_folders = ["economy"]
                 else:
                     save_folders = normalized_symbols
             
