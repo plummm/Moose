@@ -1,7 +1,7 @@
 """Financial News Analyzer - LLM-based financial news analysis."""
 
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import json
 import re
@@ -16,6 +16,13 @@ except ImportError:
     except ImportError:
         LLM_AVAILABLE = False
         LLMClient = None
+
+try:
+    from langchain_core.tools import StructuredTool
+    LANGCHAIN_TOOLS_AVAILABLE = True
+except ImportError:
+    StructuredTool = None
+    LANGCHAIN_TOOLS_AVAILABLE = False
 
 
 class FinanceResearcher:
@@ -46,7 +53,7 @@ class FinanceResearcher:
             model: LLM model name (e.g., "gpt-4", "claude-3-opus-20240229")
             temperature: Sampling temperature for LLM
             logger: Logger instance
-            sec_data_tools: Optional SECDataTools instance for SEC data access
+            sec_data_tools: Optional SEC tools provider instance (e.g. EdgarMCPTools) for SEC data access
             **llm_kwargs: Additional arguments for LLMClient
         """
         if not LLM_AVAILABLE:
@@ -59,17 +66,18 @@ class FinanceResearcher:
         self.temperature = temperature
         self.logger = logger
         self.sec_data_tools = sec_data_tools
+        self.mcp_tools: Dict[str, Any] = {}
         
-        # Get tools from SECDataTools if provided
-        tools = None
+        # Get tools from the SEC tools provider if provided
+        tools: Optional[List[Any]] = None
         if sec_data_tools:
             try:
                 tools = sec_data_tools.get_langchain_tools()
                 if self.logger:
-                    self.logger.info(f"Loaded {len(tools)} SEC data tools")
+                    self.logger.info(f"Loaded {len(tools)} SEC tools")
             except Exception as e:
                 if self.logger:
-                    self.logger.warning(f"Failed to load SEC data tools: {e}")
+                    self.logger.warning(f"Failed to load SEC tools: {e}")
                 tools = None
         
         self.llm_client = LLMClient(
@@ -83,6 +91,8 @@ class FinanceResearcher:
             self.logger.info(f"Initialized FinanceResearcher with model: {model}")
             if tools:
                 self.logger.info(f"SEC data tools enabled: {len(tools)} tools available")
+
+    # Note: Edgar LangChain tool creation now lives in EdgarMCPTools.get_langchain_tools()
     
     async def analyze_article(
         self,
@@ -387,11 +397,11 @@ Provide a comprehensive financial analysis in JSON format"""
 
     def _summarize_tools(self) -> str:
         """Summarize the tools available to the LLM."""
-        self.mcp_tools = self.sec_data_tools.mcp_tools
         tool_descriptions = []
-        for tool_name in self.mcp_tools:
-            description = self.mcp_tools[tool_name].description
+        for tool_name in self.sec_data_tools.mcp_tools:
+            description = self.sec_data_tools.mcp_tools[tool_name].description
             tool_descriptions.append(f"- {tool_name}: {description}")
+            self.mcp_tools[tool_name] = self.sec_data_tools.mcp_tools[tool_name]
         ret = """
 
 **Available Tools:**

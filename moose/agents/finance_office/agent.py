@@ -14,13 +14,13 @@ from moose.framework import BaseAgent
 # Import local modules
 try:
     from .finance_analysis_team.finance_researcher import FinanceResearcher
-    from .finance_analysis_team.sec_data_tools import SECDataTools
+    from .finance_analysis_team.edgar_mcp_tools import EdgarAllMCPTools
     from .queue_manager import FilePathQueue
     from .workflow import create_workflow, LANGGRAPH_AVAILABLE
 except ImportError:
     # Fallback for direct execution
     from moose.agents.finance_office.finance_analysis_team.finance_researcher import FinanceResearcher
-    from moose.agents.finance_office.finance_analysis_team.sec_data_tools import SECDataTools
+    from moose.agents.finance_office.finance_analysis_team.edgar_mcp_tools import EdgarAllMCPTools
     from moose.agents.finance_office.queue_manager import FilePathQueue
     from moose.agents.finance_office.workflow import create_workflow, LANGGRAPH_AVAILABLE
 
@@ -61,20 +61,18 @@ class FinancialReportAnalyzer(BaseAgent):
         analyzer = None
         use_langgraph = custom_config.get("use_langgraph", True)
         
-        # Initialize SECDataTools if edgar_config is enabled
+        # Initialize EdgarAllMCPTools if edgar_config is enabled
         sec_data_tools = None
         edgar_config = custom_config.get("edgar_config", {})
         if edgar_config.get("enabled", False):
             try:
-                sec_data_tools = SECDataTools(
+                sec_data_tools = EdgarAllMCPTools(
                     identity=edgar_config.get("identity", ""),
-                    use_mcp=edgar_config.get("use_mcp", True),
-                    python_command=edgar_config.get("python_command"),
-                    logger=self.logger
+                    logger=self.logger,
                 )
-                self.logger.info("Initialized SECDataTools")
+                self.logger.info("Initialized EdgarAllMCPTools")
             except Exception as e:
-                self.logger.warning(f"Failed to initialize SECDataTools: {e}")
+                self.logger.warning(f"Failed to initialize EdgarAllMCPTools: {e}")
         
         llm_config = custom_config.get("llm_config", {})
         if llm_config:
@@ -92,7 +90,7 @@ class FinancialReportAnalyzer(BaseAgent):
             except Exception as e:
                 self.logger.warning(f"Failed to initialize analyzer: {e}")
         
-        # Store SECDataTools for cleanup
+        # Store SEC tools provider for cleanup
         self.sec_data_tools = sec_data_tools
         
         # Store analyzer for workflow

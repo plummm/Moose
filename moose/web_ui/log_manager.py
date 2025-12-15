@@ -11,7 +11,7 @@ import time
 from collections import deque
 from pathlib import Path
 from queue import Queue, Empty
-from threading import Lock
+from threading import Lock, Thread
 from typing import Dict, List, Optional, Generator
 from datetime import datetime
 
@@ -39,6 +39,10 @@ class LogManager:
         # File watching state
         self._file_positions: Dict[str, int] = {}  # project_id -> last file position
         self._file_inodes: Dict[str, int] = {}  # project_id -> file inode (for rotation detection)
+        
+        # Background watchers for continuous file tailing
+        self._watchers: Dict[str, Thread] = {}  # project_id -> watcher thread
+        self._watching: Dict[str, bool] = {}  # project_id -> is watching flag
         
         # Track seen log entries to avoid duplicates (using hash of content)
         self._seen_hashes: Dict[str, set] = {}  # project_id -> set of seen hashes
@@ -83,16 +87,12 @@ class LogManager:
             
             # Notify subscribers
             if project_id in self._subscribers:
-                dead_queues = []
                 for q in self._subscribers[project_id]:
                     try:
                         q.put_nowait(entry)
-                    except Exception:
-                        dead_queues.append(q)
-                
-                # Clean up dead queues
-                for q in dead_queues:
-                    self._subscribers[project_id].remove(q)
+                    except Exception as e:
+                        # Queue notification failed, but continue to other subscribers
+                        pass
     
     def add_log(self, project_id: str, entry: dict):
         """Add a log entry (legacy interface, now a no-op for cross-process).
@@ -155,20 +155,36 @@ class LogManager:
     def _get_current_log_file(self, project_id: str) -> Optional[Path]:
         """Get the current (active) moose.log file for a project.
         
+        The current file is the one with the highest number (moose.log.N).
+        If no numbered files exist, falls back to moose.log.
+        
         Args:
             project_id: Project identifier
             
         Returns:
-            Path to moose.log file or None
+            Path to current moose.log file or None
         """
         log_dir = self._get_log_dir(project_id)
         if not log_dir or not log_dir.exists():
             return None
         
-        log_file = log_dir / "moose.log"
-        if log_file.exists():
-            return log_file
-        return None
+        # Find all moose.log files
+        current_file = None
+        
+        i = 0
+        while i < 1000:
+            if i == 0:
+                next_file = log_dir / "moose.log"
+            else:
+                next_file = log_dir / f"moose.log.{i}"
+            if not next_file.exists():
+                if current_file is None:
+                    raise FileNotFoundError(f"Log folder {log_dir} is empty")
+                return current_file
+            current_file = next_file
+            i += 1
+        
+        raise FileNotFoundError(f"Log file moose.log exceeds the maximum number of 1000 files")
     
     def _tail_file(self, project_id: str):
         """Tail the moose.log file for new entries.
@@ -179,8 +195,12 @@ class LogManager:
         Args:
             project_id: Project identifier
         """
-        log_file = self._get_current_log_file(project_id)
-        if not log_file:
+        try:
+            log_file = self._get_current_log_file(project_id)
+            if not log_file:
+                return
+        except FileNotFoundError:
+            # Log file doesn't exist yet, wait for it to be created
             return
         
         try:
@@ -188,13 +208,17 @@ class LogManager:
             current_inode = stat.st_ino
             current_size = stat.st_size
             
-            # Check for file rotation (inode changed)
+            # Initialize position if not set (start from beginning - new file for this run)
+            if project_id not in self._file_positions:
+                self._file_positions[project_id] = 0
+                self._file_inodes[project_id] = current_inode
+            
+            # Check for file rotation (inode changed - new file created)
             if project_id in self._file_inodes:
                 if self._file_inodes[project_id] != current_inode:
-                    # File was rotated, reset position
+                    # File was rotated/new file created, start from beginning
                     self._file_positions[project_id] = 0
-            
-            self._file_inodes[project_id] = current_inode
+                    self._file_inodes[project_id] = current_inode
             
             # Get last read position
             last_pos = self._file_positions.get(project_id, 0)
@@ -226,33 +250,55 @@ class LogManager:
         except Exception:
             pass
     
-    def _load_initial_buffer(self, project_id: str, limit: int = 100):
-        """Load existing log file content into buffer on first connect.
+    def _start_watching(self, project_id: str):
+        """Start background file watcher for a project if not already watching.
+        
+        The watcher continuously monitors the current log file and populates the live buffer.
+        Each tool run creates a new log file, so we read from the beginning.
         
         Args:
             project_id: Project identifier
-            limit: Maximum number of lines to load initially
         """
-        if project_id in self._file_positions:
-            # Already initialized
-            return
-        
-        log_file = self._get_current_log_file(project_id)
-        if not log_file:
-            self._file_positions[project_id] = 0
-            return
-        
-        try:
-            # Read last N lines for initial buffer
-            entries = self.read_log_file(project_id, "moose.log", limit=limit)
-            for entry in entries:
-                self._add_log_internal(project_id, entry)
+        with self._lock:
+            if project_id in self._watchers and self._watching.get(project_id, False):
+                # Already watching
+                return
             
-            # Set position to end of file
-            self._file_positions[project_id] = log_file.stat().st_size
-            self._file_inodes[project_id] = log_file.stat().st_ino
-        except Exception:
-            self._file_positions[project_id] = 0
+            # Initialize file position - not needed here, will be set in _tail_file
+            # Each tool run creates a new log file, so we read from beginning
+            pass
+            
+            # Start watcher thread
+            self._watching[project_id] = True
+            watcher = Thread(target=self._watch_file, args=(project_id,), daemon=True)
+            watcher.start()
+            self._watchers[project_id] = watcher
+    
+    def _watch_file(self, project_id: str):
+        """Background thread that continuously tails the log file.
+        
+        Args:
+            project_id: Project identifier
+        """
+        tail_interval = 0.5  # Check file every 500ms
+        
+        while self._watching.get(project_id, False):
+            try:
+                self._tail_file(project_id)
+            except Exception:
+                pass
+            time.sleep(tail_interval)
+    
+    def _stop_watching(self, project_id: str):
+        """Stop the background watcher for a project.
+        
+        Args:
+            project_id: Project identifier
+        """
+        with self._lock:
+            self._watching[project_id] = False
+            if project_id in self._watchers:
+                del self._watchers[project_id]
     
     def list_log_files(self, project_id: str, base_dir: Optional[Path] = None) -> List[str]:
         """List available log files for a project.
@@ -395,7 +441,9 @@ class LogManager:
     def generate_sse_stream(self, project_id: str) -> Generator[str, None, None]:
         """Generate SSE stream for a project's logs.
         
-        Uses file tailing to get real-time updates from moose.log.
+        Streams from the live buffer which is continuously populated by a background watcher.
+        The current log file (highest numbered) represents the current tool run.
+        On connection, sends all logs from the current file (persists on refresh).
         
         Args:
             project_id: Project identifier
@@ -403,33 +451,27 @@ class LogManager:
         Yields:
             SSE formatted strings
         """
+        # Start background watcher if not already running
+        self._start_watching(project_id)
+        
+        # Subscribe to live updates
         queue = self.subscribe(project_id)
         
         try:
-            # Load initial buffer from file on first connect
-            self._load_initial_buffer(project_id)
-            
-            # Send buffered logs
+            # Send accumulated messages from current session (for persistence on refresh)
             for entry in self.get_buffer(project_id):
                 yield f"data: {json.dumps(entry)}\n\n"
             
-            # Stream new logs via file tailing
-            last_tail_time = 0
-            tail_interval = 0.5  # Check file every 500ms
+            # Continue streaming new entries as they arrive
+            keepalive_timeout = 30  # Send keepalive every 30 seconds
             
             while True:
                 try:
-                    # Check for queued entries (from file tailing)
-                    entry = queue.get(timeout=tail_interval)
+                    # Wait for new entries from the live buffer
+                    entry = queue.get(timeout=keepalive_timeout)
                     yield f"data: {json.dumps(entry)}\n\n"
                 except Empty:
-                    # Tail the file for new entries
-                    current_time = time.time()
-                    if current_time - last_tail_time >= tail_interval:
-                        self._tail_file(project_id)
-                        last_tail_time = current_time
-                    
-                    # Send keepalive every 30 seconds
+                    # Send keepalive to prevent connection timeout
                     yield f": keepalive\n\n"
         except GeneratorExit:
             pass

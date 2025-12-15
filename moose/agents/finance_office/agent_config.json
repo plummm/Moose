@@ -69,12 +69,9 @@
     "max_concurrent_analyses": 20,
     "edgar_config": {
       "enabled": true,
-      "use_mcp": true,
-      "model": "gpt-5",
+      "model": "gpt-5.2",
       "temperature": 0.7,
-      "identity": "",
-      "python_command": null,
-      "llm_kwargs": {}
+      "identity": "etenal@etenal.com"
     }
   }
 }
