@@ -6,7 +6,7 @@ from edgar import Company
 from edgar._filings import get_by_accession_number
 from edgar.entity.filings import EntityFilings
 
-from .basic import EdgarMCPTools, _df_keyed_holdings, mcp_envelope_err, mcp_envelope_ok, mcp_tool, pd
+from .basic import EdgarMCPTools, _df_keyed_holdings, filings_is_empty, mcp_envelope_err, mcp_envelope_ok, mcp_tool, pd
 
 
 class InstitutionalHoldingsMCPTools(EdgarMCPTools):
@@ -49,7 +49,7 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
         try:
             c = Company(manager)
             filings = c.get_filings(form="13F-HR")
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No holdings disclosures found for {manager}.", meta=meta)
             latest = filings.latest(n)
             lst = list(latest) if isinstance(latest, EntityFilings) else [latest]
@@ -319,7 +319,7 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
             try:
                 c = Company(m)
                 filings = c.get_filings(form="13F-HR")
-                if filings is None or filings.empty:
+                if filings_is_empty(filings):
                     skipped.append({"manager": m, "reason": "no_13f_filings"})
                     continue
                 filing = filings.latest()
@@ -423,7 +423,7 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
             try:
                 c = Company(m)
                 filings = c.get_filings(form="13F-HR")
-                if filings is None or filings.empty:
+                if filings_is_empty(filings):
                     skipped.append({"manager": m, "reason": "no_filings"})
                     continue
                 filing = filings.latest()

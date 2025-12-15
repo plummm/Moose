@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from edgar import Company
 from edgar._filings import get_by_accession_number
 
-from .basic import EdgarMCPTools, _since_date_range, mcp_envelope_err, mcp_envelope_ok, mcp_tool, pd
+from .basic import EdgarMCPTools, _since_date_range, filings_is_empty, mcp_envelope_err, mcp_envelope_ok, mcp_tool, pd
 
 
 class InsiderTradeMCPTools(EdgarMCPTools):
@@ -48,7 +48,7 @@ class InsiderTradeMCPTools(EdgarMCPTools):
         try:
             c = Company(ticker)
             filings = c.get_filings(form=["3", "4", "5"], filing_date=_since_date_range(since_days))
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No insider filings found for {ticker} in last {since_days} days.", meta=meta)
             out = []
             for f in filings.head(limit_filings):

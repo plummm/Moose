@@ -18,7 +18,7 @@ except ImportError:
     from framework.logging import get_agent_logger, get_project_id, set_global_debug
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, request, jsonify, Response, stream_with_context
     FLASK_AVAILABLE = True
 except ImportError:
     FLASK_AVAILABLE = False
@@ -633,6 +633,41 @@ class BaseAgent():
             return jsonify({
                 "logs": self._log_buffer[-100:]  # Return last 100 entries
             })
+
+        # Logs streaming endpoint (SSE, no auth required)
+        @self.app.route('/logs/stream', methods=['GET'])
+        def logs_stream():
+            """Stream agent logs for web UI via Server-Sent Events (SSE)."""
+            def event_stream():
+                # Start streaming from the current end of the buffer to avoid replaying history.
+                last_idx = len(self._log_buffer)
+                keepalive_every_s = 10.0
+                last_keepalive = time.time()
+
+                while self.running:
+                    # Send new entries if any
+                    if last_idx < len(self._log_buffer):
+                        new_entries = self._log_buffer[last_idx:]
+                        last_idx = len(self._log_buffer)
+                        for entry in new_entries:
+                            yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+
+                    # Keepalive comment to prevent proxies from closing the connection
+                    now = time.time()
+                    if now - last_keepalive >= keepalive_every_s:
+                        last_keepalive = now
+                        yield ": ping\n\n"
+
+                    time.sleep(0.5)
+
+            return Response(
+                stream_with_context(event_stream()),
+                mimetype="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         
         # Register custom endpoints from config
         self._register_custom_endpoints()

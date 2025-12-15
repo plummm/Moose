@@ -11,6 +11,7 @@ from .basic import (
     _diff_highlights,
     _extract_section_by_markers,
     _since_date_range,
+    filings_is_empty,
     mcp_envelope_err,
     mcp_envelope_ok,
     mcp_json_safe,
@@ -47,7 +48,7 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         try:
             company = Company(ticker)
             filings = company.get_filings(form=forms, filing_date=_since_date_range(since_days))
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No 13D/13G filings found for {ticker} in the last {since_days} days.", meta=meta)
 
             out: List[Dict[str, Any]] = []
@@ -538,13 +539,13 @@ class CompanyReportingMCPTools(EdgarMCPTools):
             company = Company(ticker)
             if since_days is None:
                 filings = company.get_filings(form="6-K")
-                if filings is None or filings.empty:
+                if filings_is_empty(filings):
                     return mcp_envelope_err(f"No foreign issuer updates found for {ticker}.", meta=meta)
                 selected = filings.latest(n)
                 selected_list = list(selected) if isinstance(selected, EntityFilings) else [selected]
             else:
                 filings = company.get_filings(form="6-K", filing_date=_since_date_range(since_days))
-                if filings is None or filings.empty:
+                if filings_is_empty(filings):
                     return mcp_envelope_err(f"No foreign issuer updates found for {ticker} in last {since_days} days.", meta=meta)
                 selected_list = list(filings.head(n))
 
@@ -620,7 +621,7 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         try:
             company = Company(ticker)
             filings = company.get_filings(form=["DEF 14A", "DEFA14A", "PRE 14A"], year=year)
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No proxy filings found for {ticker} in {year}.", meta=meta)
 
             pats = re.compile(r"(say-on-pay|executive compensation|compensation discussion|board of directors|corporate governance|shareholder proposal|equity plan)", re.IGNORECASE)
@@ -687,7 +688,7 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         try:
             company = Company(ticker)
             filings = company.get_filings(form=["NT 10-K", "NT 10-Q"], filing_date=_since_date_range(since_days))
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_ok(data={"alerts": [], "count": 0}, meta=meta, text_fallback=f"No late reporting notices for {ticker} in last {since_days} days.")
 
             pats = re.compile(r"(unable to file|could not be filed|delay|late|restatement|material weakness|internal control)", re.IGNORECASE)
@@ -758,7 +759,7 @@ class CompanyReportingMCPTools(EdgarMCPTools):
 
         try:
             filings = get_filings(year, quarter, form="C")
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No crowdfunding filings found for {year} Q{quarter}.", meta=meta)
 
             results: List[Dict[str, Any]] = []

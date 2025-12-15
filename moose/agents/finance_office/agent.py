@@ -79,14 +79,20 @@ class FinancialReportAnalyzer(BaseAgent):
             try:
                 model = llm_config.get("model", "gpt-5")
                 temperature = llm_config.get("temperature", 0.7)
+                enable_multi_stage_reasoning = llm_config.get("enable_multi_stage_reasoning", True)
+                max_tool_iterations = llm_config.get("max_tool_iterations", 20)
                 analyzer = FinanceResearcher(
                     model=model,
                     temperature=temperature,
                     logger=self.logger,
                     sec_data_tools=sec_data_tools,
+                    enable_multi_stage_reasoning=enable_multi_stage_reasoning,
+                    max_tool_iterations=max_tool_iterations,
                     **llm_config.get("kwargs", {})
                 )
                 self.logger.info(f"Initialized analyzer with model: {model}")
+                if enable_multi_stage_reasoning:
+                    self.logger.info(f"Multi-stage reasoning enabled with max {max_tool_iterations} iterations")
             except Exception as e:
                 self.logger.warning(f"Failed to initialize analyzer: {e}")
         

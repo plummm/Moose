@@ -44,6 +44,8 @@ class FinanceResearcher:
         temperature: float = 0.7,
         logger=None,
         sec_data_tools=None,
+        enable_multi_stage_reasoning: bool = False,
+        max_tool_iterations: int = 20,
         **llm_kwargs
     ):
         """
@@ -54,6 +56,8 @@ class FinanceResearcher:
             temperature: Sampling temperature for LLM
             logger: Logger instance
             sec_data_tools: Optional SEC tools provider instance (e.g. EdgarMCPTools) for SEC data access
+            enable_multi_stage_reasoning: Enable planner/executor loop for iterative tool calling
+            max_tool_iterations: Maximum number of tool call iterations
             **llm_kwargs: Additional arguments for LLMClient
         """
         if not LLM_AVAILABLE:
@@ -84,6 +88,8 @@ class FinanceResearcher:
             model=model,
             temperature=temperature,
             tools=tools,
+            enable_multi_stage_reasoning=enable_multi_stage_reasoning,
+            max_tool_iterations=max_tool_iterations,
             **llm_kwargs
         )
         
@@ -156,6 +162,16 @@ class FinanceResearcher:
         system_message = f"""You are a financial news analyst specializing in market-impact evaluation. 
 Your goal is to analyze financial news articles and provide structured insights for trading decisions.
 {tools_instruction}
+
+TOOL USAGE STRATEGY:
+- Use company_research, fetch_filings, and other SEC tools to gather comprehensive information
+- Tool results include a 'meta.recommended_next_tools' field with suggestions - PAY ATTENTION to these
+- Each suggested tool includes a 'reason' explaining why it's recommended
+- You can follow suggestions or choose your own tools based on your analysis needs
+- Continue calling tools until you have sufficient information
+- When ready, prefix your response with <FINAL_ANSWER>
+
+IMPORTANT: Focus on gathering information through tools first. Don't generate your complete analysis until you've called all necessary tools.
 
 Follow these rules:
 
@@ -306,7 +322,7 @@ Provide a comprehensive financial analysis in JSON format"""
             
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Error analyzing article {url}: {e}")
+                self.logger.error(f"Error analyzing article {url}: {e}", exc_info=True)
             return {
                 "url": url,
                 "file_path": str(file_path) if file_path else None,
@@ -397,30 +413,67 @@ Provide a comprehensive financial analysis in JSON format"""
 
     def _summarize_tools(self) -> str:
         """Summarize the tools available to the LLM."""
-        tool_descriptions = []
-        for tool_name in self.sec_data_tools.mcp_tools:
-            description = self.sec_data_tools.mcp_tools[tool_name].description
-            tool_descriptions.append(f"- {tool_name}: {description}")
-            self.mcp_tools[tool_name] = self.sec_data_tools.mcp_tools[tool_name]
-        ret = """
+        # Store tools reference if available
+        if self.sec_data_tools and hasattr(self.sec_data_tools, 'mcp_tools'):
+            for tool_name, tool_obj in self.sec_data_tools.mcp_tools.items():
+                self.mcp_tools[tool_name] = tool_obj
+        
+        return """
 
 **Available Tools:**
-You have access to SEC data tools that can provide detailed company information, financial statements, and filings:
-{}
+You have access to SEC and financial data tools that provide detailed company information, financial statements, and filings:
 
-When analyzing companies mentioned in the article, you may use these tools to gather additional context about:
-- Company financial health and recent performance
-- Recent SEC filings and regulatory activity
-- Financial trends and comparisons
-- Company profile and business information
-- Quarterly financial reports
+**SEC/EDGAR Tools (28 tools):**
+- alert_large_insider_sales: Identify potentially significant insider sales over a lookback window
+- alert_late_reporting: Alert on late reporting notices (NT 10-K / NT 10-Q)
+- compare_institutional_holdings: Compare two 13F holdings disclosures (new vs old) and summarize changes
+- compare_management_discussion: Compare the MD&A section between the two most recent filings
+- compare_risk_factors: Compare the "Risk Factors" section between two SEC filings
+- detect_crowded_institutional_trades: Detect "crowded" stocks across multiple managers' latest 13F filings
+- fetch_exhibit_text_by_accession: Fetch a specific exhibit/document text for a filing
+- fetch_filing_text_by_accession: Fetch the full text for a filing identified by accession number
+- fetch_financing_terms_from_filing: Extract likely financing/dilution term snippets from a filing
+- fetch_fund_proxy_votes: Fetch and return proxy vote records from a specific N-PX filing
+- fetch_insider_transactions: Parse a single insider filing into a normalized transactions table
+- fetch_institutional_holdings_table: Fetch a manager's 13F holdings table for a specific filing
+- get_balance_sheet: Retrieve an SEC balance sheet for a public company (XBRL-based)
+- get_cashflow_statement: Retrieve an SEC cash flow statement for a public company (XBRL-based)
+- get_income_statement: Retrieve an SEC income statement for a public company (XBRL-based)
+- list_company_material_updates_index: List a company's most recent material updates (Form 8-K)
+- list_financing_documents_index: List recent financing-related registration/prospectus filings
+- list_fund_voting_records_index: List a fund's proxy voting record filings (Form N-PX / N-PX/A)
+- list_insider_filings_index: List recent insider trading-related filings (Forms 3/4/5)
+- list_institutional_disclosures_index: List recent institutional holdings disclosures (Form 13F-HR)
+- screen_crowdfunding_offerings: Screen Form C crowdfunding offerings for large raises
+- screen_reporting_red_flags: Screen recent filings for common reporting red flags
+- summarize_foreign_issuer_updates: Summarize recent foreign issuer updates (Form 6-K)
+- summarize_insider_activity: Summarize insider buying/selling activity over a lookback window
+- summarize_major_holder_intent: Summarize "purpose of transaction" intent from Schedule 13D/13G filings
+- summarize_proxy_comp_and_governance: Summarize proxy compensation/governance themes from proxy filings
+- track_institutional_owners_of_stock: Find which managers currently disclose ownership of a given stock
+- track_major_holder_changes: Track major holder changes (Schedule 13D/13G filings)
 
-Use tools when you need additional context to make more informed analysis, especially for:
-- Verifying company information
-- Understanding financial implications of news
-- Assessing company fundamentals
-- Comparing current performance to historical data
-- Predicting company future growth and profitability
-- Identifying company risks and opportunities
-""".format("\n".join(tool_descriptions))
-        return ret
+**FMP (FinancialModelingPrep) Tools (4 tools):**
+- get_company_finance: Get detailed financial ratios (profitability, liquidity, efficiency, leverage, valuation)
+- get_company_finance_ttm: Get detailed financial ratios trailing twelve months (TTM)
+- get_company_metrics: Get basic company key metrics (revenue, net income, P/E, EBITDA, etc.)
+- get_company_metrics_ttm: Get basic company key metrics trailing twelve months (TTM)
+
+**When to Use Tools:**
+Use these tools when analyzing companies mentioned in the article to:
+- Verify company financial health and recent performance
+- Check recent SEC filings and regulatory activity
+- Understand financial implications of news events
+- Compare current performance to historical data
+- Assess insider trading patterns and institutional ownership
+- Evaluate company fundamentals and valuation metrics
+- Identify risks, red flags, and growth opportunities
+- Track major holder changes and institutional activity
+
+**Tool Strategy:**
+- Start with basic company metrics (get_company_metrics, get_income_statement)
+- Use insider/institutional tools for ownership and trading analysis
+- Check recent filings (list_company_material_updates_index) for material events
+- Use comparison tools to track changes over time
+- Pay attention to recommended_next_tools in tool results for guidance
+"""

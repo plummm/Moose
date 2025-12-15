@@ -555,3 +555,146 @@ startxref
             if response.usage.get('total_tokens', 0) > 0:
                 assert response.cost > 0
 
+
+class TestMultiStageReasoning:
+    """Test multi-stage reasoning functionality."""
+    
+    def test_has_final_answer_marker(self):
+        """Test final answer marker detection."""
+        client = LLMClient(model="gpt-4", enable_multi_stage_reasoning=True)
+        
+        # Test with marker at start
+        assert client._has_final_answer_marker("<FINAL_ANSWER>Here is my answer")
+        assert client._has_final_answer_marker("  <FINAL_ANSWER>  Here is my answer")
+        assert client._has_final_answer_marker("<final_answer>lowercase")
+        
+        # Test without marker
+        assert not client._has_final_answer_marker("No marker here")
+        assert not client._has_final_answer_marker("")
+        assert not client._has_final_answer_marker("FINAL_ANSWER in middle")
+    
+    def test_extract_final_answer(self):
+        """Test final answer extraction."""
+        client = LLMClient(model="gpt-4", enable_multi_stage_reasoning=True)
+        
+        # Test extraction
+        content = "<FINAL_ANSWER>This is the answer"
+        assert client._extract_final_answer(content) == "This is the answer"
+        
+        # Test with whitespace
+        content = "  <FINAL_ANSWER>  Answer with spaces  "
+        assert client._extract_final_answer(content) == "Answer with spaces"
+        
+        # Test without marker
+        content = "No marker content"
+        assert client._extract_final_answer(content) == "No marker content"
+    
+    def test_build_continuation_prompt(self):
+        """Test continuation prompt building."""
+        client = LLMClient(model="gpt-4", enable_multi_stage_reasoning=True)
+        
+        prompt = client._build_continuation_prompt(iteration=0)
+        
+        # Check key elements are present
+        assert "tool results above" in prompt.lower()
+        assert "additional tools" in prompt.lower()
+        assert "<FINAL_ANSWER>" in prompt
+        assert "suggested next tools" in prompt.lower() or "metadata" in prompt.lower()
+    
+    def test_custom_marker(self):
+        """Test custom marker configuration."""
+        client = LLMClient(
+            model="gpt-4", 
+            enable_multi_stage_reasoning=True,
+            multi_stage_marker="DONE"
+        )
+        
+        assert client._has_final_answer_marker("DONE Here is my answer")
+        assert not client._has_final_answer_marker("<FINAL_ANSWER>Here is my answer")
+        
+        extracted = client._extract_final_answer("DONE The result")
+        assert extracted == "The result"
+
+
+@pytest.mark.asyncio
+class TestMultiStageReasoningIntegration:
+    """Integration tests for multi-stage reasoning workflow."""
+    
+    async def test_multi_stage_with_marker(self):
+        """Test multi-stage reasoning completes with marker."""
+        from unittest.mock import MagicMock, AsyncMock
+        
+        # Create mock LLM that requires 2 tool calls before final answer
+        mock_responses = [
+            # First response: request tool call
+            MagicMock(
+                content="I need more info",
+                tool_calls=[{"name": "test_tool", "id": "call_1", "args": {}}],
+                cost=0.001,
+                usage={"input_tokens": 10, "output_tokens": 5},
+                model="gpt-4",
+                finish_reason="tool_calls",
+                raw_response=None,
+                request_id="test_1"
+            ),
+            # Second response after tool: request another tool
+            MagicMock(
+                content="Need one more",
+                tool_calls=[{"name": "test_tool2", "id": "call_2", "args": {}}],
+                cost=0.001,
+                usage={"input_tokens": 15, "output_tokens": 5},
+                model="gpt-4",
+                finish_reason="tool_calls",
+                raw_response=None,
+                request_id="test_2"
+            ),
+            # Third response after tools: final answer with marker
+            MagicMock(
+                content="<FINAL_ANSWER>Based on the tool results, here is my complete analysis.",
+                tool_calls=None,
+                cost=0.002,
+                usage={"input_tokens": 20, "output_tokens": 15},
+                model="gpt-4",
+                finish_reason="stop",
+                raw_response=None,
+                request_id="test_3"
+            )
+        ]
+        
+        # Create mock tool
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+        mock_tool.ainvoke = AsyncMock(return_value="Tool result 1")
+        
+        mock_tool2 = MagicMock()
+        mock_tool2.name = "test_tool2"
+        mock_tool2.ainvoke = AsyncMock(return_value="Tool result 2")
+        
+        # Create client with multi-stage reasoning enabled
+        client = LLMClient(
+            model="gpt-4",
+            enable_multi_stage_reasoning=True,
+            tools=[mock_tool, mock_tool2]
+        )
+        
+        # Mock the LangChain LLM wrapper
+        client.langchain_llm = MagicMock()
+        client.langchain_llm.ainvoke = AsyncMock(side_effect=mock_responses)
+        
+        # Send message
+        response = await client.send_message(
+            message="Analyze this",
+            system_message="You are a helpful assistant"
+        )
+        
+        # Verify final answer was extracted (without marker)
+        assert response.content == "Based on the tool results, here is my complete analysis."
+        assert "<FINAL_ANSWER>" not in response.content
+        
+        # Verify tools were called
+        assert mock_tool.ainvoke.call_count == 1
+        assert mock_tool2.ainvoke.call_count == 1
+        
+        # Verify LLM was called 3 times (initial + after each tool round)
+        assert client.langchain_llm.ainvoke.call_count == 3
+

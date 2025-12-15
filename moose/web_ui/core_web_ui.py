@@ -520,6 +520,19 @@ body {
     white-space: pre-wrap;
 }
 
+.expand-toggle {
+    margin-top: 8px;
+    display: inline-block;
+    cursor: pointer;
+    color: var(--accent-blue);
+    font-size: 12px;
+    user-select: none;
+}
+
+.expand-toggle:hover {
+    text-decoration: underline;
+}
+
 /* Embedded System Message (within other messages) */
 .embedded-system-toggle {
     cursor: pointer;
@@ -1143,6 +1156,9 @@ function createChatMessageElement(message) {
         } else {
             typeLabel.textContent = 'AI';
         }
+    } else if (type === 'tool') {
+        // Show tool name for tool result messages (fallback to tool_call_id)
+        typeLabel.textContent = message.tool_name || message.tool_call_id || 'TOOL';
     } else {
         typeLabel.textContent = type.toUpperCase();
     }
@@ -1183,54 +1199,85 @@ function createChatMessageElement(message) {
     // Parse and display content
     const { textContent, toolUses } = parseMessageContent(rawContent);
     
-    // Display text content
+    // Display text content (truncate to first 500 words with expand/collapse)
     if (textContent) {
         const textDiv = document.createElement('div');
         textDiv.className = 'message-text';
+        contentDiv.appendChild(textDiv);
 
-        // Parse markdown to extract code blocks
-        const contentParts = parseMarkdownContent(textContent);
-        
-        for (const part of contentParts) {
-            if (part.type === 'code') {
-                // Code block - check if it's JSON and pretty-print
-                const codeBlock = document.createElement('pre');
-                codeBlock.className = 'json-block';
-                
-                // Try to parse and pretty-print JSON
-                if (part.lang === 'json' || isJsonString(part.content.trim())) {
-                    try {
-                        const jsonObj = JSON.parse(part.content.trim());
-                        codeBlock.textContent = JSON.stringify(jsonObj, null, 2);
-                    } catch {
+        const MAX_WORDS = 500;
+
+        function countWords(text) {
+            return (text || '').trim().split(/\s+/).filter(Boolean).length;
+        }
+
+        function truncateToWords(text, maxWords) {
+            const words = (text || '').trim().split(/\s+/).filter(Boolean);
+            if (words.length <= maxWords) {
+                return { truncated: text, isTruncated: false };
+            }
+            return { truncated: words.slice(0, maxWords).join(' ') + ' …', isTruncated: true };
+        }
+
+        function renderRichText(targetDiv, text) {
+            targetDiv.innerHTML = '';
+            const contentParts = parseMarkdownContent(text);
+
+            for (const part of contentParts) {
+                if (part.type === 'code') {
+                    const codeBlock = document.createElement('pre');
+                    codeBlock.className = 'json-block';
+
+                    if (part.lang === 'json' || isJsonString(part.content.trim())) {
+                        try {
+                            const jsonObj = JSON.parse(part.content.trim());
+                            codeBlock.textContent = JSON.stringify(jsonObj, null, 2);
+                        } catch {
+                            codeBlock.textContent = part.content;
+                        }
+                    } else {
                         codeBlock.textContent = part.content;
                     }
+                    targetDiv.appendChild(codeBlock);
                 } else {
-                    codeBlock.textContent = part.content;
-                }
-                textDiv.appendChild(codeBlock);
-            } else {
-                // Regular text - check if entire text is JSON
-                if (isJsonString(part.content)) {
-                    try {
-                        const jsonObj = JSON.parse(part.content);
-                        const jsonBlock = document.createElement('pre');
-                        jsonBlock.className = 'json-block';
-                        jsonBlock.textContent = JSON.stringify(jsonObj, null, 2);
-                        textDiv.appendChild(jsonBlock);
-                    } catch {
+                    if (isJsonString(part.content)) {
+                        try {
+                            const jsonObj = JSON.parse(part.content);
+                            const jsonBlock = document.createElement('pre');
+                            jsonBlock.className = 'json-block';
+                            jsonBlock.textContent = JSON.stringify(jsonObj, null, 2);
+                            targetDiv.appendChild(jsonBlock);
+                        } catch {
+                            const textSpan = document.createElement('span');
+                            textSpan.textContent = part.content;
+                            targetDiv.appendChild(textSpan);
+                        }
+                    } else {
                         const textSpan = document.createElement('span');
                         textSpan.textContent = part.content;
-                        textDiv.appendChild(textSpan);
+                        targetDiv.appendChild(textSpan);
                     }
-                } else {
-                    const textSpan = document.createElement('span');
-                    textSpan.textContent = part.content;
-                    textDiv.appendChild(textSpan);
                 }
             }
         }
-        contentDiv.appendChild(textDiv);
+
+        const totalWords = countWords(textContent);
+        const { truncated, isTruncated } = truncateToWords(textContent, MAX_WORDS);
+        let expanded = false;
+
+        renderRichText(textDiv, isTruncated ? truncated : textContent);
+
+        if (isTruncated) {
+            const toggle = document.createElement('div');
+            toggle.className = 'expand-toggle';
+            toggle.textContent = `Show more (${totalWords} words)`;
+            toggle.onclick = function() {
+                expanded = !expanded;
+                renderRichText(textDiv, expanded ? textContent : truncated);
+                toggle.textContent = expanded ? 'Show less' : `Show more (${totalWords} words)`;
+            };
+            contentDiv.appendChild(toggle);
+        }
     }
     
     // Display tool uses - prefer content array's tool_use, fallback to tool_calls field
@@ -1264,7 +1311,7 @@ function createChatMessageElement(message) {
     if (message.tool_call_id) {
         const tcIdDiv = document.createElement('div');
         tcIdDiv.className = 'tool-call-id';
-        tcIdDiv.textContent = `Tool: ${message.tool_name || message.tool_call_id}`;
+        tcIdDiv.textContent = `Tool call id: ${message.tool_call_id}`;
         contentDiv.appendChild(tcIdDiv);
     }
     

@@ -14,6 +14,48 @@ except Exception:  # pragma: no cover
     pd = None  # type: ignore
 
 
+def filings_is_empty(filings: Any) -> bool:
+    """Robust emptiness check for edgar filings objects.
+
+    The upstream `edgar` library has changed return types over time:
+    - sometimes a collection-like object with `.empty`
+    - sometimes an iterable / slice with `.latest(...)`
+    - sometimes a single `EntityFiling` (which does NOT have `.empty`)
+
+    This helper treats a single filing as non-empty, and only returns True
+    when we can confidently determine the collection is empty.
+    """
+    if filings is None:
+        return True
+
+    empty_attr = getattr(filings, "empty", None)
+    if isinstance(empty_attr, bool):
+        return empty_attr
+
+    # Common: sized containers
+    try:
+        return len(filings) == 0  # type: ignore[arg-type]
+    except Exception:
+        pass
+
+    # Common: list-like attribute
+    for attr in ("filings", "items", "data"):
+        v = getattr(filings, attr, None)
+        if isinstance(v, list):
+            return len(v) == 0
+
+    # Try iteration: empty iterator means empty collection.
+    try:
+        it = iter(filings)  # type: ignore[arg-type]
+        next(it)
+        return False
+    except StopIteration:
+        return True
+    except Exception:
+        # If it's not iterable (e.g., a single EntityFiling), treat as non-empty.
+        return False
+
+
 def mcp_json_safe(obj: Any) -> Any:
     """
     Convert common edgartools/Python objects into JSON-serializable primitives.

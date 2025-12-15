@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 from edgar import Company
 from edgar._filings import get_by_accession_number
 
-from .basic import EdgarMCPTools, _since_date_range, mcp_envelope_err, mcp_envelope_ok, mcp_tool
+from .basic import EdgarMCPTools, _since_date_range, filings_is_empty, mcp_envelope_err, mcp_envelope_ok, mcp_tool
 
 
 class FinancingMCPTools(EdgarMCPTools):
@@ -51,7 +51,7 @@ class FinancingMCPTools(EdgarMCPTools):
             forms = ["S-1", "S-3", "S-4", "F-1", "F-3", "F-4", "424B1", "424B2", "424B3", "424B4", "424B5"]
             c = Company(ticker)
             filings = c.get_filings(form=forms, filing_date=_since_date_range(since_days))
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No financing filings found for {ticker} in last {since_days} days.", meta=meta)
             out = [
                 {"filing_date": getattr(f, "filing_date", None), "accession_no": getattr(f, "accession_no", None), "form": getattr(f, "form", None), "company": getattr(f, "company", None)}

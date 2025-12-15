@@ -455,15 +455,89 @@ class LLMLogger:
         
         This method intelligently detects what's new:
         - If last message is HumanMessage: log it as a request
-        - If last messages are ToolMessages: log each as tool_result
+        - If last message is ToolMessage: log each trailing ToolMessage as tool_result
+        - If last message is HumanMessage and it is preceded by ToolMessages (common in multi-stage tool loops),
+          log those ToolMessages as tool_result first, then log the HumanMessage.
         - SystemMessage at start is NOT logged (assumed to be static)
         """
         if not messages:
             return
+
+        def _infer_tool_name(tool_call_id: str) -> Optional[str]:
+            """Infer tool name by scanning previous AIMessage tool calls.
+
+            Different providers / LangChain versions may represent tool call IDs with different keys:
+            - dict: {"id": "..."} (common), or {"tool_use_id": "..."} (Anthropic-ish), etc.
+            """
+            if not tool_call_id:
+                return None
+
+            def _tc_id(tc: Any) -> Optional[str]:
+                if isinstance(tc, dict):
+                    return tc.get("id") or tc.get("tool_use_id") or tc.get("tool_call_id")
+                return (
+                    getattr(tc, "id", None)
+                    or getattr(tc, "tool_use_id", None)
+                    or getattr(tc, "tool_call_id", None)
+                )
+
+            def _tc_name(tc: Any) -> Optional[str]:
+                if isinstance(tc, dict):
+                    return tc.get("name") or tc.get("tool_name")
+                return getattr(tc, "name", None) or getattr(tc, "tool_name", None)
+
+            # Walk backwards; first match wins.
+            for msg in reversed(messages):
+                if type(msg).__name__ != 'AIMessage':
+                    continue
+
+                tool_calls = getattr(msg, 'tool_calls', None) or []
+
+                # Some providers tuck tool call info into additional_kwargs
+                if not tool_calls:
+                    ak = getattr(msg, "additional_kwargs", None) or {}
+                    tool_calls = ak.get("tool_calls") or ak.get("tool_uses") or []
+
+                for tc in tool_calls:
+                    if _tc_id(tc) == tool_call_id:
+                        return _tc_name(tc)
+            return None
         
         last_msg = messages[-1]
         msg_type = type(last_msg).__name__
         
+        # Common in multi-stage tool loops: ... ToolMessage(s) then a HumanMessage continuation prompt.
+        # In that case, the tool results are "new" too and should be logged.
+        if msg_type == 'HumanMessage' and len(messages) >= 2 and type(messages[-2]).__name__ == 'ToolMessage':
+            tool_messages = []
+            for msg in reversed(messages[:-1]):  # exclude the last HumanMessage
+                if type(msg).__name__ == 'ToolMessage':
+                    tool_messages.insert(0, msg)
+                else:
+                    break
+            for tool_msg in tool_messages:
+                tool_name = None
+                if hasattr(tool_msg, 'name'):
+                    tool_name = tool_msg.name
+                elif hasattr(tool_msg, 'tool_call_id'):
+                    tool_name = _infer_tool_name(tool_msg.tool_call_id) or tool_msg.tool_call_id
+                self.log_tool_result(
+                    tool_message=tool_msg,
+                    request_id=request_id,
+                    model=model,
+                    tool_name=tool_name,
+                    **kwargs
+                )
+            # Finally log the user's continuation prompt as the request
+            self.log_message(
+                message=last_msg,
+                direction="request",
+                request_id=request_id,
+                model=model,
+                **kwargs
+            )
+            return
+
         if msg_type == 'ToolMessage':
             # Find all consecutive ToolMessages at the end
             tool_messages = []
@@ -479,7 +553,7 @@ class LLMLogger:
                 if hasattr(tool_msg, 'name'):
                     tool_name = tool_msg.name
                 elif hasattr(tool_msg, 'tool_call_id'):
-                    tool_name = tool_msg.tool_call_id
+                    tool_name = _infer_tool_name(tool_msg.tool_call_id) or tool_msg.tool_call_id
                 
                 self.log_tool_result(
                     tool_message=tool_msg,

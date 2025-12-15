@@ -51,6 +51,9 @@ class LLMClient:
         timeout: Optional[float] = None,
         config: Optional[ModelConfig] = None,
         tools: Optional[List[Any]] = None,
+        enable_multi_stage_reasoning: bool = False,
+        multi_stage_marker: str = "<FINAL_ANSWER>",
+        max_tool_iterations: int = 20,
         **kwargs
     ):
         """
@@ -66,6 +69,9 @@ class LLMClient:
             timeout: Request timeout in seconds
             config: Optional ModelConfig instance (for cost calculation)
             tools: Optional list of LangChain tools to bind to the LLM
+            enable_multi_stage_reasoning: Enable planner/executor loop for iterative tool calling
+            multi_stage_marker: Marker text that signals completion in multi-stage mode
+            max_tool_iterations: Maximum number of tool call iterations (default: 20)
             **kwargs: Additional provider-specific parameters
         """
         self.logger = get_core_logger()
@@ -110,6 +116,11 @@ class LLMClient:
             for tool in self.tools:
                 if hasattr(tool, 'name'):
                     self.tool_map[tool.name] = tool
+        
+        # Multi-stage reasoning configuration
+        self.enable_multi_stage_reasoning = enable_multi_stage_reasoning
+        self.multi_stage_marker = multi_stage_marker
+        self.max_tool_iterations = max_tool_iterations
         
         # Initialize LangChain LLM wrapper
         try:
@@ -665,6 +676,65 @@ Provide your final combined response:"""
         
         return final_response
     
+    def _build_continuation_prompt(self, iteration: int) -> str:
+        """
+        Build a generic continuation prompt after tool execution.
+        
+        Args:
+            iteration: Current iteration number
+            
+        Returns:
+            Continuation prompt string
+        """
+        return (
+            "Based on the tool results above, do you need to call any additional tools to gather more information?\n"
+            "- If YES: Call the tools you need (you can call multiple in parallel)\n"
+            f"- If NO: Respond with {self.multi_stage_marker} followed by your complete response\n"
+            "\n"
+            "Note: Tool results may include suggested next tools in their metadata."
+        )
+    
+    def _has_final_answer_marker(self, content: str) -> bool:
+        """
+        Check if content contains the final answer marker.
+        
+        Args:
+            content: Response content to check
+            
+        Returns:
+            True if marker is present at the start
+        """
+        if not content:
+            return False
+        # Strip whitespace and check if starts with marker (case-insensitive)
+        return content.strip().upper().startswith(self.multi_stage_marker.upper())
+    
+    def _extract_final_answer(self, content: str) -> str:
+        """
+        Extract the final answer by removing the marker.
+        
+        Args:
+            content: Response content with marker
+            
+        Returns:
+            Content without the marker
+        """
+        if not content:
+            return content
+        
+        # Find marker (case-insensitive) and remove it
+        content_stripped = content.strip()
+        marker_upper = self.multi_stage_marker.upper()
+        
+        # Check various positions for marker
+        if content_stripped.upper().startswith(marker_upper):
+            # Remove marker from start
+            result = content_stripped[len(self.multi_stage_marker):].strip()
+            return result
+        
+        # If not at start, return as-is
+        return content
+    
     async def _execute_tool_calls(
         self,
         tool_calls: List[Any],
@@ -686,12 +756,16 @@ Provide your final combined response:"""
             # Handle both dict format and LangChain tool call object format
             if isinstance(tool_call, dict):
                 tool_name = tool_call.get('name')
-                tool_call_id = tool_call.get('id')
+                tool_call_id = tool_call.get('id') or tool_call.get('tool_use_id') or tool_call.get('tool_call_id')
                 tool_args = tool_call.get('args', {})
             else:
                 # LangChain tool call object
                 tool_name = getattr(tool_call, 'name', None)
-                tool_call_id = getattr(tool_call, 'id', None)
+                tool_call_id = (
+                    getattr(tool_call, 'id', None)
+                    or getattr(tool_call, 'tool_use_id', None)
+                    or getattr(tool_call, 'tool_call_id', None)
+                )
                 tool_args = getattr(tool_call, 'args', {})
                 # Convert tool_args to dict if it's not already
                 if not isinstance(tool_args, dict):
@@ -763,7 +837,6 @@ Provide your final combined response:"""
         messages: Optional[List[Message]] = None,
         system_message: Optional[Union[str, Message]] = None,
         request_id: str = None,
-        max_tool_iterations: int = 20,
         **kwargs
     ) -> LLMResponse:
         """
@@ -776,7 +849,6 @@ Provide your final combined response:"""
             messages: Optional conversation history
             system_message: Optional system message
             request_id: Request ID
-            max_tool_iterations: Maximum number of tool call iterations (default: 10)
             **kwargs: Additional parameters
             
         Returns:
@@ -799,8 +871,30 @@ Provide your final combined response:"""
         total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         final_response = None
         
+        # Augment system message for multi-stage reasoning mode
+        if self.enable_multi_stage_reasoning and system_message:
+            # Append multi-stage reasoning instructions to system message
+            multi_stage_instructions = (
+                "\n\nMULTI-STAGE REASONING MODE:\n"
+                "You can call tools iteratively to gather information. After each tool execution round, you'll be asked if you need more tools.\n"
+                "\n"
+                "IMPORTANT: Do NOT generate your final complete response until you're done with all tool calls.\n"
+                f"- To call more tools: Simply call the tools you need (can be multiple in parallel)\n"
+                f"- To finish: Respond with {self.multi_stage_marker} prefix, then provide your complete response\n"
+                "\n"
+                f"The {self.multi_stage_marker} marker is REQUIRED to signal completion."
+            )
+            
+            if isinstance(system_message, str):
+                system_message = system_message + multi_stage_instructions
+            elif isinstance(system_message, Message):
+                system_message = Message(
+                    role=system_message.role,
+                    content=str(system_message.content) + multi_stage_instructions
+                )
+        
         # Iterate until we get a final response (no more tool calls) or hit max iterations
-        for iteration in range(max_tool_iterations):
+        for iteration in range(self.max_tool_iterations):
             # Use LangChain LLM wrapper asynchronously
             response = await self.langchain_llm.ainvoke(
                 message=None,  # Don't split - pass everything in messages
@@ -818,10 +912,41 @@ Provide your final combined response:"""
                 total_usage["output_tokens"] += response.usage.get("output_tokens", 0)
                 total_usage["total_tokens"] += response.usage.get("total_tokens", 0)
             
+            # LangChain/Anthropic can return content as a list of content blocks when tools are involved.
+            # Normalize to the concatenated text blocks for marker checks and for storing assistant messages.
+            response_text: str
+            if isinstance(response.content, list):
+                text_parts: List[str] = []
+                for block in response.content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(str(block.get("text", "")))
+                response_text = "\n".join([t for t in text_parts if t])
+            elif isinstance(response.content, str):
+                response_text = response.content
+            else:
+                response_text = "" if response.content is None else str(response.content)
+
+            # Check for termination marker FIRST (multi-stage reasoning mode)
+            if self.enable_multi_stage_reasoning and self._has_final_answer_marker(response_text):
+                self.logger.debug(f"Final answer marker detected at iteration {iteration + 1}")
+                final_answer_content = self._extract_final_answer(response_text)
+                # Create final response with extracted content
+                final_response = LLMResponse(
+                    content=final_answer_content,
+                    model=response.model,
+                    finish_reason=response.finish_reason,
+                    usage=response.usage,
+                    cost=response.cost,
+                    raw_response=response.raw_response,
+                    request_id=response.request_id,
+                    tool_calls=None  # No tool calls in final answer
+                )
+                break
+            
             # Add assistant response to conversation
             conversation_messages.append(Message(
                 role=MessageRole.ASSISTANT,
-                content=response.content,
+                content=response_text,
                 tool_calls=response.tool_calls
             ))
             
@@ -834,16 +959,35 @@ Provide your final combined response:"""
                 
                 conversation_messages.extend(tool_messages)
                 
-                # Continue loop to get final response with tool results
+                # If multi-stage reasoning enabled, add continuation prompt
+                if self.enable_multi_stage_reasoning:
+                    continuation_prompt = self._build_continuation_prompt(iteration)
+                    conversation_messages.append(Message(
+                        role=MessageRole.USER,
+                        content=continuation_prompt
+                    ))
+                    self.logger.debug(f"Added continuation prompt after iteration {iteration + 1}")
+                
+                # Continue loop to get next response
                 continue
             else:
-                # No more tool calls, this is the final response
-                final_response = response
-                break
+                # No tool calls
+                if self.enable_multi_stage_reasoning:
+                    # In multi-stage mode, prompt for decision if no marker found
+                    conversation_messages.append(Message(
+                        role=MessageRole.USER,
+                        content=f"Do you need more tools or is this your final answer? If final, start with {self.multi_stage_marker}"
+                    ))
+                    self.logger.debug(f"No tool calls and no marker at iteration {iteration + 1}, prompting for decision")
+                    continue
+                else:
+                    # Standard mode - return response
+                    final_response = response
+                    break
         
         if final_response is None:
             # Hit max iterations, use last response
-            self.logger.warning(f"Reached max tool iterations ({max_tool_iterations}), using last response")
+            self.logger.warning(f"Reached max tool iterations ({self.max_tool_iterations}), using last response")
             final_response = response
         
         # Update final response with accumulated cost and usage

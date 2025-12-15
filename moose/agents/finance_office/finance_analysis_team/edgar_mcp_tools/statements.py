@@ -8,7 +8,7 @@ from edgar.entity.filings import EntityFiling, EntityFilings
 from edgar.xbrl import XBRLS
 from edgar.xbrl.statements import StitchedStatement
 
-from .basic import EdgarMCPTools, mcp_envelope_err, mcp_envelope_ok, mcp_tool
+from .basic import EdgarMCPTools, filings_is_empty, mcp_envelope_err, mcp_envelope_ok, mcp_tool
 
 
 class FinancialStatementsMCPTools(EdgarMCPTools):
@@ -119,7 +119,7 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
                 filing_date=f"{start_date}:",
                 trigger_full_load=True,
             )
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No {form_name} XBRL filings found for {ticker} starting from {start_quarter}.", meta=meta)
             max_periods = len(filings)
         else:
@@ -129,7 +129,7 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
                 amendments=False,
                 trigger_full_load=False,
             ).latest(periods)
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No recent {form_name} XBRL filings found for {ticker}.", meta=meta)
             max_periods = periods
 
@@ -255,7 +255,7 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
                 filing_date=f"{start_date}:",
                 trigger_full_load=True,
             )
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No {form_name} XBRL filings found for {ticker} starting from {start_quarter}.", meta=meta)
             max_periods = len(filings)
         else:
@@ -265,7 +265,7 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
                 amendments=False,
                 trigger_full_load=False,
             ).latest(periods)
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No recent {form_name} XBRL filings found for {ticker}.", meta=meta)
             max_periods = periods
 
@@ -393,7 +393,7 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
                 filing_date=f"{start_date}:",
                 trigger_full_load=True,
             )
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No {form_name} XBRL filings found for {ticker} starting from {start_quarter}.", meta=meta)
             max_periods = len(filings)
         else:
@@ -403,7 +403,7 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
                 amendments=False,
                 trigger_full_load=False,
             ).latest(periods)
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No recent {form_name} XBRL filings found for {ticker}.", meta=meta)
             max_periods = periods
 

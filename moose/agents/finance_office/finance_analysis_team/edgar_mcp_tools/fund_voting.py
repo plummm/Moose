@@ -6,7 +6,7 @@ from edgar import Company
 from edgar._filings import get_by_accession_number
 from edgar.entity.filings import EntityFilings
 
-from .basic import EdgarMCPTools, mcp_envelope_err, mcp_envelope_ok, mcp_tool, pd
+from .basic import EdgarMCPTools, filings_is_empty, mcp_envelope_err, mcp_envelope_ok, mcp_tool, pd
 
 
 class FundVotingMCPTools(EdgarMCPTools):
@@ -47,7 +47,7 @@ class FundVotingMCPTools(EdgarMCPTools):
         try:
             c = Company(fund_cik)
             filings = c.get_filings(form=["N-PX", "N-PX/A"])
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No voting record filings found for {fund_cik}.", meta=meta)
             latest = filings.latest(n)
             lst = list(latest) if isinstance(latest, EntityFilings) else [latest]

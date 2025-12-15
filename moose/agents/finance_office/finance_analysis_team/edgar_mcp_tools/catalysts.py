@@ -6,7 +6,7 @@ from edgar import Company
 from edgar._filings import get_by_accession_number
 from edgar.entity.filings import EntityFilings
 
-from .basic import EdgarMCPTools, mcp_envelope_err, mcp_envelope_ok, mcp_tool
+from .basic import EdgarMCPTools, filings_is_empty, mcp_envelope_err, mcp_envelope_ok, mcp_tool
 
 
 class CompanyUpdatesMCPTools(EdgarMCPTools):
@@ -259,7 +259,7 @@ class CompanyUpdatesMCPTools(EdgarMCPTools):
         try:
             company = Company(ticker)
             filings = company.get_filings(form="8-K")
-            if filings is None or filings.empty:
+            if filings_is_empty(filings):
                 return mcp_envelope_err(f"No 8-K filings found for {ticker}.", meta=meta)
 
             latest = filings.latest(n)

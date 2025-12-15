@@ -484,13 +484,68 @@ def generate_homepage_html(
                 logsContainer.innerHTML = '<div class="log-entry error"><span class="log-time">[Error]</span><span>Failed to fetch logs: ' + error.message + '</span></div>';
             }});
         }}
-        
-        // Auto-refresh logs every 5 seconds
-        setInterval(refreshLogs, 5000);
-        
-        // Load logs on page load
+
+        // Live log streaming (SSE) - similar to main Moose web UI
+        let logEventSource = null;
+
+        function appendLogEntry(log) {{
+            const logsContainer = document.getElementById('logs-container');
+            const level = (log.level || 'info').toLowerCase();
+            const time = log.time || '';
+            const message = log.message || '';
+            const div = document.createElement('div');
+            div.className = `log-entry ${{level}}`;
+            div.innerHTML = `<span class="log-time">[${{time}}]</span><span>${{message}}</span>`;
+            logsContainer.appendChild(div);
+
+            // Keep the view pinned to bottom (like streaming logs)
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+
+            // Cap DOM growth (keep last 200 visible entries)
+            const maxVisible = 200;
+            while (logsContainer.children.length > maxVisible) {{
+                logsContainer.removeChild(logsContainer.firstChild);
+            }}
+        }}
+
+        function connectLogStream() {{
+            if (logEventSource) {{
+                logEventSource.close();
+                logEventSource = null;
+            }}
+
+            try {{
+                logEventSource = new EventSource('/logs/stream');
+            }} catch (e) {{
+                // If SSE is not supported, fallback to polling
+                console.warn('SSE not supported, falling back to polling:', e);
+                setInterval(refreshLogs, 5000);
+                return;
+            }}
+
+            logEventSource.onmessage = function(event) {{
+                try {{
+                    const log = JSON.parse(event.data);
+                    appendLogEntry(log);
+                }} catch (e) {{
+                    console.warn('Failed to parse log event:', e);
+                }}
+            }};
+
+            logEventSource.onerror = function() {{
+                // Auto-reconnect after a short delay
+                if (logEventSource) {{
+                    logEventSource.close();
+                    logEventSource = null;
+                }}
+                setTimeout(connectLogStream, 2000);
+            }};
+        }}
+
+        // Load initial logs once, then stream incremental updates
         window.onload = function() {{
             refreshLogs();
+            connectLogStream();
         }};
     </script>
 </body>

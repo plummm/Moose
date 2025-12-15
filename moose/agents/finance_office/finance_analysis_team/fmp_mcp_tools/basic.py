@@ -138,3 +138,27 @@ class FMPMCPTools():
             first = payload[0]
             return first if isinstance(first, dict) else None
         return None
+    
+    @classmethod
+    def list_mcp_tools(cls) -> List[Dict[str, Any]]:
+        """
+        Reflect on the class to find all methods decorated with `@mcp_tool`.
+        
+        Returns:
+            List of dicts with keys: name, method_name, doc, examples
+        """
+        out: List[Dict[str, Any]] = []
+        for attr_name in dir(cls):
+            if attr_name.startswith("_"):
+                continue
+            fn = getattr(cls, attr_name, None)
+            if callable(fn) and getattr(fn, "_is_mcp_tool", False):
+                out.append(
+                    {
+                        "name": getattr(fn, "_mcp_name", attr_name),
+                        "method_name": attr_name,
+                        "doc": (getattr(fn, "__doc__", None) or "").strip(),
+                        "examples": list(getattr(fn, "_mcp_examples", []) or []),
+                    }
+                )
+        return out
