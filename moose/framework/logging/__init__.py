@@ -322,6 +322,10 @@ class LLMLogger:
         # Extract common fields
         if hasattr(msg, 'content'):
             result["content"] = msg.content
+
+        # Include name when present (useful for ToolMessage display)
+        if hasattr(msg, 'name') and getattr(msg, 'name', None):
+            result["name"] = getattr(msg, 'name', None)
         
         # Handle tool calls for AIMessage
         if hasattr(msg, 'tool_calls') and msg.tool_calls:
@@ -520,7 +524,8 @@ class LLMLogger:
                 if hasattr(tool_msg, 'name'):
                     tool_name = tool_msg.name
                 elif hasattr(tool_msg, 'tool_call_id'):
-                    tool_name = _infer_tool_name(tool_msg.tool_call_id) or tool_msg.tool_call_id
+                    # Never treat a tool_call_id as a tool name; only infer if possible.
+                    tool_name = _infer_tool_name(tool_msg.tool_call_id)
                 self.log_tool_result(
                     tool_message=tool_msg,
                     request_id=request_id,
@@ -553,7 +558,8 @@ class LLMLogger:
                 if hasattr(tool_msg, 'name'):
                     tool_name = tool_msg.name
                 elif hasattr(tool_msg, 'tool_call_id'):
-                    tool_name = _infer_tool_name(tool_msg.tool_call_id) or tool_msg.tool_call_id
+                    # Never treat a tool_call_id as a tool name; only infer if possible.
+                    tool_name = _infer_tool_name(tool_msg.tool_call_id)
                 
                 self.log_tool_result(
                     tool_message=tool_msg,

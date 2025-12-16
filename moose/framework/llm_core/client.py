@@ -777,6 +777,7 @@ Provide your final combined response:"""
                 tool_messages.append(Message(
                     role=MessageRole.TOOL,
                     content=f"Error: {error_msg}",
+                    name=tool_name,
                     tool_call_id=tool_call_id
                 ))
                 continue
@@ -814,6 +815,7 @@ Provide your final combined response:"""
                 tool_msg = Message(
                     role=MessageRole.TOOL,
                     content=result_str,
+                    name=tool_name,
                     tool_call_id=tool_call_id
                 )
                 tool_messages.append(tool_msg)
@@ -826,6 +828,7 @@ Provide your final combined response:"""
                 tool_messages.append(Message(
                     role=MessageRole.TOOL,
                     content=f"Error: {error_msg}",
+                    name=tool_name,
                     tool_call_id=tool_call_id
                 ))
         

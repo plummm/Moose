@@ -542,6 +542,13 @@ class ChatManager:
         # Include tool_call_id if present (for Tool messages)
         if msg.get('tool_call_id'):
             result['tool_call_id'] = msg['tool_call_id']
+
+        # Prefer tool name if present in the serialized ToolMessage itself
+        # (this is more reliable than trying to infer it later).
+        if chat_type == 'tool':
+            tool_name = msg.get('name')
+            if tool_name:
+                result['tool_name'] = tool_name
         
         # Include usage metadata if present
         if msg.get('usage_metadata'):

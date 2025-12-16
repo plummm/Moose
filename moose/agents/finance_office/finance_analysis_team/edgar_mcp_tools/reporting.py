@@ -102,8 +102,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - This tool wraps `get_major_holder_changes(...)` and normalizes `meta.tool` to the public tool name.
         - It returns a list of recent 13D/13G filings and (optionally) the “purpose of transaction” intent excerpt when available.
 
-        Use case (with example)
-        - You want to see whether a notable holder filed a 13D/13G update for NVDA in the last year and scan for intent language.
+        Use case
+        - You want to see whether a notable holder filed a 13D/13G update recently and scan for “purpose of transaction” intent language.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").
@@ -144,8 +144,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Calls `track_major_holder_changes(...)` with `include_intent=True` and filters to filings that contain an intent excerpt.
         - Intended to quickly surface activist/strategic intent language for qualitative analysis.
 
-        Use case (with example)
-        - You’re investigating potential activism in a stock and want the latest Item 4 intent excerpt in one call.
+        Use case
+        - You want a quick view of the latest Item 4 “purpose of transaction” intent excerpt to investigate potential activism.
 
         Parameters
         - ticker: Stock ticker (e.g., "AAPL").
@@ -220,8 +220,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Loads two filings (by filing date range) and extracts the Risk Factors section (Item 1A) using marker-based parsing.
         - Produces a lightweight diff summary including unified diff lines and example added/removed snippets.
 
-        Use case (with example)
-        - You want to see what changed in NVDA’s risk factors between two annual filings to detect new disclosed risks.
+        Use case
+        - You want to see what changed in a company’s risk factors between two filings to detect newly disclosed risks.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").
@@ -317,8 +317,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Fetches the latest `periods` filings for the chosen form type (10-Q or 10-K), then compares the newest vs the prior one.
         - Extracts MD&A using marker-based parsing and produces a diff summary (added/removed snippets).
 
-        Use case (with example)
-        - You want to see what management emphasized differently this quarter vs last quarter for MSFT.
+        Use case
+        - You want to see what management emphasized differently between two recent reporting periods.
 
         Parameters
         - ticker: Stock ticker (e.g., "MSFT").
@@ -403,8 +403,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Scans the full text of the most recent filings (10-Q or 10-K) for keyword patterns associated with common accounting/reporting risks.
         - Returns evidence snippets per flag category (best-effort; keyword-based, not a definitive determination).
 
-        Use case (with example)
-        - You want a fast automated screen for “restatement” or “material weakness” language in the last few quarterly filings.
+        Use case
+        - You want a fast automated screen for “restatement” or “material weakness” language across recent filings.
 
         Parameters
         - ticker: Stock ticker (e.g., "AAPL").
@@ -512,8 +512,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Retrieves 6-K filings for `ticker` either by latest `n` or within `since_days`, and returns metadata plus optional exhibit info.
         - Includes an optional `text_preview` to quickly triage filings without downloading full exhibits.
 
-        Use case (with example)
-        - You follow a foreign issuer and want to quickly see its latest 6-K updates and any attached exhibit documents.
+        Use case
+        - You want to quickly see the latest 6-K updates for a foreign issuer and any attached exhibit documents.
 
         Parameters
         - ticker: Stock ticker (e.g., "TSM").
@@ -596,7 +596,7 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Scans proxy filings for keyword hits related to compensation and governance topics.
         - Returns small text snippets per filing to help triage where to read deeper.
 
-        Use case (with example)
+        Use case
         - You want quick context on executive compensation and governance issues discussed in a company’s proxy statement.
 
         Parameters
@@ -663,8 +663,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Searches for late filing notices in the lookback window and extracts a few keyword-context snippets per filing.
         - Useful as an operational risk indicator (delays, internal control issues, restatement hints).
 
-        Use case (with example)
-        - You want to know if a company recently filed an NT 10-Q indicating a delayed quarterly report.
+        Use case
+        - You want to know if a company recently filed an NT notice indicating a delayed periodic report.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").
@@ -730,8 +730,8 @@ class CompanyReportingMCPTools(EdgarMCPTools):
         - Loads Reg CF (Form C) filings for the specified year/quarter and extracts maximum offering amount when available.
         - Filters to offerings with maximum offering amount >= `min_maximum_amount_usd` (best-effort; depends on form parsing).
 
-        Use case (with example)
-        - You want to find the largest crowdfunding offerings filed in 2024 Q2.
+        Use case
+        - You want to find the largest crowdfunding offerings filed in a given quarter.
 
         Parameters
         - year: Filing year (e.g., 2024).

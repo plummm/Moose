@@ -32,8 +32,8 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
         - A **detailed** single-filing statement (latest 10-K or 10-Q), or
         - A **standard** stitched statement across multiple filings (useful for multi-period comparison).
 
-        Use case (with example)
-        - You’re analyzing a news item about NVIDIA and want its recent quarterly revenue/expenses trend:
+        Use case
+        - You want an income statement to analyze revenue/expense trends across recent quarters or years.
 
         Parameters
         - ticker: Stock ticker symbol (e.g., "NVDA").
@@ -172,8 +172,8 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
         """
         Retrieve an SEC cash flow statement for a public company (XBRL-based), returned as a JSON envelope.
 
-        Use case (with example)
-        - You want to validate whether a company is generating cash consistently (operating cash flow) across recent quarters.
+        Use case
+        - You want to validate whether a company is generating cash consistently (operating cash flow) across recent periods.
 
         Parameters
         - ticker: Stock ticker symbol (e.g., "AAPL").
@@ -308,8 +308,8 @@ class FinancialStatementsMCPTools(EdgarMCPTools):
         """
         Retrieve an SEC balance sheet for a public company (XBRL-based), returned as a JSON envelope.
 
-        Use case (with example)
-        - You want to quickly assess liquidity/leverage from the latest filing (cash, debt, equity).
+        Use case
+        - You want to quickly assess liquidity and leverage from the latest filing (cash, debt, equity).
 
         Parameters
         - ticker: Stock ticker symbol (e.g., "MSFT").

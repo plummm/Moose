@@ -23,8 +23,8 @@ class FundVotingMCPTools(EdgarMCPTools):
         - Queries SEC filings for a fund (identified by CIK) and returns the latest N-PX filings with accession numbers.
         - This is an **index step** typically followed by fetching the detailed vote table.
 
-        Use case (with example)
-        - You want to analyze how a large fund voted on a set of shareholder proposals in the most recent N-PX filing.
+        Use case
+        - You want to analyze how a fund voted on shareholder proposals using its most recent N-PX filing.
 
         Parameters
         - fund_cik: Fund CIK (e.g., "0001166559"). Must be non-empty.
@@ -86,8 +86,8 @@ class FundVotingMCPTools(EdgarMCPTools):
         - Loads the filing referenced by `accession_no`, extracts proxy vote records, and returns them as a table (JSON-safe).
         - Useful for searching/filtering votes by issuer, meeting date, proposal text, vote cast, etc. (depending on edgartools fields).
 
-        Use case (with example)
-        - After selecting the latest N-PX filing from the index, you want the top 1,000 vote rows for analysis.
+        Use case
+        - After selecting an N-PX filing from the index, you want the vote rows for analysis and filtering.
 
         Parameters
         - accession_no: SEC accession number for an N-PX/N-PX/A filing.

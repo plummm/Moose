@@ -22,8 +22,8 @@ class InsiderTradeMCPTools(EdgarMCPTools):
         - Queries SEC filings for the given `ticker` and returns a small list of recent insider forms with accession numbers.
         - This is typically an **index step** you run before parsing transactions from a specific filing.
 
-        Use case (with example)
-        - You want to see whether insiders have been active recently in NVIDIA, and then drill into one filing:
+        Use case
+        - You want to see whether insiders have been active recently for a company and then drill into a specific filing.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").
@@ -86,8 +86,8 @@ class InsiderTradeMCPTools(EdgarMCPTools):
         - Loads the filing referenced by `accession_no` and converts it into a transactions table.
         - Useful after `list_insider_filings_index`, which provides the accession numbers.
 
-        Use case (with example)
-        - You found a Form 4 accession number and want to see whether it was a buy or sale, share counts, and prices.
+        Use case
+        - You want to parse a specific Form 4 filing into normalized buy/sell transactions with share counts and prices.
 
         Parameters
         - accession_no: SEC accession number from an index tool result.
@@ -138,8 +138,8 @@ class InsiderTradeMCPTools(EdgarMCPTools):
         - Calls `list_insider_filings_index` and then parses each filing into transactions.
         - Produces a high-level summary: filings count, approximate buy/sell rows, and share totals by owner (best-effort).
 
-        Use case (with example)
-        - You want a quick “insider sentiment” snapshot for a ticker before making a trade decision.
+        Use case
+        - You want a quick “insider sentiment” snapshot for a company before deeper research or a trading decision.
 
         Parameters
         - ticker: Stock ticker (e.g., "AAPL").
@@ -240,8 +240,8 @@ class InsiderTradeMCPTools(EdgarMCPTools):
         - Parses recent insider filings and flags sale rows whose estimated value (shares × price) exceeds `min_value_usd`.
         - Intended as a screening tool for large/meaningful insider selling events.
 
-        Use case (with example)
-        - You want to alert on large insider selling for NVIDIA in the last month to evaluate downside risk.
+        Use case
+        - You want to alert on large insider selling over a recent window to evaluate potential downside risk.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").

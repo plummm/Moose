@@ -183,10 +183,22 @@ class LangChainLLM:
                 )
             return AIMessage(content=message.content if isinstance(message.content, str) else str(message.content))
         elif message.role == MessageRole.TOOL:
-            return ToolMessage(
-                content=message.content if isinstance(message.content, str) else str(message.content),
-                tool_call_id=message.tool_call_id or ""
-            )
+            # Carry tool name through ToolMessage when available so logs/UI can display it.
+            # Different LangChain versions may or may not accept `name=` in the constructor,
+            # so we attempt it and fall back to attribute assignment.
+            tm_content = message.content if isinstance(message.content, str) else str(message.content)
+            tm_tool_call_id = message.tool_call_id or ""
+            if message.name:
+                try:
+                    return ToolMessage(content=tm_content, tool_call_id=tm_tool_call_id, name=message.name)
+                except TypeError:
+                    tm = ToolMessage(content=tm_content, tool_call_id=tm_tool_call_id)
+                    try:
+                        setattr(tm, "name", message.name)
+                    except Exception:
+                        pass
+                    return tm
+            return ToolMessage(content=tm_content, tool_call_id=tm_tool_call_id)
         else:
             # Default to human message
             return HumanMessage(content=str(message.content))

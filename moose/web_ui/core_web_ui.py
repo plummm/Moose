@@ -1157,8 +1157,9 @@ function createChatMessageElement(message) {
             typeLabel.textContent = 'AI';
         }
     } else if (type === 'tool') {
-        // Show tool name for tool result messages (fallback to tool_call_id)
-        typeLabel.textContent = message.tool_name || message.tool_call_id || 'TOOL';
+        // Show tool name for tool result messages.
+        // Tool call id is displayed separately below; don't use it as a "name".
+        typeLabel.textContent = message.tool_name || 'TOOL';
     } else {
         typeLabel.textContent = type.toUpperCase();
     }

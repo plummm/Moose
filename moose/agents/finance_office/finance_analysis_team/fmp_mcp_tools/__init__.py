@@ -8,7 +8,8 @@ and provides a `FMPAllMCPTools` aggregator for convenient use in host-side orche
 from typing import Any, Dict, List
 
 from .basic import FMPMCPTools, mcp_tool
-from .company_basic import CompanyBasicMCPTools
+from .company import CompanyMCPTools
+from .finance import FinanceMCPTools
 
 try:
     from langchain_core.tools import StructuredTool
@@ -20,13 +21,15 @@ except ImportError:  # pragma: no cover
 __all__ = [
     "FMPMCPTools",
     "mcp_tool",
-    "CompanyBasicMCPTools",
+    "CompanyMCPTools",
+    "FinanceMCPTools",
     "FMPAllMCPTools",
 ]
 
 
 class FMPAllMCPTools(
-    CompanyBasicMCPTools,
+    CompanyMCPTools,
+    FinanceMCPTools,
 ):
     """
     Convenience aggregator that exposes all FMP category tools on a single object.

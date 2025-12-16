@@ -28,8 +28,8 @@ class CompanyUpdatesMCPTools(EdgarMCPTools):
         - Fetches the latest 8-K filings for `ticker` and returns a compact index you can feed into downstream tools.
         - When `include_exhibits=True`, the response includes exhibit metadata so you can pull the exact press release exhibit (often EX-99.*).
 
-        Use case (with example)
-        - You’re analyzing a breaking catalyst and want to quickly locate the most relevant 8-K exhibit text for NVIDIA:
+        Use case
+        - You want to quickly locate the most relevant 8-K filings and exhibits associated with a material event or news catalyst.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").
@@ -116,8 +116,8 @@ class CompanyUpdatesMCPTools(EdgarMCPTools):
         - Downloads the filing content for `accession_no` and returns `data.text` (best-effort).
         - Useful after any index tool that yields `accession_no`.
 
-        Use case (with example)
-        - You already found a relevant 8-K accession number and want the raw filing text for quick summarization.
+        Use case
+        - You want the raw 8-K filing text for downstream summarization after selecting an accession number.
 
         Parameters
         - accession_no: SEC accession number (e.g., "0001045810-24-000123").
@@ -180,8 +180,8 @@ class CompanyUpdatesMCPTools(EdgarMCPTools):
         - Locates the exhibit referenced by `document_name` inside the filing’s exhibits list and downloads its content.
         - This is the most direct way to retrieve press release text attached to an 8-K (often EX-99.*).
 
-        Use case (with example)
-        - After listing 8-Ks for a ticker, you want the press release exhibit text to extract key details.
+        Use case
+        - After listing 8-Ks for a company, you want the press release exhibit text to extract key details.
 
         Parameters
         - accession_no: SEC accession number from an index tool result.

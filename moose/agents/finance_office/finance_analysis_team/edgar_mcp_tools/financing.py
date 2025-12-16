@@ -23,8 +23,8 @@ class FinancingMCPTools(EdgarMCPTools):
         - Searches for common financing/dilution forms (e.g., S-1/S-3, 424B*, F-* variants) for `ticker`.
         - Returns a compact index of filings with accession numbers that can be used for deeper parsing.
 
-        Use case (with example)
-        - You’re evaluating dilution risk and want to quickly see if a company filed an S-3 shelf or prospectus supplement recently.
+        Use case
+        - You want to evaluate dilution risk and quickly see whether a company filed shelf/prospectus financing documents recently.
 
         Parameters
         - ticker: Stock ticker (e.g., "NVDA").
@@ -79,8 +79,8 @@ class FinancingMCPTools(EdgarMCPTools):
         - Downloads the filing text and searches for common financing terms (ATM, shelf, proceeds, sales agreement, etc.).
         - Returns a small list of matched text snippets to help you quickly identify offering structure.
 
-        Use case (with example)
-        - After spotting a 424B5 filing in the index, you want to quickly find the “ATM” / “gross proceeds” language.
+        Use case
+        - After spotting a prospectus filing in the index, you want to quickly find key “ATM” / “gross proceeds” financing language.
 
         Parameters
         - accession_no: SEC accession number from `list_financing_documents_index`.

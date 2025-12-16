@@ -1,9 +1,19 @@
+from __future__ import annotations
+
 import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Literal, cast
 import json
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
+from decimal import Decimal
+
+try:
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    pd = None  # type: ignore
 
 def mcp_tool(
     _func: Optional[Callable[..., Any]] = None,
@@ -27,26 +37,137 @@ def mcp_tool(
         return _decorate
     return _decorate(_func)
 
+def mcp_json_safe(obj: Any) -> Any:
+    """
+    Convert common edgartools/Python objects into JSON-serializable primitives.
+    - Decimal -> float
+    - date/datetime -> ISO string
+    - pandas.DataFrame -> list[dict]
+    - dataclasses -> dict
+    - sets/tuples -> list
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, Decimal):
+        return float(obj)
+
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+
+    # pandas DataFrame / Series
+    if pd is not None:
+        try:
+            if isinstance(obj, pd.DataFrame):
+                return obj.replace({pd.NA: None}).where(obj.notna(), None).to_dict(orient="records")
+            if isinstance(obj, pd.Series):
+                return obj.replace({pd.NA: None}).where(obj.notna(), None).to_dict()
+        except Exception:
+            pass
+
+    if is_dataclass(obj):
+        try:
+            if not isinstance(obj, type):
+                return mcp_json_safe(asdict(obj))
+        except Exception:
+            pass
+
+    if isinstance(obj, dict):
+        return {str(k): mcp_json_safe(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple, set)):
+        return [mcp_json_safe(v) for v in obj]
+
+    return str(obj)
+
+
+def mcp_envelope_ok(
+    data: Any,
+    meta: Optional[Dict[str, Any]] = None,
+    text_fallback: Optional[str] = None,
+    *,
+    tool: Optional[str] = None,
+    dependencies: Optional[List[Dict[str, Any]]] = None,
+    outputs: Optional[List[Dict[str, Any]]] = None,
+    recommended_next_tools: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    meta_out: Dict[str, Any] = dict(meta or {})
+    if tool:
+        meta_out["tool"] = tool
+    meta_out.setdefault("dependencies", [])
+    meta_out.setdefault("outputs", [])
+    meta_out.setdefault("recommended_next_tools", [])
+    if dependencies is not None:
+        meta_out["dependencies"] = dependencies
+    if outputs is not None:
+        meta_out["outputs"] = outputs
+    if recommended_next_tools is not None:
+        meta_out["recommended_next_tools"] = recommended_next_tools
+
+    return {
+        "ok": True,
+        "data": mcp_json_safe(data),
+        "error": None,
+        "meta": mcp_json_safe(meta_out),
+        "text_fallback": text_fallback,
+    }
+
+
+def mcp_envelope_err(
+    message: str,
+    error_type: str = "Error",
+    meta: Optional[Dict[str, Any]] = None,
+    text_fallback: Optional[str] = None,
+    *,
+    tool: Optional[str] = None,
+    dependencies: Optional[List[Dict[str, Any]]] = None,
+    outputs: Optional[List[Dict[str, Any]]] = None,
+    recommended_next_tools: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    meta_out: Dict[str, Any] = dict(meta or {})
+    if tool:
+        meta_out["tool"] = tool
+    meta_out.setdefault("dependencies", [])
+    meta_out.setdefault("outputs", [])
+    meta_out.setdefault("recommended_next_tools", [])
+    if dependencies is not None:
+        meta_out["dependencies"] = dependencies
+    if outputs is not None:
+        meta_out["outputs"] = outputs
+    if recommended_next_tools is not None:
+        meta_out["recommended_next_tools"] = recommended_next_tools
+
+    return {
+        "ok": False,
+        "data": None,
+        "error": {"type": error_type, "message": message},
+        "meta": mcp_json_safe(meta_out),
+        "text_fallback": text_fallback,
+    }
 class FMPMCPTools():
     """
     FinancialModelingPrep MCP Tools - Define customized FinancialModelingPrep tools through MCP
     """
-    def __init__(self, identity: str, logger=None):
+    def __init__(self, api_key: Optional[str] = None, logger=None):
         """
         Initialize FMP MCP Tools.
         """
-        self.identity = identity
+        self.api_key = api_key
         self.logger = logger
 
         # FinancialModelingPrep Stable API base URL
         self.base_url = "https://financialmodelingprep.com/stable"
 
         # API key is required for all requests
-        self.api_key = os.getenv("FMP_API_KEY")
-        if not self.api_key and self.logger:
-            self.logger.warning(
-                "FMP_API_KEY is not set. FMPMCPTools requests will fail until the key is provided."
-            )
+        if self.api_key is None:
+            self.api_key = os.getenv("FMP_API_KEY")
+            if not self.api_key and self.logger:
+                self.logger.warning(
+                    "FMP_API_KEY is not set. FMPMCPTools requests will fail until the key is provided."
+                )
 
         # Optional dependency
         try:

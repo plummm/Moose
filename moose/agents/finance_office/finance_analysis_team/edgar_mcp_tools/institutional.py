@@ -23,8 +23,8 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
         - Looks up 13F-HR filings for `manager` and returns the latest `n` filing accession numbers.
         - This is an **index step** used to drive downstream tools that fetch holdings tables or compare filings.
 
-        Use case (with example)
-        - You want to compare Berkshire Hathaway’s latest 13F to the prior quarter to see big adds/cuts.
+        Use case
+        - You want to compare an investment manager’s latest 13F to the prior quarter to see major adds/cuts.
 
         Parameters
         - manager: Manager identifier usable by `edgar.Company(...)` (e.g., a manager name, ticker, or CIK depending on edgartools support).
@@ -101,8 +101,8 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
         - Loads the filing referenced by `accession_no`, extracts its 13F infotable, and returns holdings rows.
         - Optionally limits to the top holdings by value (`top_n`) when a DataFrame is available.
 
-        Use case (with example)
-        - You already have an accession number from `list_institutional_disclosures_index` and want the top positions.
+        Use case
+        - You want the top holdings positions after selecting a 13F filing accession number from the index.
 
         Parameters
         - accession_no: SEC accession number for a 13F-HR filing.
@@ -151,8 +151,8 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
           - closed positions (present in old, absent in new)
           - top adds/cuts by estimated value change
 
-        Use case (with example)
-        - You want to identify what a manager meaningfully added or cut between quarters.
+        Use case
+        - You want to identify what a manager meaningfully added or cut between two reporting periods.
 
         Parameters
         - accession_no_new: Accession number for the newer 13F-HR filing.
@@ -252,8 +252,8 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
         - Aggregates holdings from each manager’s latest 13F and finds tickers held by at least `min_owner_count` managers.
         - Useful for identifying consensus / crowded positioning (best-effort; depends on holdings tables having tickers).
 
-        Use case (with example)
-        - You’re screening for crowded longs across a basket of funds to understand positioning risk.
+        Use case
+        - You want to screen for crowded longs across a basket of funds to understand positioning risk.
 
         Parameters
         - managers: List of manager identifiers (name/ticker/CIK depending on edgartools support).
@@ -385,8 +385,8 @@ class InstitutionalHoldingsMCPTools(EdgarMCPTools):
         - For each manager in `managers`, loads the latest 13F holdings table and checks for `ticker`.
         - Returns the top owners by estimated value (best-effort).
 
-        Use case (with example)
-        - You have a list of funds you track and want to see which ones own NVDA right now.
+        Use case
+        - You want to see which managers (from a tracked list) currently own a given stock based on their latest 13F filings.
 
         Parameters
         - ticker: Stock ticker to search for (e.g., "NVDA").
