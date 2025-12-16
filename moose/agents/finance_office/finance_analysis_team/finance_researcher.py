@@ -1,8 +1,9 @@
 """Financial News Analyzer - LLM-based financial news analysis."""
 
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Iterable, Set, Tuple, Type
 from datetime import datetime
+import hashlib
 import json
 import re
 
@@ -347,11 +348,16 @@ Provide a comprehensive financial analysis in JSON format"""
             return
         
         try:
-            # Get current datetime for filename
             now = datetime.now()
-            filename = now.strftime("%Y_%m_%d_%H_%M.json")
             year = now.strftime("%Y")
             month = now.strftime("%m")
+
+            # Use deterministic filename: sha256(url).json (fallback to timestamp if url missing)
+            url = str(analysis_result.get("url") or "").strip()
+            if url:
+                filename = f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
+            else:
+                filename = now.strftime("%Y_%m_%d_%H_%M.json")
             
             # Get companies list
             companies = analysis_result.get("companies", [])
@@ -412,68 +418,146 @@ Provide a comprehensive financial analysis in JSON format"""
             # Don't raise - this is a non-critical operation
 
     def _summarize_tools(self) -> str:
-        """Summarize the tools available to the LLM."""
-        # Store tools reference if available
-        if self.sec_data_tools and hasattr(self.sec_data_tools, 'mcp_tools'):
-            for tool_name, tool_obj in self.sec_data_tools.mcp_tools.items():
-                self.mcp_tools[tool_name] = tool_obj
-        
-        return """
+        """Summarize the tools available to the LLM (grouped by category)."""
 
-**Available Tools:**
-You have access to SEC and financial data tools that provide detailed company information, financial statements, and filings:
+        def _first_paragraph(s: str, *, max_chars: int = 380) -> str:
+            txt = (s or "").strip()
+            if not txt:
+                return ""
+            # Take up to the first blank-line-separated paragraph
+            para = txt.split("\n\n", 1)[0].strip()
+            # Collapse internal newlines for readability
+            para = " ".join([ln.strip() for ln in para.splitlines() if ln.strip()])
+            if len(para) > max_chars:
+                para = para[: max_chars - 1].rstrip() + "…"
+            return para
 
-**SEC/EDGAR Tools (28 tools):**
-- alert_large_insider_sales: Identify potentially significant insider sales over a lookback window
-- alert_late_reporting: Alert on late reporting notices (NT 10-K / NT 10-Q)
-- compare_institutional_holdings: Compare two 13F holdings disclosures (new vs old) and summarize changes
-- compare_management_discussion: Compare the MD&A section between the two most recent filings
-- compare_risk_factors: Compare the "Risk Factors" section between two SEC filings
-- detect_crowded_institutional_trades: Detect "crowded" stocks across multiple managers' latest 13F filings
-- fetch_exhibit_text_by_accession: Fetch a specific exhibit/document text for a filing
-- fetch_filing_text_by_accession: Fetch the full text for a filing identified by accession number
-- fetch_financing_terms_from_filing: Extract likely financing/dilution term snippets from a filing
-- fetch_fund_proxy_votes: Fetch and return proxy vote records from a specific N-PX filing
-- fetch_insider_transactions: Parse a single insider filing into a normalized transactions table
-- fetch_institutional_holdings_table: Fetch a manager's 13F holdings table for a specific filing
-- get_balance_sheet: Retrieve an SEC balance sheet for a public company (XBRL-based)
-- get_cashflow_statement: Retrieve an SEC cash flow statement for a public company (XBRL-based)
-- get_income_statement: Retrieve an SEC income statement for a public company (XBRL-based)
-- list_company_material_updates_index: List a company's most recent material updates (Form 8-K)
-- list_financing_documents_index: List recent financing-related registration/prospectus filings
-- list_fund_voting_records_index: List a fund's proxy voting record filings (Form N-PX / N-PX/A)
-- list_insider_filings_index: List recent insider trading-related filings (Forms 3/4/5)
-- list_institutional_disclosures_index: List recent institutional holdings disclosures (Form 13F-HR)
-- screen_crowdfunding_offerings: Screen Form C crowdfunding offerings for large raises
-- screen_reporting_red_flags: Screen recent filings for common reporting red flags
-- summarize_foreign_issuer_updates: Summarize recent foreign issuer updates (Form 6-K)
-- summarize_insider_activity: Summarize insider buying/selling activity over a lookback window
-- summarize_major_holder_intent: Summarize "purpose of transaction" intent from Schedule 13D/13G filings
-- summarize_proxy_comp_and_governance: Summarize proxy compensation/governance themes from proxy filings
-- track_institutional_owners_of_stock: Find which managers currently disclose ownership of a given stock
-- track_major_holder_changes: Track major holder changes (Schedule 13D/13G filings)
+        def _available_tool_names() -> Set[str]:
+            names: Set[str] = set()
+            for t in getattr(self.llm_client, "tools", []) or []:
+                nm = getattr(t, "name", None)
+                if isinstance(nm, str) and nm:
+                    names.add(nm)
+            return names
 
-**FMP (FinancialModelingPrep) Tools (4 tools):**
-- get_company_finance: Get detailed financial ratios (profitability, liquidity, efficiency, leverage, valuation)
-- get_company_finance_ttm: Get detailed financial ratios trailing twelve months (TTM)
-- get_company_metrics: Get basic company key metrics (revenue, net income, P/E, EBITDA, etc.)
-- get_company_metrics_ttm: Get basic company key metrics trailing twelve months (TTM)
+        # Store tools reference if available (for external inspection / executor lookup)
+        if self.sec_data_tools and hasattr(self.sec_data_tools, "mcp_tools"):
+            try:
+                for tool_name, tool_obj in (self.sec_data_tools.mcp_tools or {}).items():
+                    self.mcp_tools[str(tool_name)] = tool_obj
+            except Exception:
+                pass
 
-**When to Use Tools:**
-Use these tools when analyzing companies mentioned in the article to:
-- Verify company financial health and recent performance
-- Check recent SEC filings and regulatory activity
-- Understand financial implications of news events
-- Compare current performance to historical data
-- Assess insider trading patterns and institutional ownership
-- Evaluate company fundamentals and valuation metrics
-- Identify risks, red flags, and growth opportunities
-- Track major holder changes and institutional activity
+        available = _available_tool_names()
+        if not available:
+            return ""
 
-**Tool Strategy:**
-- Start with basic company metrics (get_company_metrics, get_income_statement)
-- Use insider/institutional tools for ownership and trading analysis
-- Check recent filings (list_company_material_updates_index) for material events
-- Use comparison tools to track changes over time
-- Pay attention to recommended_next_tools in tool results for guidance
-"""
+        # Determine grouping metadata
+        tool_groups: List[Tuple[str, str, Iterable[Type[Any]]]] = []
+
+        if self.sec_data_tools is not None and hasattr(self.sec_data_tools, "iter_tool_groups"):
+            # Preferred: combined provider exposes stable hierarchy metadata.
+            try:
+                for g in self.sec_data_tools.iter_tool_groups():
+                    tool_groups.append(
+                        (
+                            str(getattr(g, "group_name", "") or ""),
+                            str(getattr(g, "group_description", "") or ""),
+                            getattr(g, "category_classes", []) or [],
+                        )
+                    )
+            except Exception:
+                tool_groups = []
+
+        # Fallback: support passing a single provider (EDGAR-only or FMP-only) directly.
+        if not tool_groups and self.sec_data_tools is not None:
+            try:
+                from .edgar_mcp_tools import EdgarAllMCPTools
+            except Exception:
+                EdgarAllMCPTools = None  # type: ignore
+            try:
+                from .fmp_mcp_tools import FMPAllMCPTools
+            except Exception:
+                FMPAllMCPTools = None  # type: ignore
+
+            if EdgarAllMCPTools is not None and isinstance(self.sec_data_tools, EdgarAllMCPTools):  # type: ignore[arg-type]
+                tool_groups.append(
+                    (
+                        "SEC/EDGAR Tools",
+                        str(getattr(EdgarAllMCPTools, "__doc__", "") or ""),
+                        tuple(EdgarAllMCPTools.__bases__),
+                    )
+                )
+            if FMPAllMCPTools is not None and isinstance(self.sec_data_tools, FMPAllMCPTools):  # type: ignore[arg-type]
+                tool_groups.append(
+                    (
+                        "FMP (FinancialModelingPrep) Tools",
+                        str(getattr(FMPAllMCPTools, "__doc__", "") or ""),
+                        tuple(FMPAllMCPTools.__bases__),
+                    )
+                )
+
+        if not tool_groups:
+            return ""
+
+        lines: List[str] = []
+        lines.append("")
+        lines.append("**Available Tools:**")
+        lines.append(
+            "You have access to SEC filing tools and market/company data tools. Tools are grouped by category; use the most relevant category first."
+        )
+        lines.append("")
+
+        # Render each top-level group in order.
+        for group_name, group_desc, category_classes in tool_groups:
+            # Compute unique tool names in this group, intersected with actually bound tools.
+            group_tool_names: Set[str] = set()
+            cat_to_tools: List[Tuple[str, List[Tuple[str, str]]]] = []
+
+            for cls in category_classes:
+                # Category description comes from class docstring (revised as part of this change).
+                cat_desc = _first_paragraph(str(getattr(cls, "__doc__", "") or ""))
+
+                # Extract tool specs from the category class
+                specs = []
+                try:
+                    if hasattr(cls, "list_mcp_tools"):
+                        specs = cls.list_mcp_tools()  # type: ignore[attr-defined]
+                except Exception:
+                    specs = []
+
+                items: List[Tuple[str, str]] = []
+                for spec in specs or []:
+                    nm = (spec or {}).get("name")
+                    doc = (spec or {}).get("doc")
+                    if not isinstance(nm, str) or not nm:
+                        continue
+                    if nm not in available:
+                        continue
+                    group_tool_names.add(nm)
+                    items.append((nm, _first_paragraph(str(doc or ""), max_chars=220)))
+
+                # Stable sort tools by name
+                items.sort(key=lambda x: x[0])
+                if items:
+                    cat_to_tools.append((cat_desc or cls.__name__, items))
+
+            if not group_tool_names:
+                continue
+
+            header_desc = _first_paragraph(group_desc, max_chars=420)
+            if header_desc:
+                lines.append(f"**{group_name} ({len(group_tool_names)} tools):**: {header_desc}")
+            else:
+                lines.append(f"**{group_name} ({len(group_tool_names)} tools):**")
+
+            for cat_desc, items in cat_to_tools:
+                lines.append(f"- {cat_desc}:")
+                for nm, desc in items:
+                    if desc:
+                        lines.append(f"   - {nm}: {desc}")
+                    else:
+                        lines.append(f"   - {nm}")
+            lines.append("")
+
+        return "\n".join(lines).rstrip() + "\n"

@@ -11,7 +11,10 @@ from .basic import EdgarMCPTools, _since_date_range, filings_is_empty, mcp_envel
 
 class FinancingMCPTools(EdgarMCPTools):
     """
-    Financing / dilution monitoring tools (registration/prospectus filings).
+    Financing / dilution monitoring tools from SEC registration and prospectus filings.
+
+    Use this category to evaluate **dilution risk** and financing structure by scanning common offering forms
+    (e.g., S-1/S-3/F-1/F-3 and 424B* prospectus supplements) and extracting key term snippets (ATM, proceeds, shelf).
     """
 
     @mcp_tool()

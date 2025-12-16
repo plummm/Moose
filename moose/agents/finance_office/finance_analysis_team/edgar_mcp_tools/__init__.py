@@ -1,8 +1,9 @@
 """
-Draft MCP tools package for edgartools.
+SEC/EDGAR MCP tools.
 
-This package groups MCP-exposed tools by category and provides an `AllMCPTools`
-aggregator for convenient use in host-side orchestration.
+This package groups MCP-exposed tools for extracting and analyzing **SEC filings** via EDGAR
+(e.g., 10-K/10-Q/8-K, exhibits, XBRL statements, ownership forms) and provides a convenience
+aggregator (`EdgarAllMCPTools`) for host-side orchestration.
 """
 
 from typing import Any, Dict, List
@@ -36,6 +37,7 @@ __all__ = [
     "FinancingMCPTools",
     "CompanyReportingMCPTools",
     "FinancialStatementsMCPTools",
+    "EdgarAllMCPTools",
     "AllMCPTools",
 ]
 
@@ -49,10 +51,16 @@ class EdgarAllMCPTools(
     CompanyReportingMCPTools,
 ):
     """
-    Convenience aggregator that exposes all category tools on a single object.
+    SEC/EDGAR tool suite for filings extraction and research.
 
-    Note: Category classes should avoid defining __init__; initialization is handled
-    by the shared base class (`EdgarMCPTools`) via normal Python MRO.
+    Category coverage (via mixins):
+    - XBRL financial statements (income statement, balance sheet, cash flow)
+    - Material updates / catalysts (8-K + exhibits like EX-99.*)
+    - Insider trading (Forms 3/4/5)
+    - Institutional ownership (13F holdings, crowded trades)
+    - Fund proxy voting (N-PX filings)
+    - Financing / dilution filings (S-1/S-3/424B* and related)
+    - Reporting / governance / ownership-change analysis (10-K/10-Q/6-K/DEF 14A/13D/13G/NT/Reg CF)
     """
 
     def get_langchain_tools(self) -> List[Any]:
@@ -102,5 +110,9 @@ class EdgarAllMCPTools(
     async def close(self) -> None:
         """Compatibility no-op (no external MCP client to close)."""
         return
+
+
+# Backward-compatible alias (older docs referenced `AllMCPTools`)
+AllMCPTools = EdgarAllMCPTools
 
 

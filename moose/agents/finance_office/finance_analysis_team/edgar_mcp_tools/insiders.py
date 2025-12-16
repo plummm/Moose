@@ -10,7 +10,10 @@ from .basic import EdgarMCPTools, _since_date_range, filings_is_empty, mcp_envel
 
 class InsiderTradeMCPTools(EdgarMCPTools):
     """
-    Insider trading (Forms 3/4/5) tools.
+    Insider trading activity tools (SEC Forms 3/4/5).
+
+    Use this category to investigate **insider buying/selling**: list recent insider filings, parse normalized
+    transaction rows from a specific filing, summarize activity over a lookback window, and alert on large sales.
     """
 
     @mcp_tool()

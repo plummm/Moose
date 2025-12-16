@@ -1,15 +1,27 @@
 """
 FMP (FinancialModelingPrep) MCP tools package.
 
-This package groups MCP-exposed tools for FinancialModelingPrep API by category 
-and provides a `FMPAllMCPTools` aggregator for convenient use in host-side orchestration.
+This package groups MCP-exposed tools for the FinancialModelingPrep (FMP) API by category and
+provides a `FMPAllMCPTools` aggregator for convenient use in host-side orchestration.
+
+FMP tools are **general-purpose market/company/macro** data helpers (quotes, news, calendars,
+fundamentals, ratios, technical indicators, and macro datasets). In contrast, EDGAR tools focus
+on **SEC filing extraction**.
 """
 
 from typing import Any, Dict, List
 
+from .analyst import AnalystMCPTools
 from .basic import FMPMCPTools, mcp_tool
+from .calendar import CalendarMCPTools
+from .chart import ChartMCPTools
 from .company import CompanyMCPTools
+from .economics import EconomicsMCPTools
 from .finance import FinanceMCPTools
+from .indicator import IndicatorMCPTools
+from .market import MarketMCPTools
+from .news import NewsMCPTools
+from .quote import QuoteMCPTools
 
 try:
     from langchain_core.tools import StructuredTool
@@ -19,20 +31,46 @@ except ImportError:  # pragma: no cover
     LANGCHAIN_TOOLS_AVAILABLE = False
 
 __all__ = [
+    "AnalystMCPTools",
     "FMPMCPTools",
     "mcp_tool",
+    "CalendarMCPTools",
+    "ChartMCPTools",
     "CompanyMCPTools",
+    "EconomicsMCPTools",
     "FinanceMCPTools",
+    "IndicatorMCPTools",
+    "MarketMCPTools",
+    "NewsMCPTools",
+    "QuoteMCPTools",
     "FMPAllMCPTools",
 ]
 
 
 class FMPAllMCPTools(
+    AnalystMCPTools,
+    CalendarMCPTools,
+    ChartMCPTools,
     CompanyMCPTools,
+    EconomicsMCPTools,
     FinanceMCPTools,
+    IndicatorMCPTools,
+    MarketMCPTools,
+    NewsMCPTools,
+    QuoteMCPTools,
 ):
     """
-    Convenience aggregator that exposes all FMP category tools on a single object.
+    FMP tool suite for general market + company + macro research.
+
+    Category coverage (via mixins):
+    - Quotes and price change snapshots
+    - Company fundamentals / people / governance-style endpoints
+    - Financial metrics, ratios, and growth series
+    - News search (stock + crypto)
+    - Market sector/industry performance and valuation snapshots/series
+    - Technical indicators and chart time series
+    - Earnings/IPO/corporate action calendars and other event schedules
+    - Macro/economics datasets (rates, indicators, risk premia)
 
     Note: Category classes should avoid defining __init__; initialization is handled
     by the shared base class (`FMPMCPTools`) via normal Python MRO.

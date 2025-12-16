@@ -4,13 +4,29 @@ from .basic import *
 
 class FinanceMCPTools(FMPMCPTools):
     """
-    Company Basic MCP Tools - Define company basic tools through MCP
+    Company financial metrics, ratios, and fundamental growth tools (FMP Stable).
+
+    Use this category for **fundamentals screening** and modeling inputs: key metrics (annual/quarter/TTM),
+    ratio buckets (profitability/liquidity/leverage/valuation), financial “health” scores, enterprise values,
+    and statement growth series.
     """
     def __init__(self, api_key: Optional[str] = None, logger=None):
         """
         Initialize Company Basic MCP Tools.
         """
         super().__init__(api_key, logger)
+
+    def _validate_growth_period(self, period: Optional[str]) -> Optional[dict]:
+        if period is None:
+            return None
+        p = str(period).strip()
+        allowed = {"Q1", "Q2", "Q3", "Q4", "FY", "annual", "quarter"}
+        if p not in allowed:
+            return mcp_envelope_err(
+                "period must be one of: Q1, Q2, Q3, Q4, FY, annual, quarter",
+                meta={"tool": "_validate_growth_period", "period": period},
+            )
+        return None
     
     @mcp_tool()
     def get_company_metrics(
@@ -565,7 +581,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_owner_earnings(self, symbol: str) -> dict:
+    def get_owner_earnings(self, symbol: str, limit: Optional[int] = None) -> dict:
         """
         Fetches “owner earnings” metrics (including owner earnings per share) across periods.
 
@@ -574,6 +590,7 @@ class FinanceMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
+        - limit: Optional maximum number of records to return (positive integer).
 
         Return value
         - MCP JSON envelope:
@@ -585,18 +602,22 @@ class FinanceMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_owner_earnings(symbol="AAPL")
+        get_owner_earnings(symbol="AAPL", limit=5)
         ```
 
         Data source: FMP Stable Owner Earnings API
         - GET `https://financialmodelingprep.com/stable/owner-earnings?symbol=...`
         Reference: [FMP stable owner-earnings endpoint](https://financialmodelingprep.com/stable/owner-earnings?symbol=AAPL)
         """
-        meta = {"tool": "get_owner_earnings", "symbol": symbol}
+        meta = {"tool": "get_owner_earnings", "symbol": symbol, "limit": limit}
         if not symbol:
             return mcp_envelope_err("symbol is required", meta=meta)
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
         params = {"symbol": str(symbol).upper()}
+        if limit is not None:
+            params["limit"] = limit
         raw = self._request_json("owner-earnings", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -621,7 +642,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_enterprise_values(self, symbol: str) -> dict:
+    def get_enterprise_values(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
         """
         Fetches enterprise value and its components (market cap, cash, total debt) across dates.
 
@@ -630,6 +651,8 @@ class FinanceMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
 
         Return value
         - MCP JSON envelope:
@@ -641,18 +664,27 @@ class FinanceMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_enterprise_values(symbol="AAPL")
+        get_enterprise_values(symbol="AAPL", period="annual", limit=5)
         ```
 
         Data source: FMP Stable Enterprise Values API
         - GET `https://financialmodelingprep.com/stable/enterprise-values?symbol=...`
         Reference: [FMP stable enterprise-values endpoint](https://financialmodelingprep.com/stable/enterprise-values?symbol=AAPL)
         """
-        meta = {"tool": "get_enterprise_values", "symbol": symbol}
+        meta = {"tool": "get_enterprise_values", "symbol": symbol, "period": period, "limit": limit}
         if not symbol:
             return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
         params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
         raw = self._request_json("enterprise-values", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -677,7 +709,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_income_statement_growth(self, symbol: str) -> dict:
+    def get_income_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
         """
         Fetches growth rates for income statement line items (e.g., revenue growth, net income growth) across periods.
 
@@ -686,6 +718,8 @@ class FinanceMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
 
         Return value
         - MCP JSON envelope:
@@ -697,18 +731,27 @@ class FinanceMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_income_statement_growth(symbol="AAPL")
+        get_income_statement_growth(symbol="AAPL", period="annual", limit=5)
         ```
 
         Data source: FMP Stable Income Statement Growth API
         - GET `https://financialmodelingprep.com/stable/income-statement-growth?symbol=...`
         Reference: [FMP stable income-statement-growth endpoint](https://financialmodelingprep.com/stable/income-statement-growth?symbol=AAPL)
         """
-        meta = {"tool": "get_income_statement_growth", "symbol": symbol}
+        meta = {"tool": "get_income_statement_growth", "symbol": symbol, "period": period, "limit": limit}
         if not symbol:
             return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
         params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
         raw = self._request_json("income-statement-growth", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -733,7 +776,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_balance_sheet_statement_growth(self, symbol: str) -> dict:
+    def get_balance_sheet_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
         """
         Fetches growth rates for balance sheet line items across periods.
 
@@ -742,6 +785,8 @@ class FinanceMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
 
         Return value
         - MCP JSON envelope:
@@ -753,17 +798,26 @@ class FinanceMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_balance_sheet_statement_growth(symbol="AAPL")
+        get_balance_sheet_statement_growth(symbol="AAPL", period="annual", limit=5)
         ```
 
         Data source: FMP Stable Balance Sheet Statement Growth API
         - GET `https://financialmodelingprep.com/stable/balance-sheet-statement-growth?symbol=...`
         """
-        meta = {"tool": "get_balance_sheet_statement_growth", "symbol": symbol}
+        meta = {"tool": "get_balance_sheet_statement_growth", "symbol": symbol, "period": period, "limit": limit}
         if not symbol:
             return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
         params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
         raw = self._request_json("balance-sheet-statement-growth", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -780,7 +834,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_cash_flow_statement_growth(self, symbol: str) -> dict:
+    def get_cash_flow_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
         """
         Fetches growth rates for cash flow statement line items across periods.
 
@@ -789,6 +843,8 @@ class FinanceMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
 
         Return value
         - MCP JSON envelope:
@@ -800,17 +856,26 @@ class FinanceMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_cash_flow_statement_growth(symbol="AAPL")
+        get_cash_flow_statement_growth(symbol="AAPL", period="annual", limit=5)
         ```
 
         Data source: FMP Stable Cashflow Statement Growth API
         - GET `https://financialmodelingprep.com/stable/cash-flow-statement-growth?symbol=...`
         """
-        meta = {"tool": "get_cash_flow_statement_growth", "symbol": symbol}
+        meta = {"tool": "get_cash_flow_statement_growth", "symbol": symbol, "period": period, "limit": limit}
         if not symbol:
             return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
         params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
         raw = self._request_json("cash-flow-statement-growth", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -827,7 +892,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_financial_growth(self, symbol: str) -> dict:
+    def get_financial_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
         """
         Fetches growth rates across financial statements (aggregated growth metrics) across periods.
 
@@ -836,6 +901,8 @@ class FinanceMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
 
         Return value
         - MCP JSON envelope:
@@ -847,17 +914,26 @@ class FinanceMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_financial_growth(symbol="AAPL")
+        get_financial_growth(symbol="AAPL", period="annual", limit=5)
         ```
 
         Data source: FMP Stable Financial Statement Growth API
         - GET `https://financialmodelingprep.com/stable/financial-growth?symbol=...`
         """
-        meta = {"tool": "get_financial_growth", "symbol": symbol}
+        meta = {"tool": "get_financial_growth", "symbol": symbol, "period": period, "limit": limit}
         if not symbol:
             return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
         params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
         raw = self._request_json("financial-growth", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -873,56 +949,6 @@ class FinanceMCPTools(FMPMCPTools):
             tf += f" as of {rec.get('date')}"
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
-    @mcp_tool()
-    def get_revenue_product_segmentation(self, symbol: str) -> dict:
-        """
-        Fetches revenue broken down by product segments when available for a company.
-
-        Use case
-        - You want to analyze revenue mix by product line and how segment contributions change over time.
-
-        Parameters
-        - symbol: Stock ticker (e.g., `"AAPL"`).
-
-        Return value
-        - MCP JSON envelope:
-          - ok: bool
-          - data: raw JSON list/dict from the endpoint
-          - meta: tool inputs (and optional error context)
-          - text_fallback: short human-readable summary derived from the first record
-
-        Concrete example (code)
-
-        ```python
-        get_revenue_product_segmentation(symbol="AAPL")
-        ```
-
-        Data source: FMP Stable Revenue Product Segmentation API
-        - GET `https://financialmodelingprep.com/stable/revenue-product-segmentation?symbol=...`
-        """
-        meta = {"tool": "get_revenue_product_segmentation", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        params = {"symbol": str(symbol).upper()}
-        raw = self._request_json("revenue-product-segmentation", params=params)
-        if isinstance(raw, dict) and "error" in raw:
-            details = raw.get("details") if isinstance(raw.get("details"), dict) else None
-            return mcp_envelope_err(
-                str(raw.get("error") or "Failed to fetch data from FinancialModelingPrep."),
-                meta={**meta, **({"fmp_error_details": details} if details else {})},
-                text_fallback=str(raw.get("error") or "FMP request failed."),
-            )
-
-        rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: revenue product segmentation"
-        if isinstance(raw, list):
-            tf += f" ({len(raw)} records)"
-        if isinstance(rec, dict) and rec.get("date"):
-            tf += f"; latest_date={rec.get('date')}"
-        return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
-
-
 if __name__ == "__main__":
     # Debug-purpose examples.
     # Prefer using environment variable FMP_API_KEY:
@@ -935,11 +961,11 @@ if __name__ == "__main__":
     print(tools.get_company_finance_ttm(symbol="AAPL"))
 
     print(tools.get_financial_scores(symbol="AAPL"))
-    print(tools.get_owner_earnings(symbol="AAPL"))
-    print(tools.get_enterprise_values(symbol="AAPL"))
-    print(tools.get_income_statement_growth(symbol="AAPL"))
-    print(tools.get_balance_sheet_statement_growth(symbol="AAPL"))
-    print(tools.get_cash_flow_statement_growth(symbol="AAPL"))
-    print(tools.get_financial_growth(symbol="AAPL"))
+    print(tools.get_owner_earnings(symbol="AAPL", limit=5))
+    print(tools.get_enterprise_values(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_income_statement_growth(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_balance_sheet_statement_growth(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_cash_flow_statement_growth(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_financial_growth(symbol="AAPL", period="annual", limit=5))
     print(tools.get_revenue_product_segmentation(symbol="AAPL"))
     

@@ -11,7 +11,10 @@ from .basic import EdgarMCPTools, _df_keyed_holdings, filings_is_empty, mcp_enve
 
 class InstitutionalHoldingsMCPTools(EdgarMCPTools):
     """
-    Institutional holdings (13F) tools.
+    Institutional ownership / holdings tools (SEC Form 13F).
+
+    Use this category to analyze **who owns what** among investment managers: list 13F filings, fetch holdings
+    tables, compare two disclosures, detect crowded trades across managers, and find which managers own a stock.
     """
 
     @mcp_tool()

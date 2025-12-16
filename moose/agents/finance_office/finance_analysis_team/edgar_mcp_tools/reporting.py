@@ -22,7 +22,14 @@ from .basic import (
 
 class CompanyReportingMCPTools(EdgarMCPTools):
     """
-    Company reporting / governance / ownership-change tools (10-K/10-Q/6-K/DEF14A/13D/13G/NT/RegCF).
+    Company reporting / governance / ownership-change tools from SEC filings.
+
+    Forms and topics covered include (best-effort): 10-K, 10-Q, 6-K, DEF 14A, Schedule 13D/13G, NT 10-K/10-Q,
+    and Reg CF (Form C).
+
+    Use this category when you need qualitative/forensic signals from filings: compare sections (Risk Factors, MD&A),
+    screen common reporting red flags, summarize proxy comp/governance, track major-holder changes and intent, and
+    detect late-reporting notices.
     """
 
     # ---- major holders (13D/13G) ----

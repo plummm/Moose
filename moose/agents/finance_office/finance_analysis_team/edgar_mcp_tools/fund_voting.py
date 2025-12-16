@@ -11,7 +11,10 @@ from .basic import EdgarMCPTools, filings_is_empty, mcp_envelope_err, mcp_envelo
 
 class FundVotingMCPTools(EdgarMCPTools):
     """
-    Fund proxy voting (N-PX) tools.
+    Fund proxy voting record tools (SEC Form N-PX / N-PX/A).
+
+    Use this category to inspect **how a fund voted** on shareholder proposals by listing N-PX filings and
+    fetching the vote rows for filtering/searching (issuer, proposal, vote cast, meeting date, etc.).
     """
 
     @mcp_tool()

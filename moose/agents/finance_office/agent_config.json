@@ -74,6 +74,11 @@
       "model": "gpt-5.2",
       "temperature": 0.7,
       "identity": "etenal@etenal.com"
+    },
+    "fmp_config": {
+      "enabled": true,
+      "model": "gpt-5.2",
+      "temperature": 0.7
     }
   }
 }

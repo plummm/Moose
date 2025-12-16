@@ -13,7 +13,10 @@ from .basic import EdgarMCPTools, filings_is_empty, mcp_envelope_err, mcp_envelo
 
 class FinancialStatementsMCPTools(EdgarMCPTools):
     """
-    Financial statement getters (XBRL-based).
+    SEC XBRL financial statements (income statement, balance sheet, cash flow).
+
+    Use this category when you need **structured financial statement tables** sourced from SEC XBRL filings
+    (10-Q/10-K). Tools support both latest single-filing views and stitched multi-period statements.
     """
 
     @mcp_tool()

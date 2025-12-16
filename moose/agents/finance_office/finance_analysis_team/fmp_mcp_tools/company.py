@@ -6,7 +6,10 @@ from .basic import FMPMCPTools, mcp_envelope_err, mcp_envelope_ok, mcp_tool
 
 class CompanyMCPTools(FMPMCPTools):
     """
-    Company MCP Tools - Company/People/M&A endpoints exposed through MCP.
+    Company profile, people, governance-style, and share-structure endpoints (FMP Stable).
+
+    Use this category for **company lookup and snapshots**: market cap, share float/liquidity, employee count,
+    executive roster, and executive compensation (best-effort based on FMP coverage).
     """
 
     def __init__(self, api_key: Optional[str] = None, logger=None):

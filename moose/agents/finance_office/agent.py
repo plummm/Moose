@@ -15,12 +15,16 @@ from moose.framework import BaseAgent
 try:
     from .finance_analysis_team.finance_researcher import FinanceResearcher
     from .finance_analysis_team.edgar_mcp_tools import EdgarAllMCPTools
+    from .finance_analysis_team.fmp_mcp_tools import FMPAllMCPTools
+    from .finance_analysis_team.mcp_tools import CombinedFinanceMCPTools
     from .queue_manager import FilePathQueue
     from .workflow import create_workflow, LANGGRAPH_AVAILABLE
 except ImportError:
     # Fallback for direct execution
     from moose.agents.finance_office.finance_analysis_team.finance_researcher import FinanceResearcher
     from moose.agents.finance_office.finance_analysis_team.edgar_mcp_tools import EdgarAllMCPTools
+    from moose.agents.finance_office.finance_analysis_team.fmp_mcp_tools import FMPAllMCPTools
+    from moose.agents.finance_office.finance_analysis_team.mcp_tools import CombinedFinanceMCPTools
     from moose.agents.finance_office.queue_manager import FilePathQueue
     from moose.agents.finance_office.workflow import create_workflow, LANGGRAPH_AVAILABLE
 
@@ -63,16 +67,40 @@ class FinancialReportAnalyzer(BaseAgent):
         
         # Initialize EdgarAllMCPTools if edgar_config is enabled
         sec_data_tools = None
+        edgar_tools = None
+        fmp_tools = None
         edgar_config = custom_config.get("edgar_config", {})
         if edgar_config.get("enabled", False):
             try:
-                sec_data_tools = EdgarAllMCPTools(
+                edgar_tools = EdgarAllMCPTools(
                     identity=edgar_config.get("identity", ""),
                     logger=self.logger,
                 )
                 self.logger.info("Initialized EdgarAllMCPTools")
             except Exception as e:
                 self.logger.warning(f"Failed to initialize EdgarAllMCPTools: {e}")
+
+        # Initialize FMPAllMCPTools if fmp_config is enabled
+        fmp_config = custom_config.get("fmp_config", {})
+        if fmp_config.get("enabled", False):
+            try:
+                fmp_tools = FMPAllMCPTools(
+                    api_key=fmp_config.get("api_key"),
+                    logger=self.logger,
+                )
+                self.logger.info("Initialized FMPAllMCPTools")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize FMPAllMCPTools: {e}")
+
+        # Combine enabled providers (if any) so the LLM gets the full tool list
+        if edgar_tools is not None or fmp_tools is not None:
+            sec_data_tools = CombinedFinanceMCPTools(edgar=edgar_tools, fmp=fmp_tools, logger=self.logger)
+            try:
+                # Warm tool binding cache so we log accurate availability early
+                all_tools = sec_data_tools.get_langchain_tools()
+                self.logger.info(f"Initialized combined MCP tools provider with {len(all_tools)} tools")
+            except Exception as e:
+                self.logger.warning(f"Failed to build combined MCP tools provider tools list: {e}")
         
         llm_config = custom_config.get("llm_config", {})
         if llm_config:

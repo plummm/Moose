@@ -11,7 +11,10 @@ from .basic import EdgarMCPTools, filings_is_empty, mcp_envelope_err, mcp_envelo
 
 class CompanyUpdatesMCPTools(EdgarMCPTools):
     """
-    Company material updates (8-K) pipeline tools.
+    Company material updates / catalysts from SEC filings (primarily Form 8-K).
+
+    Use this category when you need to quickly locate and retrieve **recent material event disclosures**
+    (8-K filings and press release exhibits like EX-99.*) to understand what changed and why it matters.
     """
 
     @mcp_tool()

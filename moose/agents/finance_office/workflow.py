@@ -1,6 +1,8 @@
 """LangGraph workflow for financial report analyzer with asynchronous processing."""
 
 import asyncio
+import hashlib
+import json
 from typing import TypedDict, List, Dict, Any, Optional
 from pathlib import Path
 
@@ -104,6 +106,35 @@ def create_workflow(
             analyses_failed = state.get("analyses_failed", 0)
             
             logger.debug(f"Analyzing article: {file_path}")
+
+            # If we have a URL + output directory, skip LLM analysis when an existing result file is found.
+            # We search recursively because results may be stored under different company folders / date buckets.
+            url_str = str(url or "").strip()
+            if news_data_dir and url_str:
+                try:
+                    digest = hashlib.sha256(url_str.encode("utf-8")).hexdigest()
+                    existing = list(news_data_dir.rglob(f"{digest}.json"))
+                    if existing:
+                        # Prefer the most recently modified file if multiple exist.
+                        existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        with open(existing[0], "r", encoding="utf-8") as f:
+                            analysis = json.load(f)
+
+                        if isinstance(analysis, dict) and "error" not in analysis:
+                            analyses.append(analysis)
+                            analyses_completed += 1
+                            logger.info(f"Skipping LLM; existing analysis found for URL hash {digest}: {existing[0]}")
+                            queue_manager.mark_processed()
+                            return {
+                                **state,
+                                "current_item": None,
+                                "analyses": analyses,
+                                "analyses_completed": analyses_completed,
+                                "analyses_failed": analyses_failed,
+                                "status": "processing",
+                            }
+                except Exception as e:
+                    logger.debug(f"Existing-analysis check failed; proceeding with LLM analysis: {e}")
             
             # Analyze with semaphore limit
             async with analysis_semaphore:
