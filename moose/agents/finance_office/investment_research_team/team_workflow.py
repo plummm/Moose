@@ -47,6 +47,28 @@ def create_team_workflow(*, analyzer: Any, logger: Any) -> Any:
     playbooks_path = Path(__file__).resolve().parent / "playbooks.yaml"
     playbooks = load_playbooks(playbooks_path)
     main_agent_name = str(getattr(analyzer, "agent_name", "") or "").strip() or None
+    # If running with Moose global debug flag, prefer sequential specialist execution for easier debugging.
+    debug_mode = False
+    try:
+        from moose.framework.logging import get_global_debug
+    except Exception:  # pragma: no cover
+        try:
+            from framework.logging import get_global_debug  # type: ignore
+        except Exception:  # pragma: no cover
+            get_global_debug = None  # type: ignore
+    try:
+        debug_mode = bool(get_global_debug()) if get_global_debug is not None else False  # type: ignore[misc]
+    except Exception:
+        debug_mode = False
+
+    def _node_cfg(node_name: str) -> Dict[str, Any]:
+        if hasattr(analyzer, "get_node_llm_config"):
+            return analyzer.get_node_llm_config(node_name)  # type: ignore[attr-defined]
+        # Fallback: use analyzer.model/temperature, but do not invent a model string here.
+        model = str(getattr(analyzer, "model", "") or "").strip()
+        if not model:
+            raise ValueError("Analyzer model is not set; custom.llm_config.model must be configured")
+        return {"model": model, "temperature": float(getattr(analyzer, "temperature", 0.7)), "kwargs": {}}
 
     def _normalize_usage(u: Any) -> Dict[str, int]:
         if not isinstance(u, dict):
@@ -68,13 +90,14 @@ def create_team_workflow(*, analyzer: Any, logger: Any) -> Any:
 
     async def team_route(state: Dict[str, Any]) -> Dict[str, Any]:
         # Router uses no tools.
+        cfg = _node_cfg("team_route")
         router_client = LLMClient(
-            model=getattr(analyzer, "model", "gpt-5"),
-            temperature=float(getattr(analyzer, "temperature", 0.7)),
+            model=str(cfg.get("model") or "").strip(),
+            temperature=float(cfg.get("temperature", 0.7)),
             tools=[],
             enable_multi_stage_reasoning=False,
             agent_name=main_agent_name,
-            **(getattr(getattr(analyzer, "llm_client", None), "extra_params", None) or {}),
+            **(cfg.get("kwargs") or {}),
         )
 
         context_text = str(state.get("context_text", "") or "")
@@ -142,13 +165,14 @@ def create_team_workflow(*, analyzer: Any, logger: Any) -> Any:
             return {**state, "final": envelope, "abort": True}
 
         # Tool-less prompt generator
+        cfg = _node_cfg("prompt_engineer")
         pe_client = LLMClient(
-            model=getattr(analyzer, "model", "gpt-5"),
-            temperature=0.2,
+            model=str(cfg.get("model") or "").strip(),
+            temperature=float(cfg.get("temperature", 0.2)),
             tools=[],
             enable_multi_stage_reasoning=False,
             agent_name=main_agent_name,
-            **(getattr(getattr(analyzer, "llm_client", None), "extra_params", None) or {}),
+            **(cfg.get("kwargs") or {}),
         )
 
         pe_system = """You are a prompt engineer specializing in finance / investment research workflows.
@@ -225,13 +249,14 @@ Return STRICT JSON only:
         if not isinstance(state.get("instruction_original"), str) or not str(state.get("instruction_original") or "").strip():
             state = {**state, "instruction_original": instruction}
 
+        cfg = _node_cfg("granularity_selector")
         selector_client = LLMClient(
-            model=getattr(analyzer, "model", "gpt-5"),
-            temperature=0.2,
+            model=str(cfg.get("model") or "").strip(),
+            temperature=float(cfg.get("temperature", 0.2)),
             tools=[],
             enable_multi_stage_reasoning=False,
             agent_name=main_agent_name,
-            **(getattr(getattr(analyzer, "llm_client", None), "extra_params", None) or {}),
+            **(cfg.get("kwargs") or {}),
         )
 
         selector_system = """You are a senior investment research operations analyst.
@@ -329,10 +354,11 @@ No extra keys. No markdown."""
         specialist_clients: Dict[str, Any] = {}
         tools_provider = getattr(analyzer, "sec_data_tools", None)
         if tools_provider is not None:
+            sp_cfg = _node_cfg("run_selected_specialists_parallel")
             specialist_clients = build_specialist_llm_clients(
-                base_model=getattr(analyzer, "model", "gpt-5"),
-                base_temperature=float(getattr(analyzer, "temperature", 0.7)),
-                llm_extra_params=getattr(getattr(analyzer, "llm_client", None), "extra_params", None) or {},
+                base_model=str(sp_cfg.get("model") or "").strip(),
+                base_temperature=float(sp_cfg.get("temperature", 0.7)),
+                llm_extra_params=sp_cfg.get("kwargs") or {},
                 tools_provider=tools_provider,
                 max_tool_iterations_by_agent=max_iters,
                 agent_name=main_agent_name,
@@ -388,13 +414,14 @@ No extra keys. No markdown."""
                     # tool-less fallback
                     from moose.framework.llm_core import LLMClient
 
+                    sp_cfg = _node_cfg("run_selected_specialists_parallel")
                     client = LLMClient(
-                        model=getattr(analyzer, "model", "gpt-5"),
-                        temperature=float(getattr(analyzer, "temperature", 0.7)),
+                        model=str(sp_cfg.get("model") or "").strip(),
+                        temperature=float(sp_cfg.get("temperature", 0.7)),
                         tools=[],
                         enable_multi_stage_reasoning=False,
                         agent_name=main_agent_name,
-                        **(getattr(getattr(analyzer, "llm_client", None), "extra_params", None) or {}),
+                        **(sp_cfg.get("kwargs") or {}),
                     )
 
                 tool_summary = ""
@@ -445,8 +472,18 @@ No extra keys. No markdown."""
                     cost = 0.0
                 return agent_name, report, normalized, usage, cost
 
-        # Run all selected agents concurrently
-        results = await asyncio.gather(*[_run_one(a) for a in selected_agents], return_exceptions=True)
+        # Run selected agents sequentially in debug mode (or if explicitly requested)
+        run_sequential = debug_mode
+        if run_sequential:
+            results = []
+            for a in selected_agents:
+                try:
+                    results.append(await _run_one(a))
+                except Exception as e:
+                    results.append(e)
+        else:
+            # Run all selected agents concurrently
+            results = await asyncio.gather(*[_run_one(a) for a in selected_agents], return_exceptions=True)
 
         reports_out = dict(prior_reports)
         evidence_out = list(state.get("evidence") or [])
@@ -522,13 +559,14 @@ No extra keys. No markdown."""
             addon += "Evidence:\n" + json.dumps(evidence, ensure_ascii=False, indent=2)[:12000] + "\n"
             user_message = (user_message or "") + addon
 
+        cfg = _node_cfg("team_merge")
         merge_client = LLMClient(
-            model=getattr(analyzer, "model", "gpt-5"),
-            temperature=float(getattr(analyzer, "temperature", 0.7)),
+            model=str(cfg.get("model") or "").strip(),
+            temperature=float(cfg.get("temperature", 0.7)),
             tools=[],
             enable_multi_stage_reasoning=False,
             agent_name=main_agent_name,
-            **(getattr(getattr(analyzer, "llm_client", None), "extra_params", None) or {}),
+            **(cfg.get("kwargs") or {}),
         )
 
         resp = await merge_client.send_message(message=user_message, system_message=system_message)

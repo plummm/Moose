@@ -928,7 +928,7 @@ Provide your final combined response:"""
                 )
         
         # Iterate until we get a final response (no more tool calls) or hit max iterations
-        for iteration in range(self.max_tool_iterations):
+        for iteration in range(self.max_tool_iterations + 1):
             # Use LangChain LLM wrapper asynchronously
             response = await self.langchain_llm.ainvoke(
                 message=None,  # Don't split - pass everything in messages
@@ -1021,9 +1021,73 @@ Provide your final combined response:"""
                     break
         
         if final_response is None:
-            # Hit max iterations, use last response
-            self.logger.warning(f"Reached max tool iterations ({self.max_tool_iterations}), using last response")
-            final_response = response
+            # Hit max iterations, force a final answer with a tool-less finalization call.
+            self.logger.warning(
+                f"Reached max tool iterations ({self.max_tool_iterations}). "
+                "Making one final tool-less call to generate the final answer."
+            )
+
+            # Append a strong finalization instruction. Keep it as a USER message so the model treats it as the latest turn.
+            conversation_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Tool budget exhausted. Do NOT call any tools.\n"
+                        f"Respond with {self.multi_stage_marker} and then provide your complete final answer now."
+                    ),
+                )
+            )
+
+            try:
+                forced = await self.langchain_llm.ainvoke(
+                    message=None, 
+                    messages=conversation_messages, 
+                    system_message=system_message,
+                    request_id=f"{request_id}_final",
+                    agent_name=self.agent_name,
+                    **kwargs
+                )
+            except Exception as e:
+                self.logger.error(f"Finalization call failed after max iterations: {e}")
+                forced = response  # fallback to last response
+
+            # Accumulate cost/usage from the forced final call as well
+            if forced is not None:
+                if getattr(forced, "cost", None):
+                    total_cost += float(getattr(forced, "cost", 0.0) or 0.0)
+                if getattr(forced, "usage", None):
+                    fu = getattr(forced, "usage") or {}
+                    if isinstance(fu, dict):
+                        total_usage["input_tokens"] += int(fu.get("input_tokens", 0) or 0)
+                        total_usage["output_tokens"] += int(fu.get("output_tokens", 0) or 0)
+                        total_usage["total_tokens"] += int(fu.get("total_tokens", 0) or 0)
+
+            # Normalize forced content and strip marker if present
+            forced_content = getattr(forced, "content", "") if forced is not None else ""
+            if isinstance(forced_content, list):
+                text_parts: List[str] = []
+                for block in forced_content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(str(block.get("text", "")))
+                forced_text = "\n".join([t for t in text_parts if t])
+            elif isinstance(forced_content, str):
+                forced_text = forced_content
+            else:
+                forced_text = "" if forced_content is None else str(forced_content)
+
+            if self.enable_multi_stage_reasoning and self._has_final_answer_marker(forced_text):
+                forced_text = self._extract_final_answer(forced_text)
+
+            final_response = LLMResponse(
+                content=forced_text,
+                model=getattr(forced, "model", None) or self.model,
+                finish_reason=getattr(forced, "finish_reason", None),
+                usage=getattr(forced, "usage", None),
+                cost=getattr(forced, "cost", None),
+                raw_response=getattr(forced, "raw_response", None),
+                request_id=getattr(forced, "request_id", None) or request_id,
+                tool_calls=None,
+            )
         
         # Update final response with accumulated cost and usage
         final_response.cost = total_cost if total_cost > 0 else final_response.cost

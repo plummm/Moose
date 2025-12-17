@@ -194,6 +194,8 @@ Return STRICT JSON only."""
 
     resp = await llm_client.send_message(message=user_message, system_message=system_message)
     content = getattr(resp, "content", "") or ""
+    if type(content) != str:
+        raise ValueError(f"Tool {agent} repsonse is not a string: {type(content)}")
     data = _extract_json(content) or {}
 
     summary = str(data.get("summary") or content[:800]).strip()

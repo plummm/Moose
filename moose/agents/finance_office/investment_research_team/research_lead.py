@@ -1,7 +1,7 @@
 """Investment Research team lead (router) backed by an LLM."""
 
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Iterable, Set, Tuple, Type
+from typing import Dict, Any, Optional, List, Iterable, Set, Tuple, Type, Mapping
 from datetime import datetime
 import json
 
@@ -35,13 +35,14 @@ class ResearchLead:
     
     def __init__(
         self,
-        model: str = "gpt-5",
+        model: Optional[str] = None,
         temperature: float = 0.7,
         logger=None,
         sec_data_tools=None,
         enable_multi_stage_reasoning: bool = False,
         max_tool_iterations: int = 20,
         agent_name: Optional[str] = None,
+        custom_config: Optional[Dict[str, Any]] = None,
         **llm_kwargs
     ):
         """
@@ -62,8 +63,51 @@ class ResearchLead:
                 "pip install langchain langchain-openai langchain-anthropic langchain-google-genai"
             )
         
-        self.model = model
-        self.temperature = temperature
+        # Derive configs from agent custom_config (single source of truth)
+        derived_base_cfg: Dict[str, Any] = {}
+        derived_node_cfgs: Dict[str, Dict[str, Any]] = {}
+        if isinstance(custom_config, dict):
+            base = custom_config.get("llm_config")
+            if isinstance(base, dict):
+                derived_base_cfg = dict(base)
+            # Collect per-node llm_config overrides: custom.<node_name>_llm_config
+            for k, v in (custom_config or {}).items():
+                if not isinstance(k, str):
+                    continue
+                if k == "llm_config":
+                    continue
+                if not k.endswith("_llm_config"):
+                    continue
+                if isinstance(v, dict):
+                    node_name = k[: -len("_llm_config")]
+                    if node_name:
+                        derived_node_cfgs[node_name] = dict(v)
+
+        # Base llm_config (required: model)
+        base_cfg: Dict[str, Any] = dict(derived_base_cfg or {})
+        if not base_cfg:
+            base_cfg = {
+                "model": model,
+                "temperature": temperature,
+                "enable_multi_stage_reasoning": enable_multi_stage_reasoning,
+                "max_tool_iterations": max_tool_iterations,
+                "kwargs": dict(llm_kwargs or {}),
+            }
+        # Merge kwargs passed explicitly into base kwargs (explicit wins)
+        base_kwargs = base_cfg.get("kwargs") if isinstance(base_cfg.get("kwargs"), dict) else {}
+        merged_base_kwargs = dict(base_kwargs or {})
+        merged_base_kwargs.update(dict(llm_kwargs or {}))
+        base_cfg["kwargs"] = merged_base_kwargs
+
+        base_model = str(base_cfg.get("model") or "").strip()
+        if not base_model:
+            raise ValueError("Missing required config: custom.llm_config.model must be set")
+
+        self.base_llm_config: Dict[str, Any] = base_cfg
+        self.node_llm_configs: Dict[str, Dict[str, Any]] = dict(derived_node_cfgs or {})
+
+        self.model = base_model
+        self.temperature = float(base_cfg.get("temperature", temperature) or temperature)
         self.logger = logger
         self.sec_data_tools = sec_data_tools
         self.mcp_tools: Dict[str, Any] = {}
@@ -83,22 +127,50 @@ class ResearchLead:
                 tools = None
         
         self.llm_client = LLMClient(
-            model=model,
-            temperature=temperature,
+            model=self.model,
+            temperature=self.temperature,
             tools=tools,
-            enable_multi_stage_reasoning=enable_multi_stage_reasoning,
-            max_tool_iterations=max_tool_iterations,
+            enable_multi_stage_reasoning=bool(base_cfg.get("enable_multi_stage_reasoning", enable_multi_stage_reasoning)),
+            max_tool_iterations=int(base_cfg.get("max_tool_iterations", max_tool_iterations) or max_tool_iterations),
             agent_name=self.agent_name,
-            **llm_kwargs
+            **(merged_base_kwargs or {})
         )
         
         if self.logger:
-            self.logger.info(f"Initialized ResearchLead with model: {model}")
+            self.logger.info(f"Initialized ResearchLead with model: {self.model}")
             if tools:
                 self.logger.info(f"SEC data tools enabled: {len(tools)} tools available")
 
         # Investment Research team LangGraph app is owned/created by the team lead (this class) only.
         self._team_workflow_app: Any = None
+
+    def get_node_llm_config(self, node_name: str) -> Dict[str, Any]:
+        """
+        Return effective llm_config for a given workflow node.
+
+        Resolution:
+        - start from `custom.llm_config`
+        - overlay `custom.<node_name>_llm_config` if provided
+        - merge kwargs dicts (base kwargs + node kwargs)
+        """
+        node_name = str(node_name or "").strip()
+        base = dict(self.base_llm_config or {})
+        base_kwargs = base.get("kwargs") if isinstance(base.get("kwargs"), dict) else {}
+
+        override = dict(self.node_llm_configs.get(node_name) or {})
+        override_kwargs = override.get("kwargs") if isinstance(override.get("kwargs"), dict) else {}
+
+        out = dict(base)
+        out.update({k: v for k, v in override.items() if k != "kwargs"})
+        merged_kwargs = dict(base_kwargs or {})
+        merged_kwargs.update(dict(override_kwargs or {}))
+        out["kwargs"] = merged_kwargs
+
+        model = str(out.get("model") or "").strip()
+        if not model:
+            raise ValueError(f"Missing required model for node {node_name}: custom.llm_config.model must be set")
+        out["model"] = model
+        return out
 
     # Note: Edgar LangChain tool creation now lives in EdgarMCPTools.get_langchain_tools()
 

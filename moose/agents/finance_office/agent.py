@@ -98,22 +98,25 @@ class FinancialReportAnalyzer(BaseAgent):
             except Exception as e:
                 self.logger.warning(f"Failed to build combined MCP tools provider tools list: {e}")
         
-        llm_config = custom_config.get("llm_config", {})
-        if llm_config:
+        llm_config = custom_config.get("llm_config")
+        if isinstance(llm_config, dict):
             try:
-                model = llm_config.get("model", "gpt-5")
+                model = str(llm_config.get("model") or "").strip()
+                if not model:
+                    raise ValueError("Missing required config: custom.llm_config.model")
                 temperature = llm_config.get("temperature", 0.7)
                 enable_multi_stage_reasoning = llm_config.get("enable_multi_stage_reasoning", True)
                 max_tool_iterations = llm_config.get("max_tool_iterations", 20)
+
                 analyzer = ResearchLead(
                     model=model,
-                    temperature=temperature,
+                    temperature=float(temperature),
                     logger=self.logger,
                     sec_data_tools=sec_data_tools,
                     enable_multi_stage_reasoning=enable_multi_stage_reasoning,
                     max_tool_iterations=max_tool_iterations,
                     agent_name=self.name,
-                    **llm_config.get("kwargs", {})
+                    custom_config=custom_config,
                 )
                 self.logger.info(f"Initialized analyzer with model: {model}")
                 if enable_multi_stage_reasoning:
@@ -246,13 +249,23 @@ class FinancialReportAnalyzer(BaseAgent):
             playbooks_path = Path(__file__).resolve().parent / "department_playbooks.yaml"
             dept_playbooks = load_department_playbooks(playbooks_path)
 
+            custom = self.config.get("custom", {}) if isinstance(self.config.get("custom"), dict) else {}
+            base = custom.get("llm_config") if isinstance(custom.get("llm_config"), dict) else None
+            if not isinstance(base, dict) or not str(base.get("model") or "").strip():
+                return {"status": "error", "error": "Missing required config: custom.llm_config.model", "result": None}
+            override = custom.get("department_router_llm_config") if isinstance(custom.get("department_router_llm_config"), dict) else {}
+            eff = dict(base)
+            eff.update({k: v for k, v in (override or {}).items() if k != "kwargs"})
+            kw = dict((base.get("kwargs") or {}) if isinstance(base.get("kwargs"), dict) else {})
+            kw.update(dict((override.get("kwargs") or {}) if isinstance(override.get("kwargs"), dict) else {}))
+
             dept_client = LLMClient(
-                model=self.config.get("custom", {}).get("llm_config", {}).get("model", "gpt-5.2"),
-                temperature=float(self.config.get("custom", {}).get("llm_config", {}).get("temperature", 0.7)),
+                model=str(eff.get("model") or "").strip(),
+                temperature=float(eff.get("temperature", 0.7)),
                 tools=[],
                 enable_multi_stage_reasoning=False,
                 agent_name=self.name,
-                **(self.config.get("custom", {}).get("llm_config", {}).get("kwargs", {}) or {}),
+                **(kw or {}),
             )
 
             decision = await route_department_task(

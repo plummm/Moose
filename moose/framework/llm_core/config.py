@@ -111,6 +111,11 @@ class ModelConfig:
                     "output_cost_per_token": 0.00001
                 },
                 {
+                    "model_name": "gpt-5-mini",
+                    "input_cost_per_token": 0.00000025,
+                    "output_cost_per_token": 0.000002
+                },
+                {
                     "model_name": "gpt-4-turbo",
                     "input_cost_per_token": 0.00001,
                     "output_cost_per_token": 0.00003

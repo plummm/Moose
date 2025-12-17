@@ -41,6 +41,10 @@ def get_dashboard_html() -> str:
             <div class="section-header">
                 <h2>Chat</h2>
                 <div class="section-controls">
+                    <label class="chat-toggle">
+                        <input type="checkbox" id="hide-tool-messages" onchange="onHideToolMessagesToggle()" />
+                        <span>Hide tool messages</span>
+                    </label>
                     <select id="chat-file-dropdown" onchange="onChatFileChange()">
                         <option value="live">Live Stream</option>
                     </select>
@@ -445,6 +449,20 @@ body {
     display: flex;
     gap: 8px;
     align-items: center;
+}
+
+.chat-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    user-select: none;
+    cursor: pointer;
+}
+
+.chat-toggle input {
+    cursor: pointer;
 }
 
 .section-controls select {
@@ -925,12 +943,27 @@ let pendingSystemMessage = null;
 let logViewMode = 'live';  // 'live' or 'historical'
 let chatViewMode = 'live';  // 'live' or 'historical'
 let rightTab = 'overview';
+let hideToolMessages = false; // session-only
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     loadProjects();
     initResizeHandle();
 });
+
+function onHideToolMessagesToggle() {
+    const cb = document.getElementById('hide-tool-messages');
+    hideToolMessages = !!(cb && cb.checked);
+
+    // Re-render current chat view
+    const dropdown = document.getElementById('chat-file-dropdown');
+    const file = dropdown ? dropdown.value : 'live';
+    if (file === 'live') {
+        switchToLiveChat();
+    } else {
+        loadHistoricalChat(file);
+    }
+}
 
 function switchRightTab(tabName) {
     rightTab = tabName;
@@ -1341,6 +1374,12 @@ function appendChatMessage(message) {
         pendingSystemMessage = message;
         return; // Don't render standalone system message
     }
+
+    // Hide tool messages (tool result messages only)
+    if (hideToolMessages && type === 'tool') {
+        // Do NOT clear pendingSystemMessage; attach it to next non-tool message.
+        return;
+    }
     
     // Attach pending system message if exists
     if (pendingSystemMessage) {
@@ -1363,6 +1402,9 @@ function processMessagesForDisplay(messages) {
         
         if (type === 'system') {
             pendingSystem = msg;
+        } else if (hideToolMessages && type === 'tool') {
+            // Skip tool messages but keep pending system for next non-tool message.
+            continue;
         } else {
             if (pendingSystem) {
                 msg.systemMessage = pendingSystem;
@@ -1463,13 +1505,13 @@ function createChatMessageElement(message) {
     // Parse and display content
     const { textContent, toolUses } = parseMessageContent(rawContent);
     
-    // Display text content (truncate to first 500 words with expand/collapse)
+    // Display text content (truncate to first 150 words with expand/collapse)
     if (textContent) {
         const textDiv = document.createElement('div');
         textDiv.className = 'message-text';
         contentDiv.appendChild(textDiv);
 
-        const MAX_WORDS = 500;
+        const MAX_WORDS = 150;
 
         function countWords(text) {
             return (text || '').trim().split(/\s+/).filter(Boolean).length;
