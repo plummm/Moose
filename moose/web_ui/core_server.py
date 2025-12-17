@@ -170,6 +170,116 @@ class CoreWebServer:
                     'X-Accel-Buffering': 'no'
                 }
             )
+
+        @self.app.route('/api/projects/<project_id>/llm/usage_summary')
+        def get_llm_usage_summary(project_id: str):
+            """
+            Aggregate cost + token usage across all llm.log* files for the project.
+
+            Groups by metadata.agent_name (main agent attribution) and by day.
+            """
+            chat_manager = get_chat_manager()
+
+            def _empty():
+                return {
+                    "project_id": project_id,
+                    "totals": {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}},
+                    "by_agent": {},
+                    "per_day": [],
+                }
+
+            # Resolve log directory (uses ChatManager's logic for MOOSE_PROJECTS_DIR / cwd projects)
+            try:
+                log_dir = chat_manager._get_log_dir(project_id)  # type: ignore[attr-defined]
+            except Exception:
+                log_dir = None
+            if not log_dir or not Path(log_dir).exists():
+                return jsonify(_empty())
+            log_dir = Path(log_dir)
+
+            try:
+                files = chat_manager.list_chat_files(project_id)
+            except Exception:
+                files = []
+            if not files:
+                return jsonify(_empty())
+
+            totals_cost = 0.0
+            totals_tokens = {"input": 0, "output": 0, "total": 0}
+            by_agent: Dict[str, Dict[str, object]] = {}
+            per_day_map: Dict[str, Dict[str, Dict[str, object]]] = {}
+
+            def _bump(bucket: Dict[str, object], *, cost: float, it: int, ot: int, tt: int):
+                bucket["cost"] = float(bucket.get("cost", 0.0) or 0.0) + float(cost or 0.0)
+                toks = bucket.get("tokens") if isinstance(bucket.get("tokens"), dict) else {"input": 0, "output": 0, "total": 0}
+                toks["input"] = int(toks.get("input", 0) or 0) + int(it or 0)
+                toks["output"] = int(toks.get("output", 0) or 0) + int(ot or 0)
+                toks["total"] = int(toks.get("total", 0) or 0) + int(tt or 0)
+                bucket["tokens"] = toks
+
+            for filename in files:
+                fp = log_dir / filename
+                if not fp.exists() or not fp.is_file():
+                    continue
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = (line or "").strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except Exception:
+                                continue
+                            if not isinstance(entry, dict):
+                                continue
+                            if entry.get("direction") != "response":
+                                continue
+
+                            meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+                            agent = str(meta.get("agent_name") or entry.get("agent_name") or "unknown")
+                            ts = str(entry.get("timestamp") or "")
+                            day = ts[:10] if len(ts) >= 10 else "unknown"
+
+                            usage = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
+                            try:
+                                it = int(usage.get("input_tokens", 0) or 0)
+                                ot = int(usage.get("output_tokens", 0) or 0)
+                                tt = int(usage.get("total_tokens", it + ot) or (it + ot))
+                            except Exception:
+                                it, ot, tt = 0, 0, 0
+
+                            try:
+                                cost = float(entry.get("cost") or 0.0)
+                            except Exception:
+                                cost = 0.0
+
+                            totals_cost += cost
+                            totals_tokens["input"] += it
+                            totals_tokens["output"] += ot
+                            totals_tokens["total"] += tt
+
+                            if agent not in by_agent:
+                                by_agent[agent] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                            _bump(by_agent[agent], cost=cost, it=it, ot=ot, tt=tt)
+
+                            if day not in per_day_map:
+                                per_day_map[day] = {}
+                            if agent not in per_day_map[day]:
+                                per_day_map[day][agent] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                            _bump(per_day_map[day][agent], cost=cost, it=it, ot=ot, tt=tt)
+                except Exception:
+                    continue
+
+            per_day = [{"date": d, "by_agent": per_day_map[d]} for d in sorted(per_day_map.keys())]
+            return jsonify(
+                {
+                    "project_id": project_id,
+                    "totals": {"cost": float(totals_cost), "tokens": totals_tokens},
+                    "by_agent": by_agent,
+                    "per_day": per_day,
+                }
+            )
     
     def _check_agent_health(self, url: str, timeout: float = 2.0) -> str:
         """Check agent health via HTTP /health endpoint.

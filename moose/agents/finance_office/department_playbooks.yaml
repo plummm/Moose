@@ -1,0 +1,32 @@
+version: 1
+
+teams:
+  investment_research_team:
+    description: Investment research using EDGAR + FMP tools (fundamentals, news, macro, price/technicals).
+
+playbooks:
+  NewsArticleAnalysis:
+    description: Analyze a specific news article and produce the standard article-analysis JSON schema.
+    teams:
+      - team: investment_research_team
+        goal: Analyze the article using EDGAR/FMP tools and return the standard analysis schema.
+
+  EarningsReport:
+    description: Produce a report summarizing a company's latest earnings and key implications.
+    teams:
+      - team: investment_research_team
+        goal: Gather earnings-related data (calendar/earnings report, filings context, recent news, fundamentals) and write a concise report.
+
+  OwnershipSignal:
+    description: Evaluate insider/institutional ownership signals for a company.
+    teams:
+      - team: investment_research_team
+        goal: Use EDGAR ownership tools (3/4/5, 13F, 13D/13G) and fundamentals context to summarize ownership signals.
+
+  DilutionRiskCheck:
+    description: Assess financing/dilution risk from recent filings and terms.
+    teams:
+      - team: investment_research_team
+        goal: Use EDGAR financing tools + fundamentals and market context to assess dilution risk.
+
+

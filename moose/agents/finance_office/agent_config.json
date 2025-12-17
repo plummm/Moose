@@ -55,6 +55,13 @@
           "handler": "get_queue_stats",
           "description": "Get queue statistics",
           "auth_required": false
+        },
+        {
+          "path": "/run_task",
+          "method": "POST",
+          "handler": "run_task",
+          "description": "Run a natural-language finance research task via the department head router",
+          "auth_required": false
         }
       ]
     }

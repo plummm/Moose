@@ -1,0 +1,105 @@
+version: 1
+
+agents:
+  orchestrator:
+    description: Router/planner that selects playbooks, delegates to specialists, and merges final output.
+    best_for: everything needs to run through orchestrator
+    use_when: everything needs to run through orchestrator
+  edgar:
+    description: SEC/EDGAR filings verification and extraction specialist.
+    best_for: verifying claims via filings; extracting numbers/snippets from 10-K/10-Q/8-K/6-K; insider trades (Forms 3/4/5); institutional holdings (13F); major holders (13D/13G); governance/proxy; financing/dilution documents.
+    use_when: you need primary-source verification, official financials, ownership signals, dilution/financing risk, disclosure changes.
+  fmp_news:
+    description: FMP news timeline and catalyst context specialist.
+    best_for: pulling related news and building a timeline of catalyst context from FMP news search.
+    use_when: the request needs broader context, confirmation via multiple sources, or identifying tickers/entities in a messy prompt.
+  fmp_fundamentals:
+    description: FMP fundamentals/ratios/valuation snapshot specialist.
+    best_for: fundamentals snapshot (TTM ratios/metrics), growth/quality/health scores, estimates/ratings, earnings calendar/report endpoints, company profile/market cap/float.
+    use_when: you need valuation + fundamentals context, “is this material?”, baseline expectations, quality/leverage/liquidity.
+  fmp_macro:
+    description: FMP macro + sector/industry regime context specialist.
+    best_for: treasury rates, macro indicators, market risk premium, sector/industry performance and valuation regime.
+    use_when: the request is macro-driven, sector rotation/regime, or you need to explain context beyond company specifics.
+  fmp_price:
+    description: FMP price action + technical indicators specialist.
+    best_for: quotes, price-change snapshots, historical charts/time series, technical indicators (trend/momentum/volatility).
+    use_when: you need price reaction, technical context, event window moves, volatility confirmation.
+
+playbooks:
+  EarningsReport:
+    description: Produce a report of a company's latest earnings and key implications (best-effort).
+    phases:
+      - agent: fmp_fundamentals
+        goal: Pull latest earnings report/calendar items and fundamentals snapshot; summarize key metrics and expectations.
+        max_tool_calls: 6
+      - agent: fmp_news
+        goal: Pull recent news around earnings to capture guidance and market narrative (optional).
+        max_tool_calls: 4
+      - agent: edgar
+        goal: Pull relevant filings context (latest 10-Q/10-K financial statements; recent 8-K if applicable).
+        max_tool_calls: 5
+      - agent: fmp_price
+        goal: Summarize price reaction context around the earnings window (optional).
+        max_tool_calls: 4
+
+  CatalystValidation:
+    description: Validate a news catalyst by checking filings, fundamentals, and market reaction.
+    phases:
+      - agent: fmp_news
+        goal: Summarize claim(s), build timeline, extract tickers/entities, and pull related news if needed.
+        max_tool_calls: 4
+      - agent: edgar
+        goal: Verify the catalyst via SEC filings (8-K/exhibits/other relevant forms); extract supporting snippets.
+        max_tool_calls: 6
+      - agent: fmp_fundamentals
+        goal: Produce a compact fundamentals snapshot and key risk flags relevant to the catalyst.
+        max_tool_calls: 5
+      - agent: fmp_price
+        goal: Summarize price reaction and technical context around the event window.
+        max_tool_calls: 5
+
+  DilutionRiskCheck:
+    description: Assess dilution/financing risk from recent registration/prospectus filings and terms.
+    phases:
+      - agent: edgar
+        goal: List recent financing documents and extract key offering/ATM/shelf term snippets.
+        max_tool_calls: 6
+      - agent: fmp_fundamentals
+        goal: Provide capital structure and valuation context; flag liquidity/leverage risks.
+        max_tool_calls: 5
+      - agent: fmp_price
+        goal: Summarize recent price/volume behavior for financing sensitivity context.
+        max_tool_calls: 4
+
+  OwnershipSignal:
+    description: Evaluate insider and institutional ownership signals and what they imply.
+    phases:
+      - agent: edgar
+        goal: Summarize insider activity and (if needed) parse specific filings; optionally add 13F context.
+        max_tool_calls: 7
+      - agent: fmp_fundamentals
+        goal: Provide fundamentals context to interpret ownership signals.
+        max_tool_calls: 4
+
+  FilingChangeDetection:
+    description: Detect meaningful changes in filings (risk factors, MD&A) and screen reporting red flags.
+    phases:
+      - agent: edgar
+        goal: Run diffs (Risk Factors / MD&A) and red-flag scan; surface key new/removed disclosures.
+        max_tool_calls: 7
+      - agent: fmp_macro
+        goal: Provide macro/sector context that may explain filing changes (optional).
+        max_tool_calls: 3
+
+  MacroContextOverlay:
+    description: Add macro + sector/industry context to a company/news event and relate to price action.
+    phases:
+      - agent: fmp_macro
+        goal: Pull macro indicators / treasury rates / sector/industry regime context for the event window.
+        max_tool_calls: 5
+      - agent: fmp_price
+        goal: Summarize price reaction; relate to macro/sector regime where possible.
+        max_tool_calls: 5
+
+

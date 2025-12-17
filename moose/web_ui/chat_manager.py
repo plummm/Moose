@@ -449,9 +449,11 @@ class ChatManager:
         direction = entry.get('direction', '')
         request_id = entry.get('request_id', '')
         
-        # Extract model name for display (can be used as agent name fallback)
+        # Extract model name for display
         model = entry.get('model', '')
-        agent_name = entry.get('agent_name', '')  # Optional agent_name from log entry
+        # Main agent attribution (preferred): entry.metadata.agent_name
+        meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        agent_name = meta.get("agent_name") or entry.get("agent_name", "")
         
         # New format: single 'message' field
         message = entry.get('message')

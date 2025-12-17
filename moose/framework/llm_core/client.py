@@ -1,6 +1,7 @@
 """Universal LLM client for interacting with multiple LLM providers using LangChain."""
 
 import os
+import inspect
 import uuid
 import asyncio
 from pathlib import Path
@@ -30,6 +31,31 @@ except ImportError:
     tiktoken = None
 
 
+def _infer_agent_name_from_stack() -> Optional[str]:
+    """
+    Best-effort inference of main agent name from call stack.
+
+    Looks for a frame whose filename contains: moose/agents/<agent_name>/...
+    Returns <agent_name> if found, else None.
+    """
+    try:
+        frame = inspect.currentframe()
+        if frame is not None:
+            frame = frame.f_back  # caller
+        while frame is not None:
+            filename = frame.f_code.co_filename or ""
+            parts = Path(filename).parts
+            for i in range(len(parts) - 2):
+                if parts[i] == "moose" and parts[i + 1] == "agents":
+                    cand = parts[i + 2]
+                    if cand:
+                        return cand
+            frame = frame.f_back
+    except Exception:
+        return None
+    return None
+
+
 class LLMClient:
     """
     Universal LLM client that provides a unified interface for multiple LLM providers.
@@ -54,6 +80,7 @@ class LLMClient:
         enable_multi_stage_reasoning: bool = False,
         multi_stage_marker: str = "<FINAL_ANSWER>",
         max_tool_iterations: int = 20,
+        agent_name: Optional[str] = None,
         **kwargs
     ):
         """
@@ -82,6 +109,8 @@ class LLMClient:
         self.max_input_tokens = max_input_tokens or kwargs.pop('max_input_tokens', 128000)
         self.timeout = timeout
         self.extra_params = kwargs
+        # Main-agent attribution for cost tracking + UI rollups
+        self.agent_name = agent_name or _infer_agent_name_from_stack()
         
         # Initialize token encoder for counting
         self._token_encoder = None
@@ -394,6 +423,7 @@ Please provide your analysis/response for this chunk, following the same format 
             messages=messages,
             system_message=chunk_system_message,
             request_id=f"{request_id}_chunk_{chunk_index}" if request_id else None,
+            agent_name=self.agent_name,
             **kwargs
         )
         
@@ -451,6 +481,7 @@ Provide your final combined response:"""
             messages=None,
             system_message=summarization_system_message,
             request_id=f"{request_id}_summary",
+            agent_name=self.agent_name,
             **kwargs
         )
         
@@ -904,6 +935,7 @@ Provide your final combined response:"""
                 messages=conversation_messages,  # Pass full conversation history
                 system_message=system_message,
                 request_id=f"{request_id}_iter_{iteration}",
+                agent_name=self.agent_name,
                 **kwargs
             )
             
@@ -1125,6 +1157,7 @@ Provide your final combined response:"""
                 messages=messages,
                 system_message=system_message,
                 request_id=request_id,
+                agent_name=self.agent_name,
                 **kwargs
             ):
                 yield chunk

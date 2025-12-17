@@ -1,0 +1,339 @@
+"""Investment Research team lead (router) backed by an LLM."""
+
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Iterable, Set, Tuple, Type
+from datetime import datetime
+import json
+
+try:
+    from moose.framework.llm_core import LLMClient
+    LLM_AVAILABLE = True
+except ImportError:
+    try:
+        from framework.llm_core import LLMClient
+        LLM_AVAILABLE = True
+    except ImportError:
+        LLM_AVAILABLE = False
+        LLMClient = None
+
+try:
+    from langchain_core.tools import StructuredTool
+    LANGCHAIN_TOOLS_AVAILABLE = True
+except ImportError:
+    StructuredTool = None
+    LANGCHAIN_TOOLS_AVAILABLE = False
+
+
+class ResearchLead:
+    """
+    Team lead for the Investment Research team.
+    
+    This class owns the Investment Research team LangGraph workflow and provides the official invocation method
+    (`run_task`) for arbitrary investment research tasks. News-specific analysis is handled at the department
+    level (see `finance_office/assistant.py`) so the team remains generic.
+    """
+    
+    def __init__(
+        self,
+        model: str = "gpt-5",
+        temperature: float = 0.7,
+        logger=None,
+        sec_data_tools=None,
+        enable_multi_stage_reasoning: bool = False,
+        max_tool_iterations: int = 20,
+        agent_name: Optional[str] = None,
+        **llm_kwargs
+    ):
+        """
+        Initialize the financial news analyzer.
+        
+        Args:
+            model: LLM model name (e.g., "gpt-4", "claude-3-opus-20240229")
+            temperature: Sampling temperature for LLM
+            logger: Logger instance
+            sec_data_tools: Optional SEC tools provider instance (e.g. EdgarMCPTools) for SEC data access
+            enable_multi_stage_reasoning: Enable planner/executor loop for iterative tool calling
+            max_tool_iterations: Maximum number of tool call iterations
+            **llm_kwargs: Additional arguments for LLMClient
+        """
+        if not LLM_AVAILABLE:
+            raise ImportError(
+                "LLM support not available. Install with: "
+                "pip install langchain langchain-openai langchain-anthropic langchain-google-genai"
+            )
+        
+        self.model = model
+        self.temperature = temperature
+        self.logger = logger
+        self.sec_data_tools = sec_data_tools
+        self.mcp_tools: Dict[str, Any] = {}
+        # Main agent name for cost/token attribution in llm.log (rolls up sub-agent usage)
+        self.agent_name = str(agent_name or "").strip() or None
+        
+        # Get tools from the SEC tools provider if provided
+        tools: Optional[List[Any]] = None
+        if sec_data_tools:
+            try:
+                tools = sec_data_tools.get_langchain_tools()
+                if self.logger:
+                    self.logger.info(f"Loaded {len(tools)} SEC tools")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to load SEC tools: {e}")
+                tools = None
+        
+        self.llm_client = LLMClient(
+            model=model,
+            temperature=temperature,
+            tools=tools,
+            enable_multi_stage_reasoning=enable_multi_stage_reasoning,
+            max_tool_iterations=max_tool_iterations,
+            agent_name=self.agent_name,
+            **llm_kwargs
+        )
+        
+        if self.logger:
+            self.logger.info(f"Initialized ResearchLead with model: {model}")
+            if tools:
+                self.logger.info(f"SEC data tools enabled: {len(tools)} tools available")
+
+        # Investment Research team LangGraph app is owned/created by the team lead (this class) only.
+        self._team_workflow_app: Any = None
+
+    # Note: Edgar LangChain tool creation now lives in EdgarMCPTools.get_langchain_tools()
+
+    def _get_team_workflow_app(self) -> Any:
+        """
+        Lazily create and cache the Investment Research team workflow app.
+        """
+        if self._team_workflow_app is None:
+            from .team_workflow import create_team_workflow
+
+            self._team_workflow_app = create_team_workflow(analyzer=self, logger=self.logger)
+        return self._team_workflow_app
+    
+    # News-specific analysis is handled by `moose.agents.finance_office.assistant.FinanceOfficeAssistant`.
+
+    async def run_task(
+        self,
+        instruction: str,
+        *,
+        context_text: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        system_message: Optional[str] = None,
+        user_message: Optional[str] = None,
+        task_goal: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run a general investment research task via the Investment Research team workflow.
+
+        This uses the same *output schema* as `analyze_article()` (title/high_level_idea/companies/sentiment/...)
+        so callers can rely on a consistent shape across task types.
+        """
+        # Pass prompts through as-is. If empty, the workflow will route to `prompt_engineer`.
+        system_message = str(system_message or "")
+        user_message = str(user_message or "")
+
+        team_app = self._get_team_workflow_app()
+        team_state = {
+            "instruction": instruction,
+            "metadata": metadata or {},
+            "context_text": context_text,
+            "system_message": system_message,
+            "user_message": user_message,
+            # future prompt-generator tool can use this
+            "task_goal": task_goal or "",
+        }
+        team_out = await team_app.ainvoke(team_state) if hasattr(team_app, "ainvoke") else team_app.invoke(team_state)
+        final = {}
+        if isinstance(team_out, dict):
+            final = team_out.get("final") if isinstance(team_out.get("final"), dict) else {}
+
+        ok_flag = True
+        if isinstance(final, dict) and isinstance(final.get("ok"), bool):
+            ok_flag = bool(final.get("ok"))
+
+        err_val = None
+        if isinstance(final, dict):
+            err_val = final.get("error")
+        if isinstance(err_val, dict):
+            try:
+                err_val = json.dumps(err_val, ensure_ascii=False)
+            except Exception:
+                err_val = str(err_val)
+        elif err_val is not None and not isinstance(err_val, str):
+            err_val = str(err_val)
+
+        return {
+            "status": "success" if ok_flag else "error",
+            "error": None if ok_flag else (err_val or "unknown_error"),
+            "result": final if isinstance(final, dict) else {},
+            "last_state": team_out if isinstance(team_out, dict) else {},
+        }
+    
+    def _summarize_tools(self, *, agent_name: Optional[str] = None) -> str:
+        """
+        Summarize tools available to the LLM (grouped by category).
+
+        If `agent_name` is provided, only include tools that are in that specialist's scope.
+        """
+
+        def _first_paragraph(s: str, *, max_chars: int = 380) -> str:
+            txt = (s or "").strip()
+            if not txt:
+                return ""
+            # Take up to the first blank-line-separated paragraph
+            para = txt.split("\n\n", 1)[0].strip()
+            # Collapse internal newlines for readability
+            para = " ".join([ln.strip() for ln in para.splitlines() if ln.strip()])
+            if len(para) > max_chars:
+                para = para[: max_chars - 1].rstrip() + "…"
+            return para
+
+        def _available_tool_names() -> Set[str]:
+            names: Set[str] = set()
+            for t in getattr(self.llm_client, "tools", []) or []:
+                nm = getattr(t, "name", None)
+                if isinstance(nm, str) and nm:
+                    names.add(nm)
+            return names
+
+        # Store tools reference if available (for external inspection / executor lookup)
+        if self.sec_data_tools and hasattr(self.sec_data_tools, "mcp_tools"):
+            try:
+                for tool_name, tool_obj in (self.sec_data_tools.mcp_tools or {}).items():
+                    self.mcp_tools[str(tool_name)] = tool_obj
+            except Exception:
+                pass
+
+        available = _available_tool_names()
+        if not available:
+            return ""
+
+        if agent_name:
+            try:
+                from .specialists import build_tool_scopes
+
+                scopes = build_tool_scopes()
+                allowed = set(scopes.get(str(agent_name), set()) or set())
+                available = available & allowed
+            except Exception:
+                # If we can't resolve scopes for some reason, fall back to showing all available.
+                pass
+
+        if not available:
+            return ""
+
+        # Determine grouping metadata
+        tool_groups: List[Tuple[str, str, Iterable[Type[Any]]]] = []
+
+        if self.sec_data_tools is not None and hasattr(self.sec_data_tools, "iter_tool_groups"):
+            # Preferred: combined provider exposes stable hierarchy metadata.
+            try:
+                for g in self.sec_data_tools.iter_tool_groups():
+                    tool_groups.append(
+                        (
+                            str(getattr(g, "group_name", "") or ""),
+                            str(getattr(g, "group_description", "") or ""),
+                            getattr(g, "category_classes", []) or [],
+                        )
+                    )
+            except Exception:
+                tool_groups = []
+
+        # Fallback: support passing a single provider (EDGAR-only or FMP-only) directly.
+        if not tool_groups and self.sec_data_tools is not None:
+            try:
+                from .edgar_mcp_tools import EdgarAllMCPTools
+            except Exception:
+                EdgarAllMCPTools = None  # type: ignore
+            try:
+                from .fmp_mcp_tools import FMPAllMCPTools
+            except Exception:
+                FMPAllMCPTools = None  # type: ignore
+
+            if EdgarAllMCPTools is not None and isinstance(self.sec_data_tools, EdgarAllMCPTools):  # type: ignore[arg-type]
+                tool_groups.append(
+                    (
+                        "SEC/EDGAR Tools",
+                        str(getattr(EdgarAllMCPTools, "__doc__", "") or ""),
+                        tuple(EdgarAllMCPTools.__bases__),
+                    )
+                )
+            if FMPAllMCPTools is not None and isinstance(self.sec_data_tools, FMPAllMCPTools):  # type: ignore[arg-type]
+                tool_groups.append(
+                    (
+                        "FMP (FinancialModelingPrep) Tools",
+                        str(getattr(FMPAllMCPTools, "__doc__", "") or ""),
+                        tuple(FMPAllMCPTools.__bases__),
+                    )
+                )
+
+        if not tool_groups:
+            return ""
+
+        lines: List[str] = []
+        lines.append("")
+        if agent_name:
+            lines.append(f"**Available Tools (scoped for `{agent_name}`):**")
+            lines.append("Only tools bound to this specialist are listed below. Prefer the most relevant category first.")
+        else:
+            lines.append("**Available Tools:**")
+            lines.append(
+                "You have access to SEC filing tools and market/company data tools. Tools are grouped by category; use the most relevant category first."
+            )
+        lines.append("")
+
+        # Render each top-level group in order.
+        for group_name, group_desc, category_classes in tool_groups:
+            # Compute unique tool names in this group, intersected with actually bound tools.
+            group_tool_names: Set[str] = set()
+            cat_to_tools: List[Tuple[str, List[Tuple[str, str]]]] = []
+
+            for cls in category_classes:
+                # Category description comes from class docstring (revised as part of this change).
+                cat_desc = _first_paragraph(str(getattr(cls, "__doc__", "") or ""))
+
+                # Extract tool specs from the category class
+                specs = []
+                try:
+                    if hasattr(cls, "list_mcp_tools"):
+                        specs = cls.list_mcp_tools()  # type: ignore[attr-defined]
+                except Exception:
+                    specs = []
+
+                items: List[Tuple[str, str]] = []
+                for spec in specs or []:
+                    nm = (spec or {}).get("name")
+                    doc = (spec or {}).get("doc")
+                    if not isinstance(nm, str) or not nm:
+                        continue
+                    if nm not in available:
+                        continue
+                    group_tool_names.add(nm)
+                    items.append((nm, _first_paragraph(str(doc or ""), max_chars=220)))
+
+                # Stable sort tools by name
+                items.sort(key=lambda x: x[0])
+                if items:
+                    cat_to_tools.append((cat_desc or cls.__name__, items))
+
+            if not group_tool_names:
+                continue
+
+            header_desc = _first_paragraph(group_desc, max_chars=420)
+            if header_desc:
+                lines.append(f"**{group_name} ({len(group_tool_names)} tools):**: {header_desc}")
+            else:
+                lines.append(f"**{group_name} ({len(group_tool_names)} tools):**")
+
+            for cat_desc, items in cat_to_tools:
+                lines.append(f"- {cat_desc}:")
+                for nm, desc in items:
+                    if desc:
+                        lines.append(f"   - {nm}: {desc}")
+                    else:
+                        lines.append(f"   - {nm}")
+            lines.append("")
+
+        return "\n".join(lines).rstrip() + "\n"

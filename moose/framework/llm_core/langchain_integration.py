@@ -312,6 +312,7 @@ class LangChainLLM:
         messages: Optional[List[Message]] = None,
         system_message: Optional[Union[str, Message]] = None,
         request_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """
@@ -350,11 +351,10 @@ class LangChainLLM:
             langchain_messages.append(current_langchain_msg)
         
         # Log LLM request with all messages
-        self.llm_logger.log_request(
-            messages=langchain_messages,
-            request_id=request_id or "unknown",
-            model=self.model
-        )
+        log_meta: Dict[str, Any] = {}
+        if agent_name:
+            log_meta["agent_name"] = agent_name
+        self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
         # Invoke LangChain LLM asynchronously
         try:
@@ -409,7 +409,8 @@ class LangChainLLM:
             request_id=request_id or "unknown",
             model=self.model,
             usage=usage,
-            cost=cost
+            cost=cost,
+            **log_meta,
         )
         
         return LLMResponse(
@@ -429,6 +430,7 @@ class LangChainLLM:
         messages: Optional[List[Message]] = None,
         system_message: Optional[Union[str, Message]] = None,
         request_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """
@@ -462,12 +464,11 @@ class LangChainLLM:
         # Add current message
         langchain_messages.append(self._message_to_langchain(message))
         
+        log_meta: Dict[str, Any] = {}
+        if agent_name:
+            log_meta["agent_name"] = agent_name
         # Log LLM request with all messages
-        self.llm_logger.log_request(
-            messages=langchain_messages,
-            request_id=request_id or "unknown",
-            model=self.model
-        )
+        self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
         # Invoke LangChain LLM
         try:
@@ -516,7 +517,8 @@ class LangChainLLM:
             request_id=request_id or "unknown",
             model=self.model,
             usage=usage,
-            cost=cost
+            cost=cost,
+            **log_meta,
         )
         
         return LLMResponse(
@@ -536,6 +538,7 @@ class LangChainLLM:
         messages: Optional[List[Message]] = None,
         system_message: Optional[Union[str, Message]] = None,
         request_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
         **kwargs
     ) -> Iterator[str]:
         """
@@ -568,13 +571,11 @@ class LangChainLLM:
         # Add current message
         langchain_messages.append(self._message_to_langchain(message))
         
+        log_meta: Dict[str, Any] = {"streaming": True}
+        if agent_name:
+            log_meta["agent_name"] = agent_name
         # Log LLM request with all messages
-        self.llm_logger.log_request(
-            messages=langchain_messages,
-            request_id=request_id or "unknown",
-            model=self.model,
-            streaming=True
-        )
+        self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
         # Collect full response for logging
         full_response_content = []
@@ -595,7 +596,8 @@ class LangChainLLM:
             response={"content": "".join(full_response_content), "type": "StreamedResponse"},
             request_id=request_id or "unknown",
             model=self.model,
-            streaming=True
+            streaming=True,
+            **({"agent_name": agent_name} if agent_name else {}),
         )
     
     def get_langchain_llm(self):

@@ -6,27 +6,28 @@ articles using LLM with LangGraph workflow.
 
 import os
 import asyncio
+import hashlib
+import json
 from pathlib import Path
 from typing import Dict, Any
 
 from moose.framework import BaseAgent
+from moose.framework.llm_core import LLMClient
 
 # Import local modules
 try:
-    from .finance_analysis_team.finance_researcher import FinanceResearcher
-    from .finance_analysis_team.edgar_mcp_tools import EdgarAllMCPTools
-    from .finance_analysis_team.fmp_mcp_tools import FMPAllMCPTools
-    from .finance_analysis_team.mcp_tools import CombinedFinanceMCPTools
-    from .queue_manager import FilePathQueue
-    from .workflow import create_workflow, LANGGRAPH_AVAILABLE
+    from .assistant import FinanceOfficeAssistant
+    from .investment_research_team.research_lead import ResearchLead
+    from .investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
+    from .investment_research_team.fmp_mcp_tools import FMPAllMCPTools
+    from .investment_research_team.mcp_tools import CombinedFinanceMCPTools
 except ImportError:
     # Fallback for direct execution
-    from moose.agents.finance_office.finance_analysis_team.finance_researcher import FinanceResearcher
-    from moose.agents.finance_office.finance_analysis_team.edgar_mcp_tools import EdgarAllMCPTools
-    from moose.agents.finance_office.finance_analysis_team.fmp_mcp_tools import FMPAllMCPTools
-    from moose.agents.finance_office.finance_analysis_team.mcp_tools import CombinedFinanceMCPTools
-    from moose.agents.finance_office.queue_manager import FilePathQueue
-    from moose.agents.finance_office.workflow import create_workflow, LANGGRAPH_AVAILABLE
+    from moose.agents.finance_office.assistant import FinanceOfficeAssistant
+    from moose.agents.finance_office.investment_research_team.research_lead import ResearchLead
+    from moose.agents.finance_office.investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
+    from moose.agents.finance_office.investment_research_team.fmp_mcp_tools import FMPAllMCPTools
+    from moose.agents.finance_office.investment_research_team.mcp_tools import CombinedFinanceMCPTools
 
 
 class FinancialReportAnalyzer(BaseAgent):
@@ -52,18 +53,13 @@ class FinancialReportAnalyzer(BaseAgent):
         
         # Initialize news data directory for saving analysis results
         news_dir = os.getenv("NEWS_RESULT_DIR", "/data/news")
-        news_data_dir = Path(news_dir)
-        news_data_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info(f"News data directory: {news_data_dir}")
-        
-        # Initialize queue manager
-        self.queue_manager = FilePathQueue(logger=self.logger)
-        self.logger.info("Initialized file path queue")
+        self.news_data_dir = Path(news_dir)
+        self.news_data_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"News data directory: {self.news_data_dir}")
         
         # Initialize analyzer (if LLM config is available)
         custom_config = self.config.get("custom", {})
         analyzer = None
-        use_langgraph = custom_config.get("use_langgraph", True)
         
         # Initialize EdgarAllMCPTools if edgar_config is enabled
         sec_data_tools = None
@@ -109,13 +105,14 @@ class FinancialReportAnalyzer(BaseAgent):
                 temperature = llm_config.get("temperature", 0.7)
                 enable_multi_stage_reasoning = llm_config.get("enable_multi_stage_reasoning", True)
                 max_tool_iterations = llm_config.get("max_tool_iterations", 20)
-                analyzer = FinanceResearcher(
+                analyzer = ResearchLead(
                     model=model,
                     temperature=temperature,
                     logger=self.logger,
                     sec_data_tools=sec_data_tools,
                     enable_multi_stage_reasoning=enable_multi_stage_reasoning,
                     max_tool_iterations=max_tool_iterations,
+                    agent_name=self.name,
                     **llm_config.get("kwargs", {})
                 )
                 self.logger.info(f"Initialized analyzer with model: {model}")
@@ -127,97 +124,10 @@ class FinancialReportAnalyzer(BaseAgent):
         # Store SEC tools provider for cleanup
         self.sec_data_tools = sec_data_tools
         
-        # Store analyzer for workflow
+        # Store analyzer
         self.analyzer = analyzer
-        
-        # Initialize LangGraph workflow if enabled
-        self.workflow_app = None
-        self.workflow_task = None
-        if use_langgraph and LANGGRAPH_AVAILABLE and analyzer:
-            try:
-                max_concurrent = custom_config.get("max_concurrent_analyses", 20)
-                self.workflow_app = create_workflow(
-                    queue_manager=self.queue_manager,
-                    analyzer=analyzer,
-                    logger=self.logger,
-                    max_concurrent_analyses=max_concurrent,
-                    news_data_dir=news_data_dir
-                )
-                self.logger.info("Initialized LangGraph workflow")
-                
-                self._workflow_started = False
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize LangGraph workflow: {e}")
-                use_langgraph = False
-        elif use_langgraph and not LANGGRAPH_AVAILABLE:
-            self.logger.warning("LangGraph not available, workflow disabled")
-            use_langgraph = False
-        
-        self.logger.info(f"LangGraph workflow: {'enabled' if use_langgraph else 'disabled'}")
-    
-    def run_http_server(self, port=None, host="0.0.0.0"):
-        """Override to start workflow task when HTTP server starts."""
-        # Start workflow task in background
-        if self.workflow_app and not self._workflow_started:
-            async def run_workflow():
-                """Run workflow continuously."""
-                self.logger.debug("Running workflow")
-                try:
-                    initial_state = {
-                        "current_item": None,
-                        "analyses": [],
-                        "analyses_completed": 0,
-                        "analyses_failed": 0,
-                        "status": "processing",
-                        "error": None,
-                        "queue_manager": self.queue_manager,
-                        "analyzer": self.analyzer,
-                        "logger": self.logger
-                    }
-                    
-                    # Run workflow continuously
-                    while self.running:
-                        try:
-                            self.logger.debug("Invoking workflow")
-                            # Check if workflow app has async invoke method
-                            if hasattr(self.workflow_app, 'ainvoke'):
-                                # Invoke workflow - it will process one item and route back
-                                result = await self.workflow_app.ainvoke(initial_state)
-                                # Update initial_state with result for next iteration
-                                self.logger.debug("Workflow finished: {}".format(result))
-                                initial_state = result
-                            else:
-                                # Fallback to sync invoke in async context
-                                loop = asyncio.get_event_loop()
-                                result = await loop.run_in_executor(
-                                    None,
-                                    lambda: self.workflow_app.invoke(initial_state)
-                                )
-                                initial_state = result
-                            
-                            # Small delay to prevent tight loop
-                            await asyncio.sleep(0.1)
-                        except Exception as e:
-                            self.logger.error(f"Error in workflow execution: {e}")
-                            await asyncio.sleep(1)
-                except Exception as e:
-                    self.logger.error(f"Workflow task error: {e}")
-            
-            # Start workflow in background thread with event loop
-            import threading
-            def start_workflow_loop():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                self._workflow_loop = loop
-                loop.run_until_complete(run_workflow())
-            
-            workflow_thread = threading.Thread(target=start_workflow_loop, daemon=True)
-            workflow_thread.start()
-            self._workflow_started = True
-            self.logger.info("Started workflow background task")
-        
-        # Call parent's run_http_server
-        super().run_http_server(port=port, host=host)
+        # Department-level helper for ad-hoc tasks like news analysis
+        self.assistant = FinanceOfficeAssistant(team_manager=analyzer, logger=self.logger) if analyzer else None
     
     async def get_financial_news(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -233,8 +143,7 @@ class FinancialReportAnalyzer(BaseAgent):
         Returns:
         {
             "status": "success" | "error",
-            "message": str,
-            "queue_size": int
+            "result": { ... analysis ... }
         }
         """
         try:
@@ -243,7 +152,6 @@ class FinancialReportAnalyzer(BaseAgent):
                 return {
                     "status": "error",
                     "error": "file_path is required",
-                    "queue_size": self.queue_manager.size()
                 }
             
             # Validate file exists
@@ -252,39 +160,46 @@ class FinancialReportAnalyzer(BaseAgent):
                 return {
                     "status": "error",
                     "error": f"File not found: {file_path}",
-                    "queue_size": self.queue_manager.size()
                 }
-            
-            # Enqueue the file path
-            url = data.get("url", "")
-            metadata = data.get("metadata", {})
-            
-            success = self.queue_manager.enqueue(
-                file_path=str(path),
-                url=url,
-                metadata=metadata
-            )
-            
-            if success:
-                self.logger.info(f"Received file path for analysis: {file_path}")
-                return {
-                    "status": "success",
-                    "message": f"File path enqueued: {file_path}",
-                    "queue_size": self.queue_manager.size()
-                }
-            else:
-                return {
-                    "status": "error",
-                    "error": "Failed to enqueue file path",
-                    "queue_size": self.queue_manager.size()
-                }
+
+            if not self.analyzer:
+                return {"status": "error", "error": "Analyzer is not initialized"}
+            if not self.assistant:
+                return {"status": "error", "error": "Assistant is not initialized"}
+
+            url = str(data.get("url", "") or "").strip()
+            metadata = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
+
+            # Cache by url sha256 (recursive search under NEWS_RESULT_DIR)
+            if url:
+                try:
+                    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+                    existing = list(self.news_data_dir.rglob(f"{digest}.json"))
+                    if existing:
+                        existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        with open(existing[0], "r", encoding="utf-8") as f:
+                            analysis = json.load(f)
+                        if isinstance(analysis, dict) and "error" not in analysis:
+                            return {"status": "success", "result": analysis, "cached": True}
+                except Exception as e:
+                    self.logger.debug(f"Cache lookup failed; continuing: {e}")
+
+            # Synchronous analysis (news is an ad-hoc HTTP call).
+            # News analysis is owned by the department-level assistant, not the Investment Research team.
+            result = await self.assistant.analyze_news(url=url, file_path=path, metadata=metadata)
+            if isinstance(result, dict) and "error" not in result:
+                try:
+                    self.assistant.save_news_analysis_result(result, self.news_data_dir)
+                except Exception as save_error:
+                    self.logger.warning(f"Failed to save analysis result: {save_error}")
+
+            return {"status": "success", "result": result, "cached": False, "metadata": metadata}
                 
         except Exception as e:
             self.logger.error(f"Error in get_financial_news endpoint: {e}")
             return {
                 "status": "error",
                 "error": str(e),
-                "queue_size": self.queue_manager.size()
             }
     
     async def get_queue_stats(self, data: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -303,10 +218,77 @@ class FinancialReportAnalyzer(BaseAgent):
             }
         }
         """
-        return {
-            "status": "success",
-            "stats": self.queue_manager.get_stats()
+        # Queue-based background workflow is disabled; keep a stable endpoint.
+        return {"status": "success", "stats": {"queue_enabled": False, "queue_size": 0}}
+
+    async def run_task(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        HTTP endpoint handler for running a natural-language finance research task.
+
+        Expected input:
+        {
+          "instruction": "Give me a report of Microsoft latest earnings report",
+          "context": { ... optional ... }
         }
+        """
+        try:
+            instruction = str(data.get("instruction") or "").strip()
+            context = data.get("context") if isinstance(data.get("context"), dict) else {}
+            if not instruction:
+                return {"status": "error", "error": "instruction is required"}
+
+            if not self.analyzer:
+                return {"status": "error", "error": "Analyzer is not initialized"}
+
+            # Department-head router (tool-less) selects team + goal; currently routes into investment_research_team.
+            from .department_router import load_department_playbooks, route_department_task
+
+            playbooks_path = Path(__file__).resolve().parent / "department_playbooks.yaml"
+            dept_playbooks = load_department_playbooks(playbooks_path)
+
+            dept_client = LLMClient(
+                model=self.config.get("custom", {}).get("llm_config", {}).get("model", "gpt-5.2"),
+                temperature=float(self.config.get("custom", {}).get("llm_config", {}).get("temperature", 0.7)),
+                tools=[],
+                enable_multi_stage_reasoning=False,
+                agent_name=self.name,
+                **(self.config.get("custom", {}).get("llm_config", {}).get("kwargs", {}) or {}),
+            )
+
+            decision = await route_department_task(
+                llm_client=dept_client,
+                dept_playbooks=dept_playbooks,
+                instruction=instruction,
+                context=context,
+            )
+
+            # For now we only implement investment_research_team.
+            team_task = decision.team_tasks.get("investment_research_team", {}) if isinstance(decision.team_tasks, dict) else {}
+            team_goal = str(team_task.get("goal") or instruction)
+            team_inputs = team_task.get("inputs") if isinstance(team_task.get("inputs"), dict) else {"instruction": instruction, "context": context}
+
+            # Official invocation: team manager routes into investment_research_team via run_task()
+            context_text = str((team_inputs or {}).get("context_text") or "")
+            team_resp = await self.analyzer.run_task(
+                team_goal,
+                context_text=context_text,
+                metadata=team_inputs,
+                task_goal=str((team_inputs or {}).get("task_goal") or ""),
+            )
+            if not isinstance(team_resp, dict):
+                return {"status": "error", "error": "Invalid team response", "result": {}}
+
+            if team_resp.get("status") != "success":
+                return {
+                    "status": "error",
+                    "error": str(team_resp.get("error") or "Team error"),
+                    "result": team_resp.get("result"),
+                }
+
+            return {"status": "success", "error": None, "result": team_resp.get("result")}
+        except Exception as e:
+            self.logger.error(f"Error in run_task endpoint: {e}")
+            return {"status": "error", "error": str(e), "result": None}
     
     def process(self, input_data=None) -> Any:
         """
@@ -318,6 +300,6 @@ class FinancialReportAnalyzer(BaseAgent):
         return {
             "status": "success",
             "message": "Financial Report Analyzer is running",
-            "stats": self.queue_manager.get_stats()
+            "stats": {"queue_enabled": False, "queue_size": 0}
         }
 

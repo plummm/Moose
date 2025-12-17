@@ -71,49 +71,111 @@ def get_dashboard_html() -> str:
                     </select>
                 </div>
             </header>
-            
-            <!-- Online Agents Section -->
-            <section class="agents-section">
-                <h2>Online Agents</h2>
-                <div class="agents-table-container">
-                    <table class="agents-table">
-                        <thead>
-                            <tr>
-                                <th>Agent Name</th>
-                                <th>Status</th>
-                                <th>Container</th>
-                                <th>Interactive Mode</th>
-                                <th>Link</th>
-                            </tr>
-                        </thead>
-                        <tbody id="agents-tbody">
-                            <tr>
-                                <td colspan="5" class="loading">Loading agents...</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-            
-            <!-- Logging Section -->
-            <section class="logging-section">
-                <div class="section-header">
-                    <h2>Logging</h2>
-                    <div class="section-controls">
-                        <select id="log-file-dropdown" onchange="onLogFileChange()">
-                            <option value="live">Live Stream</option>
-                        </select>
-                        <button class="refresh-btn" onclick="switchToLiveLogs()" title="Switch to live stream">
-                            &#x21bb;
-                        </button>
+
+            <!-- Tabs -->
+            <div class="tab-bar">
+                <button id="tab-btn-overview" class="tab-btn active" onclick="switchRightTab('overview')">Overview</button>
+                <button id="tab-btn-costs" class="tab-btn" onclick="switchRightTab('costs')">Costs</button>
+            </div>
+
+            <!-- Overview tab content -->
+            <div id="tab-content-overview" class="tab-content active">
+                <!-- Online Agents Section -->
+                <section class="agents-section">
+                    <h2>Online Agents</h2>
+                    <div class="agents-table-container">
+                        <table class="agents-table">
+                            <thead>
+                                <tr>
+                                    <th>Agent Name</th>
+                                    <th>Status</th>
+                                    <th>Container</th>
+                                    <th>Interactive Mode</th>
+                                    <th>Link</th>
+                                </tr>
+                            </thead>
+                            <tbody id="agents-tbody">
+                                <tr>
+                                    <td colspan="5" class="loading">Loading agents...</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
-                </div>
-                <div class="log-container" id="log-container">
-                    <div class="log-entries" id="log-entries">
-                        <!-- Log entries will be inserted here -->
+                </section>
+
+                <!-- Logging Section -->
+                <section class="logging-section">
+                    <div class="section-header">
+                        <h2>Logging</h2>
+                        <div class="section-controls">
+                            <select id="log-file-dropdown" onchange="onLogFileChange()">
+                                <option value="live">Live Stream</option>
+                            </select>
+                            <button class="refresh-btn" onclick="switchToLiveLogs()" title="Switch to live stream">
+                                &#x21bb;
+                            </button>
+                        </div>
                     </div>
-                </div>
-            </section>
+                    <div class="log-container" id="log-container">
+                        <div class="log-entries" id="log-entries">
+                            <!-- Log entries will be inserted here -->
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Costs tab content -->
+            <div id="tab-content-costs" class="tab-content">
+                <section class="costs-section">
+                    <div class="section-header">
+                        <h2>Costs</h2>
+                        <div class="section-controls">
+                            <button class="refresh-btn" onclick="loadCostSummary()" title="Refresh cost summary">
+                                &#x21bb;
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="costs-grid">
+                        <div class="costs-card">
+                            <div class="costs-card-title">Project totals</div>
+                            <div id="cost-totals" class="costs-metrics">Loading…</div>
+                        </div>
+
+                        <div class="costs-card">
+                            <div class="costs-card-title">By agent</div>
+                            <div class="costs-table-container">
+                                <table class="costs-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Agent</th>
+                                            <th>Cost (USD)</th>
+                                            <th>Input tokens</th>
+                                            <th>Output tokens</th>
+                                            <th>Total tokens</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="cost-by-agent-tbody">
+                                        <tr><td colspan="5" class="loading">Loading…</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="costs-card">
+                            <div class="costs-card-title">Cost per day (stacked)</div>
+                            <div id="chart-legend-cost" class="chart-legend"></div>
+                            <div id="chart-cost" class="stacked-chart"></div>
+                        </div>
+
+                        <div class="costs-card">
+                            <div class="costs-card-title">Tokens per day (stacked)</div>
+                            <div id="chart-legend-tokens" class="chart-legend"></div>
+                            <div id="chart-tokens" class="stacked-chart"></div>
+                        </div>
+                    </div>
+                </section>
+            </div>
         </div>
     </div>
     
@@ -205,6 +267,48 @@ body {
     overflow: hidden;
     padding: 20px;
     min-width: 400px;
+}
+
+/* Tabs */
+.tab-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding: 10px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.tab-btn {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: background 0.2s;
+}
+
+.tab-btn:hover {
+    background: var(--accent-blue);
+}
+
+.tab-btn.active {
+    background: var(--accent-blue);
+    border-color: var(--accent-blue);
+}
+
+.tab-content {
+    display: none;
+    overflow: hidden;
+}
+
+.tab-content.active {
+    display: block;
 }
 
 /* Header */
@@ -520,6 +624,13 @@ body {
     white-space: pre-wrap;
 }
 
+.message-footer {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.9;
+}
+
 .expand-toggle {
     margin-top: 8px;
     display: inline-block;
@@ -599,6 +710,133 @@ body {
     flex: 1;
     min-height: 200px;
     overflow: hidden;
+}
+
+/* Costs */
+.costs-section {
+    padding: 15px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 200px;
+    overflow: hidden;
+}
+
+.costs-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.costs-card {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.costs-card-title {
+    font-size: 12px;
+    color: var(--accent-blue);
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.costs-metrics {
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.costs-table-container {
+    overflow-x: auto;
+}
+
+.costs-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.costs-table th,
+.costs-table td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+}
+
+.costs-table th {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+}
+
+.stacked-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.chart-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 90px;
+    gap: 10px;
+    align-items: center;
+}
+
+.chart-date {
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.chart-bar {
+    height: 14px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    display: flex;
+}
+
+.chart-seg {
+    height: 100%;
+}
+
+.chart-value {
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+.chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    border: 1px solid var(--border-color);
 }
 
 .log-container {
@@ -686,12 +924,35 @@ let pendingSystemMessage = null;
 // View state
 let logViewMode = 'live';  // 'live' or 'historical'
 let chatViewMode = 'live';  // 'live' or 'historical'
+let rightTab = 'overview';
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     loadProjects();
     initResizeHandle();
 });
+
+function switchRightTab(tabName) {
+    rightTab = tabName;
+    const btnOverview = document.getElementById('tab-btn-overview');
+    const btnCosts = document.getElementById('tab-btn-costs');
+    const contentOverview = document.getElementById('tab-content-overview');
+    const contentCosts = document.getElementById('tab-content-costs');
+
+    if (tabName === 'costs') {
+        btnOverview.classList.remove('active');
+        btnCosts.classList.add('active');
+        contentOverview.classList.remove('active');
+        contentCosts.classList.add('active');
+        // lazy load
+        loadCostSummary();
+    } else {
+        btnOverview.classList.add('active');
+        btnCosts.classList.remove('active');
+        contentOverview.classList.add('active');
+        contentCosts.classList.remove('active');
+    }
+}
 
 // Initialize resize handle for chat panel
 function initResizeHandle() {
@@ -788,6 +1049,8 @@ function loadProjectData() {
     loadChatFiles();
     connectLogStream();
     connectChatStream();
+    // Keep cost summary up to date for the selected project (even if tab not visible)
+    loadCostSummary();
 }
 
 // Load agents for current project
@@ -1315,11 +1578,166 @@ function createChatMessageElement(message) {
         tcIdDiv.textContent = `Tool call id: ${message.tool_call_id}`;
         contentDiv.appendChild(tcIdDiv);
     }
+
+    // Cost/tokens footer (for AI responses)
+    const usage = message.usage || message.usage_metadata || null;
+    const cost = (typeof message.cost === 'number') ? message.cost : null;
+    if (cost !== null || usage) {
+        const it = usage && (usage.input_tokens ?? usage.input ?? 0);
+        const ot = usage && (usage.output_tokens ?? usage.output ?? 0);
+        const tt = usage && (usage.total_tokens ?? usage.total ?? ((it || 0) + (ot || 0)));
+        const footer = document.createElement('div');
+        footer.className = 'message-footer';
+        const parts = [];
+        if (cost !== null) parts.push(`Cost: $${cost.toFixed(6)}`);
+        if (usage) parts.push(`Tokens: in ${it || 0}, out ${ot || 0} (${tt || 0})`);
+        footer.textContent = parts.join(' | ');
+        contentDiv.appendChild(footer);
+    }
     
     div.appendChild(avatar);
     div.appendChild(contentDiv);
     
     return div;
+}
+
+async function loadCostSummary() {
+    if (!currentProject) return;
+    try {
+        const resp = await fetch(`/api/projects/${currentProject}/llm/usage_summary`);
+        const data = await resp.json();
+        renderCostSummary(data);
+    } catch (e) {
+        const totalsEl = document.getElementById('cost-totals');
+        if (totalsEl) totalsEl.textContent = 'Failed to load cost summary.';
+    }
+}
+
+function _agentColor(agent) {
+    // deterministic hue hash
+    let h = 0;
+    for (let i = 0; i < (agent || '').length; i++) h = (h * 31 + agent.charCodeAt(i)) >>> 0;
+    const hue = h % 360;
+    return `hsl(${hue}, 70%, 55%)`;
+}
+
+function renderCostSummary(data) {
+    const totalsEl = document.getElementById('cost-totals');
+    const tbody = document.getElementById('cost-by-agent-tbody');
+    if (!totalsEl || !tbody) return;
+
+    const totals = (data && data.totals) ? data.totals : { cost: 0, tokens: { input: 0, output: 0, total: 0 } };
+    const tokens = totals.tokens || { input: 0, output: 0, total: 0 };
+    totalsEl.textContent = `Total cost: $${Number(totals.cost || 0).toFixed(6)}\n` +
+                           `Tokens: in ${tokens.input || 0}, out ${tokens.output || 0} (total ${tokens.total || 0})`;
+
+    const byAgent = (data && data.by_agent) ? data.by_agent : {};
+    const agents = Object.keys(byAgent).sort();
+
+    tbody.innerHTML = '';
+    if (agents.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="loading">No cost data</td></tr>';
+    } else {
+        for (const agent of agents) {
+            const row = document.createElement('tr');
+            const a = byAgent[agent] || {};
+            const t = a.tokens || {};
+            row.innerHTML = `
+                <td>${escapeHtml(agent)}</td>
+                <td>$${Number(a.cost || 0).toFixed(6)}</td>
+                <td>${t.input || 0}</td>
+                <td>${t.output || 0}</td>
+                <td>${t.total || 0}</td>
+            `;
+            tbody.appendChild(row);
+        }
+    }
+
+    const perDay = Array.isArray(data && data.per_day) ? data.per_day : [];
+    renderStackedChart('chart-cost', 'chart-legend-cost', perDay, 'cost');
+    renderStackedChart('chart-tokens', 'chart-legend-tokens', perDay, 'tokens');
+}
+
+function renderStackedChart(containerId, legendId, perDay, kind) {
+    const container = document.getElementById(containerId);
+    const legend = document.getElementById(legendId);
+    if (!container || !legend) return;
+
+    // Collect agents
+    const agentSet = new Set();
+    for (const d of perDay) {
+        const by = (d && d.by_agent) ? d.by_agent : {};
+        for (const a of Object.keys(by)) agentSet.add(a);
+    }
+    const agents = Array.from(agentSet).sort();
+
+    // Legend
+    legend.innerHTML = '';
+    for (const a of agents) {
+        const item = document.createElement('div');
+        item.className = 'legend-item';
+        const sw = document.createElement('div');
+        sw.className = 'legend-swatch';
+        sw.style.background = _agentColor(a);
+        item.appendChild(sw);
+        const label = document.createElement('span');
+        label.textContent = a;
+        item.appendChild(label);
+        legend.appendChild(item);
+    }
+
+    // Max for scaling
+    let maxTotal = 0;
+    const dayTotals = [];
+    for (const d of perDay) {
+        const by = (d && d.by_agent) ? d.by_agent : {};
+        let total = 0;
+        for (const a of Object.keys(by)) {
+            const rec = by[a] || {};
+            if (kind === 'cost') total += Number(rec.cost || 0);
+            else total += Number((rec.tokens || {}).total || 0);
+        }
+        dayTotals.push(total);
+        if (total > maxTotal) maxTotal = total;
+    }
+    if (maxTotal <= 0) maxTotal = 1;
+
+    container.innerHTML = '';
+    perDay.forEach((d, idx) => {
+        const date = d.date || 'unknown';
+        const by = (d && d.by_agent) ? d.by_agent : {};
+        const total = dayTotals[idx] || 0;
+
+        const row = document.createElement('div');
+        row.className = 'chart-row';
+
+        const dateEl = document.createElement('div');
+        dateEl.className = 'chart-date';
+        dateEl.textContent = date;
+
+        const bar = document.createElement('div');
+        bar.className = 'chart-bar';
+
+        for (const a of agents) {
+            const rec = by[a] || null;
+            const val = rec ? (kind === 'cost' ? Number(rec.cost || 0) : Number((rec.tokens || {}).total || 0)) : 0;
+            if (val <= 0) continue;
+            const seg = document.createElement('div');
+            seg.className = 'chart-seg';
+            seg.style.background = _agentColor(a);
+            seg.style.width = `${(val / maxTotal) * 100}%`;
+            bar.appendChild(seg);
+        }
+
+        const valueEl = document.createElement('div');
+        valueEl.className = 'chart-value';
+        valueEl.textContent = kind === 'cost' ? `$${total.toFixed(3)}` : `${Math.round(total)}`;
+
+        row.appendChild(dateEl);
+        row.appendChild(bar);
+        row.appendChild(valueEl);
+        container.appendChild(row);
+    });
 }
 
 // Parse message content - handles string or array format
