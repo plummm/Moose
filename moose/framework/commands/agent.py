@@ -97,7 +97,8 @@ class AgentCommand:
         
         # Set up default project for logging
         # All logs will go to projects/default/logs/
-        set_project("default", Path.cwd() / "projects")
+        projects_base_dir = Path(os.getenv("MOOSE_PROJECTS_DIR") or (Path.cwd() / "projects"))
+        set_project("default", projects_base_dir)
         
         # Reinitialize LLM logger to use project log directory
         reinit_llm_logger()
@@ -192,7 +193,7 @@ class AgentCommand:
             
             # Instantiate agent with debug flag
             logger.info(f"Loading agent class: {agent_class.__name__}")
-            agent = agent_class(config_path=agent_path / "agent_config.json", debug=debug)
+            agent = agent_class(project_id="default", config_path=agent_path / "agent_config.json", debug=debug)
             
             # Get port from HTTP server config, ports config, or default
             port = 8000

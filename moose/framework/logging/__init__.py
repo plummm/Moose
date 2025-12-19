@@ -825,24 +825,6 @@ def get_core_logger() -> MooseLogger:
     return _core_logger
 
 
-def update_core_logger(log_file: Optional[Path] = None, debug: Optional[bool] = None) -> MooseLogger:
-    """Update the core logger instance.
-    
-    Args:
-        log_file: Optional log file path to add
-        debug: Optional debug flag to update
-    """
-    core_logger = get_core_logger()
-    
-    if log_file:
-        core_logger.add_file_handler(log_file)
-    
-    if debug is not None:
-        core_logger.update_log_level(debug)
-    
-    return core_logger
-
-
 # =============================================================================
 # Project Logger (moose.project.<project_id>)
 # =============================================================================
@@ -875,33 +857,8 @@ def get_project_logger(project_id: Optional[str] = None, debug: Optional[bool] =
         propagate=True  # Propagate to core logger
     )
     
-    # Add file handler if project log dir is set (using unique file name)
-    if _project_log_dir:
-        moose_log_file = _get_unique_log_file(_project_log_dir, "moose.log")
-        project_logger.add_file_handler(moose_log_file)
-    
     _initialized_loggers[logger_name] = project_logger
     return project_logger
-
-
-def setup_project_logger(project_dir: Path, debug: bool = False, project_name: Optional[str] = None) -> MooseLogger:
-    """Setup logger with file output for a project.
-    
-    Args:
-        project_dir: Path to the project directory where log file will be created.
-        debug: If True, set log level to DEBUG. Otherwise, use INFO.
-        project_name: Name of the project. If not provided, will use the directory name.
-    
-    Returns:
-        Configured MooseLogger instance
-    """
-    if project_name is None:
-        project_name = project_dir.name
-    
-    # Set up project
-    set_project(project_name, project_dir.parent)
-    
-    return get_project_logger(project_name, debug)
 
 
 # =============================================================================
@@ -1103,47 +1060,3 @@ def disable_webui_logging():
     _webui_handler = None
 
 
-# =============================================================================
-# Backward Compatibility - get_logger function
-# =============================================================================
-
-def get_logger(
-    name: str,
-    log_file: Optional[Path] = None,
-    debug: bool = False,
-    label: str = "[core]"
-) -> MooseLogger:
-    """Get or create a Moose logger instance.
-    
-    This function provides backward compatibility while supporting the new
-    hierarchical logger system.
-    
-    Args:
-        name: Logger name
-        log_file: Optional path to log file
-        debug: If True, set log level to DEBUG
-        label: Label prefix for logs
-    
-    Returns:
-        MooseLogger instance
-    """
-    # Map old names to new hierarchical system
-    if name == "moose" or name == "core":
-        return get_core_logger()
-    elif name.startswith("project"):
-        # Extract project name from label if available
-        project_name = "default"
-        if label.startswith("[project:") and label.endswith("]"):
-            project_name = label[9:-1]
-        return get_project_logger(project_name, debug)
-    elif name.startswith("agent") or label.startswith("[agent:"):
-        # Extract agent name from label
-        agent_name = name
-        if label.startswith("[agent:") and label.endswith("]"):
-            agent_name = label[7:-1]
-        return get_agent_logger(agent_name, debug=debug)
-    else:
-        # Create a generic logger
-        logger = MooseLogger(name=name, log_file=log_file, debug=debug, label=label)
-        _initialized_loggers[name] = logger
-        return logger

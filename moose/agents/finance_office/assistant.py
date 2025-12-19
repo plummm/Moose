@@ -23,7 +23,43 @@ class FinanceOfficeAssistant:
 
     team_manager: Any  # ResearchLead
     logger: Any = None
+    # Entire custom_config from agent config; used for metadata like model names, thresholds, etc.
+    custom_config: Optional[Dict[str, Any]] = None
 
+    def _team_merge_model(self) -> str:
+        """
+        For news analysis, the final JSON is produced by the team_merge node.
+        If configured, report that model; otherwise fall back to team_manager.model.
+        """
+        cfg = self.custom_config if isinstance(self.custom_config, dict) else {}
+        merge_cfg = cfg.get("team_merge_llm_config") if isinstance(cfg.get("team_merge_llm_config"), dict) else {}
+        model = str(merge_cfg.get("model") or "").strip()
+        if model:
+            return model
+        return str(getattr(self.team_manager, "model", "") or "")
+
+    async def process_news(
+        self,
+        *,
+        url: str,
+        file_path: Path,
+        news_data_dir: Path,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Analyze a single news file and persist the result on success.
+
+        Concurrency is handled by the caller (finance_office worker pool).
+        """
+        result = await self.analyze_news(url=url, file_path=file_path, metadata=metadata)
+        if isinstance(result, dict) and "error" not in result:
+            try:
+                self.save_news_analysis_result(result, news_data_dir)
+            except Exception as save_error:
+                if self.logger:
+                    self.logger.warning(f"Failed to save analysis result: {save_error}")
+        return result
+        
     async def analyze_news(
         self,
         *,
@@ -44,7 +80,7 @@ class FinanceOfficeAssistant:
         """
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+                payload = json.load(f)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to read article from {file_path}: {e}")
@@ -55,21 +91,26 @@ class FinanceOfficeAssistant:
                 "analyzed_at": datetime.now().isoformat(),
             }
 
+        if not isinstance(payload, dict):
+            return {
+                "url": url,
+                "file_path": str(file_path),
+                "error": "Invalid article format: expected JSON object",
+                "analyzed_at": datetime.now().isoformat(),
+            }
+
+        # News scraper now persists JSON-only: {"summary": "...", "raw_article": "..."}.
+        content = str(payload.get("raw_article") or "").strip()
         if not content:
             return {
                 "url": url,
                 "file_path": str(file_path),
-                "error": "Empty content",
+                "error": "Empty content: missing raw_article",
                 "analyzed_at": datetime.now().isoformat(),
             }
-
-        # Use tool summary from the team manager if available.
-        # tools_instruction = ""
-        # if getattr(self.team_manager, "sec_data_tools", None):
-        #     try:
-        #         tools_instruction = self.team_manager._summarize_tools()  # intentionally uses team manager's tool view
-        #     except Exception:
-        #         tools_instruction = ""
+        
+        quality_score = int(payload.get("quality_score", 0))
+        summary = str(payload.get("summary") or "").strip()
 
         # Preserve existing news contract prompt (system + user)
         system_message = f"""You are a financial news analyst specializing in market-impact evaluation.
@@ -168,12 +209,44 @@ Content:
 
 Provide a comprehensive financial analysis in JSON format"""
 
-        instruction = "You are a financial news analyst specializing in market-impact evaluation. I want you to assess the importance of the given article and conduct an analysis afterwards. Avoid using maximum gaunarity unless you find this article very interesting."
+        instruction = "You are a financial news analyst specializing in market-impact evaluation. I want you to generate a comprehensive financial analysis of the given financial article."
 
+        # Append guidance to instruction
+        maximum_guidance = (
+            "This task requires detailed, high-granularity analysis. Gather as much verifiable information as you can, "
+            "cross-check key facts across sources, and surface second-order implications. Use tools aggressively where helpful, "
+            "and don’t stop at the first obvious answer. Prioritize primary sources (e.g., filings) when available, and clearly "
+            "separate facts vs. inference."
+        )
+        standard_guidance = (
+            "This task is standard priority. Apply a balanced analysis: focus on the highest-signal data first, then expand only "
+            "if early results suggest meaningful follow-ups. Keep tool usage disciplined—aim for no more than 2 tool-iterations total, "
+            "and in each iteration prefer 1–3 tool calls. Exceed these limits only if a result is genuinely interesting and additional "
+            "calls are likely to change the conclusion."
+        )
+        minimal_guidance = (
+            "This task is low priority. Keep analysis lightweight and cost-conscious. Use tools only if they are highly relevant and "
+            "likely to resolve a key uncertainty quickly. Aim for 0–1 tool-iterations (hard cap 2). If the task can be answered without "
+            "tools, do so and state assumptions/limits."
+        )
+        
+        if quality_score < 4 and quality_score > 0:
+            instruction += "\n\n" + minimal_guidance
+            # Use summary as context text to save tokens
+            content = summary
+            max_tool_iterations = 2
+        elif quality_score >= 4 and quality_score < 7:
+            instruction += "\n\n" + standard_guidance
+            max_tool_iterations = 4
+        elif quality_score >= 7 and quality_score <= 10:
+            instruction += "\n\n" + maximum_guidance
+            max_tool_iterations = 10
+            
         try:
             if self.logger:
-                self.logger.debug(f"Analyzing news: {url}")
+                self.logger.debug(f"Analyzing news: {url} [quality_score: {quality_score}]")
 
+            state = {"max_tool_iterations": max_tool_iterations}
             team_resp = await self.team_manager.run_task(
                 instruction=instruction,
                 context_text=content,
@@ -181,6 +254,7 @@ Provide a comprehensive financial analysis in JSON format"""
                 system_message=system_message,
                 user_message=user_message,
                 task_goal="news_analysis",
+                additional_states=state,
             )
 
             if not isinstance(team_resp, dict) or team_resp.get("status") != "success":
@@ -211,7 +285,8 @@ Provide a comprehensive financial analysis in JSON format"""
                 "confidence": analysis_data.get("confidence", 5),
                 "trading_insights": analysis_data.get("trading_insights", ""),
                 "analyzed_at": datetime.now().isoformat(),
-                "model": getattr(self.team_manager, "model", ""),
+                # For news analysis, final output comes from team_merge; report that model when available.
+                "model": self._team_merge_model(),
                 # additive fields (optional)
                 "routing": last_state.get("routing"),
                 "subagent_reports": last_state.get("subagent_reports"),

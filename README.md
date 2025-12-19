@@ -15,13 +15,13 @@ A modular agent framework built on LangGraph for creating customizable agent wor
 Set the `MOOSE_PROJECTS_DIR` environment variable to specify where your projects will be stored:
 
 ```bash
-export MOOSE_PROJECTS_DIR=/path/to/your/projects
+export MOOSE_PROJECTS_DIR=/path/to/your/projects/dir
 ```
 
 Or add it to your shell profile (`.bashrc`, `.zshrc`, etc.):
 
 ```bash
-echo 'export MOOSE_PROJECTS_DIR=/path/to/your/projects' >> ~/.zshrc
+echo 'export MOOSE_PROJECTS_DIR=/path/to/your/projects/dir' >> ~/.zshrc
 source ~/.zshrc
 ```
 

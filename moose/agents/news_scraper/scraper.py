@@ -4,6 +4,9 @@ import os
 import hashlib
 import json
 import time
+import random
+import threading
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -18,6 +21,266 @@ try:
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
+
+try:
+    # Playwright is optional and only used when enabled by config.
+    from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError  # type: ignore
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    PLAYWRIGHT_AVAILABLE = False
+    async_playwright = None  # type: ignore
+    PlaywrightTimeoutError = Exception  # type: ignore
+
+try:
+    from moose.framework.llm_core import LLMClient
+except Exception:
+    LLMClient = None  # type: ignore[assignment]
+
+
+class PlaywrightFetcher:
+    """
+    Minimal Playwright fetcher to render JS-heavy pages.
+
+    Designed as a fallback only (requests remains the primary fetch path).
+    """
+
+    def __init__(self, *, logger=None, max_concurrent_pages: int = 1, headless: bool = True):
+        if not PLAYWRIGHT_AVAILABLE:
+            raise ImportError("Playwright is not available. Install with: pip install playwright (and install browsers).")
+        self.logger = logger
+        self._headless = bool(headless)
+        self._sem = asyncio.Semaphore(max(1, int(max_concurrent_pages or 1)))
+        self._pw = None
+        self._browser = None
+        self._lock = asyncio.Lock()
+
+    async def _ensure_started(self):
+        # Lazy init because Playwright is heavy.
+        if self._browser is not None:
+            return
+        async with self._lock:
+            if self._browser is not None:
+                return
+            self._pw = await async_playwright().start()  # type: ignore[misc]
+            self._browser = await self._pw.chromium.launch(headless=self._headless)
+            if self.logger:
+                self.logger.info("Playwright Chromium launched (fallback fetcher ready)")
+
+    async def fetch_rendered_html(
+        self,
+        *,
+        url: str,
+        referer: Optional[str],
+        user_agent: Optional[str],
+        timeout_seconds: int,
+        wait_selector: Optional[str],
+    ) -> Optional[str]:
+        await self._ensure_started()
+
+        try:
+            await asyncio.wait_for(self._sem.acquire(), timeout=max(1, int(timeout_seconds or 30)))
+        except Exception:
+            return None
+        try:
+            context_kwargs: Dict[str, Any] = {}
+            if user_agent:
+                context_kwargs["user_agent"] = str(user_agent)
+            context = await self._browser.new_context(**context_kwargs)  # type: ignore[union-attr]
+            page = await context.new_page()
+
+            headers: Dict[str, str] = {}
+            if referer:
+                headers["Referer"] = str(referer)
+            if headers:
+                await page.set_extra_http_headers(headers)
+
+            # Load and optionally wait for article selector.
+            await page.goto(url, wait_until="domcontentloaded", timeout=int(timeout_seconds * 1000))
+            if wait_selector:
+                try:
+                    await page.wait_for_selector(str(wait_selector), timeout=int(timeout_seconds * 1000))
+                except PlaywrightTimeoutError:
+                    # Not fatal; still try to capture content after hydration time.
+                    pass
+
+            # Small jitter for hydration/lazy text.
+            await page.wait_for_timeout(int(random.uniform(500, 1500)))
+            html_content = await page.content()
+
+            try:
+                await page.close()
+            except Exception:
+                pass
+            try:
+                await context.close()
+            except Exception:
+                pass
+
+            return html_content
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Playwright fetch failed for {url}: {e}")
+            return None
+        finally:
+            try:
+                self._sem.release()
+            except Exception:
+                pass
+
+
+def _extract_json(text: str) -> Optional[dict]:
+    """
+    Best-effort JSON object extraction from an LLM response.
+
+    Many models occasionally wrap JSON with prose or code fences. This extracts the first
+    top-level `{...}` span and attempts `json.loads()` on it.
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+
+    # Strip common code fences
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", s).strip()
+        s = re.sub(r"\s*```$", "", s).strip()
+
+    start = s.find("{")
+    end = s.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(s[start : end + 1])
+    except Exception:
+        return None
+
+
+def _basic_whitespace_cleanup(text: str) -> str:
+    """
+    Lightweight cleanup used as a fallback when the LLM fails.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    # Normalize line endings
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    # Collapse runs of spaces/tabs
+    s = re.sub(r"[ \t]+", " ", s)
+    # Collapse excessive blank lines
+    s = re.sub(r"\n\s*\n\s*\n+", "\n\n", s)
+    return s.strip()
+
+
+class NewsScraperLLMClient:
+    """
+    LLM-powered normalizer for noisy extracted web page text.
+
+    Contract: return a dict with exactly:
+      - summary: short summary of the article
+      - raw_article: cleaned main article body (human-readable)
+    """
+
+    def __init__(self, *, llm_config: Dict[str, Any], logger=None):
+        self.logger = logger
+        self.llm_config = llm_config or {}
+
+        model = str(self.llm_config.get("model") or "").strip()
+        if not model:
+            raise ValueError("Missing required config: custom.llm_config.model")
+        temperature = float(self.llm_config.get("temperature", 0.3))
+        kwargs = self.llm_config.get("kwargs") if isinstance(self.llm_config.get("kwargs"), dict) else {}
+
+        if LLMClient is None:
+            raise ImportError("LLMClient is unavailable (moose.framework.llm_core). Ensure LLM dependencies are installed.")
+
+        self.client = LLMClient(
+            model=model,
+            temperature=temperature,
+            enable_multi_stage_reasoning=False,
+            tools=[],
+            **(kwargs or {}),
+        )
+
+    async def normalize_article(self, *, url: str, extracted_text: str) -> Dict[str, str]:
+        extracted_text = str(extracted_text or "")
+        cleaned_fallback = _basic_whitespace_cleanup(extracted_text)
+
+        if not cleaned_fallback:
+            return {"summary": "", "raw_article": ""}
+
+        system_message = """You are a text normalization engine for scraped web pages.
+
+Goal:
+- Identify and extract ONLY the main news article content from the provided extracted page text.
+- Discard unrelated text: navigation, menus, cookie banners, subscription prompts, ads, related links, author bio blocks, stock tickers lists, timestamps-only blocks, footers, disclaimers, and repeated boilerplate.
+- Remove stray symbols/ASCII art/markdown noise when it is not part of the actual article.
+- Normalize whitespace into a human-readable article with proper paragraphs.
+- Normalize the article text to markdown format.
+- Give a quality score for the article between 1 and 10, and a rationale of 2-3 sentences for the quality score.
+
+Strict output format:
+- Return STRICT JSON ONLY. No markdown, no code fences, no commentary.
+- Return exactly this object shape (no extra keys):
+  {"title", "...", "summary": "...", "raw_article": "...", "quality_score": <int 1-10>, "rationale": "..."}
+
+JSON rules:
+- Your output MUST be valid JSON parseable by json.loads().
+- Do not include literal newlines inside JSON strings. Use \\n to represent line breaks.
+- Use \\n\\n between paragraphs in raw_article.
+
+Quality score (1-10):
+- <1-3> (either one of the following reasons): 
+    - The source of the article is not trustworthy; 
+    - The article is not complete, or missing important information; 
+    - The article is bad written, confusing, or self-contradictory;
+    - The article has obvious flaws, errors, or inconsistencies;
+    - A pure stock prompting article with no interesting insights;
+- <4-6> (either one of the following reasons): 
+    - A standard news article with no obvious flaws, and no interesting insights either;
+    - A stock prompting article that somewhat interesting insights;
+    - A standard technical analysis article;
+- <7-10> (either one of the following reasons): 
+    - An insightful article with clear knowledge;
+    - An insightful technical analysis article with no obvious flaws;
+    - An article that discloses insider information;
+    - An article about a major event or news;
+
+Mandatory rules:
+- Do NOT change any wording of the article, keep the text as is for the article content. Do NOT summarize, add, or remove any article main text.
+- Keep the image href as is in the article main text
+- Title should be a short in one sentence.
+- Keep summary concise (3-6 sentences)."""
+
+        user_message = f"""URL: {url}
+
+EXTRACTED_TEXT:
+{extracted_text}
+
+Return STRICT JSON only."""
+
+        try:
+            resp = await self.client.send_message(message=user_message, system_message=system_message)
+            content = getattr(resp, "content", "") or ""
+            if not isinstance(content, str):
+                content = str(content)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"LLM normalization failed for {url}: {e}")
+            return {"title": "", "summary": "", "raw_article": cleaned_fallback, "quality_score": 0}
+
+        data = _extract_json(content)
+        if not isinstance(data, dict):
+            if self.logger:
+                self.logger.warning(f"LLM returned non-JSON for {url}; falling back to cleaned extraction")
+            return {"title": "", "summary": "", "raw_article": cleaned_fallback, "quality_score": 0}
+
+        title = str(data.get("title") or "").strip()
+        summary = str(data.get("summary") or "").strip()
+        quality_score = int(data.get("quality_score", 0))
+        raw_article = str(data.get("raw_article") or "").strip()
+        if not raw_article:
+            raw_article = cleaned_fallback
+
+        return {"title": title, "summary": summary, "raw_article": raw_article, "quality_score": quality_score}
 
 
 class NewsScraperCore:
@@ -56,6 +319,34 @@ class NewsScraperCore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.scraper_config = scraper_config
         self.logger = logger
+
+        # Stealth / anti-bot settings
+        self.stealth_mode = bool(scraper_config.get("stealth_mode", True))
+        self.header_profile = str(scraper_config.get("header_profile", "auto") or "auto").strip() or "auto"
+        try:
+            self.min_article_chars = int(scraper_config.get("min_article_chars", 1200))
+        except Exception:
+            self.min_article_chars = 1200
+        try:
+            self.block_max_retries = int(scraper_config.get("block_max_retries", 2))
+        except Exception:
+            self.block_max_retries = 2
+        try:
+            self.backoff_base_seconds = float(scraper_config.get("backoff_base_seconds", 2.0))
+        except Exception:
+            self.backoff_base_seconds = 2.0
+        try:
+            self.backoff_max_seconds = float(scraper_config.get("backoff_max_seconds", 120.0))
+        except Exception:
+            self.backoff_max_seconds = 120.0
+
+        self._last_feed_url: Optional[str] = None
+        self._domain_failures: Dict[str, int] = {}
+        self._domain_cooldown_until: Dict[str, float] = {}
+        # Playwright fallback (lazy init)
+        self._pw_fetcher: Optional[PlaywrightFetcher] = None
+        self._pw_fallback_attempted: int = 0
+        self._pw_fallback_succeeded: int = 0
         
         # Rate limiting
         self.rate_limit = scraper_config.get("rate_limit", 60)  # requests per minute
@@ -70,6 +361,11 @@ class NewsScraperCore:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
         })
+
+        # Pick a stable header profile for this run (avoid per-request randomization)
+        self._run_header_profile_name = self._choose_header_profile_name()
+        if self.logger:
+            self.logger.info(f"Stealth: enabled={self.stealth_mode}, header_profile={self._run_header_profile_name}")
         
         # HTML to text converter
         self.html_converter = html2text.HTML2Text()
@@ -136,6 +432,120 @@ class NewsScraperCore:
         
         # Record this request
         self.request_timestamps.append(time.time())
+
+    def _choose_header_profile_name(self) -> str:
+        pref = (self.header_profile or "auto").strip().lower()
+        if pref and pref != "auto":
+            return pref
+        return random.choice(["chrome_windows", "chrome_macos", "safari_macos"])
+
+    def _header_profiles(self) -> Dict[str, Dict[str, str]]:
+        # Coherent, conservative header sets. Keep Accept-Encoding compatible with requests defaults.
+        return {
+            "chrome_windows": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            },
+            "chrome_macos": {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            },
+            "safari_macos": {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+            },
+        }
+
+    def _build_request_headers(self, *, url: str, referer: Optional[str]) -> Dict[str, str]:
+        if not self.stealth_mode:
+            return {}
+        profiles = self._header_profiles()
+        base = dict(profiles.get(getattr(self, "_run_header_profile_name", "") or "", {}))
+
+        # Respect explicitly configured UA if provided
+        configured_ua = str(self.scraper_config.get("user_agent") or "").strip()
+        if configured_ua:
+            base["User-Agent"] = configured_ua
+
+        if referer:
+            base["Referer"] = referer
+        return base
+
+    def _is_likely_blocked(self, *, status_code: int, body_text: str) -> bool:
+        if status_code in (403, 429, 503):
+            return True
+        # Be conservative here: false positives are worse than misses.
+        # Example: many normal pages include "Roboto" (font), which would match "robot" substring.
+        s = body_text or ""
+        if not s:
+            return False
+
+        # High-confidence bot/interstitial signatures (status 200 pages can still be challenge pages).
+        patterns = [
+            # Challenge platforms (prefer URL/path signatures over generic words)
+            r"/cdn-cgi/challenge-platform",
+            r"\bcf-chl-\w+",
+            r"captcha-delivery\.com",
+            r"checking your browser before accessing",
+            r"just a moment\W*\.*",  # Cloudflare-style interstitial title/text
+            r"attention required!\s*\|\s*cloudflare",
+            # Common bot wall phrasing
+            r"\bverify you are human\b",
+            r"\bunusual traffic\b",
+            r"\bpardon the interruption\b",
+            r"\baccess denied\b",
+            r"\btemporarily unavailable\b",
+            r"\bplease enable javascript\b",
+            r"\benable javascript to continue\b",
+        ]
+
+        low = s.lower()
+        for pat in patterns:
+            try:
+                if re.search(pat, low, flags=re.IGNORECASE):
+                    return True
+            except Exception:
+                # If regex fails for any reason, ignore and continue
+                continue
+        return False
+
+    def _cooldown_before_request(self, domain: str):
+        until = float(self._domain_cooldown_until.get(domain, 0.0) or 0.0)
+        now = time.time()
+        if until > now:
+            sleep_s = min(until - now, float(self.backoff_max_seconds or 120.0))
+            if self.logger:
+                self.logger.warning(f"Cooldown active for {domain}: sleeping {sleep_s:.1f}s")
+            time.sleep(max(0.0, sleep_s))
+
+    def _register_block_and_backoff(self, domain: str) -> float:
+        fails = int(self._domain_failures.get(domain, 0) or 0) + 1
+        self._domain_failures[domain] = fails
+
+        base = max(0.5, float(self.backoff_base_seconds or 2.0))
+        cap = max(base, float(self.backoff_max_seconds or 120.0))
+        delay = min(cap, base * (2 ** min(fails, 10)))
+        jitter = random.uniform(0.0, min(1.0, delay * 0.1))
+        delay = min(cap, delay + jitter)
+
+        self._domain_cooldown_until[domain] = time.time() + delay
+        return delay
+
+    def _register_success(self, domain: str):
+        self._domain_failures[domain] = 0
+        self._domain_cooldown_until[domain] = 0.0
     
     def _apply_xpath(self, html_content: bytes, xpath: str) -> Optional[str]:
         """
@@ -198,9 +608,38 @@ class NewsScraperCore:
         self.logger.info(f"Scraping feed: {url}")
         
         try:
-            self._rate_limit_check()
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
+            self._last_feed_url = url
+            domain = urlparse(url).netloc
+
+            # Retry feed fetch if it looks blocked
+            max_retries = max(0, int(self.block_max_retries or 0))
+            response = None
+            for attempt in range(max_retries + 1):
+                self._cooldown_before_request(domain)
+                self._rate_limit_check()
+                headers = self._build_request_headers(url=url, referer=None)
+                response = self.session.get(url, timeout=30, headers=headers)
+
+                body_text = ""
+                try:
+                    body_text = response.text or ""
+                except Exception:
+                    body_text = ""
+
+                if self._is_likely_blocked(status_code=int(getattr(response, "status_code", 0) or 0), body_text=body_text):
+                    delay = self._register_block_and_backoff(domain)
+                    if self.logger:
+                        self.logger.warning(
+                            f"Blocked-like feed response for {url} (status={getattr(response,'status_code',None)}), "
+                            f"attempt={attempt+1}/{max_retries+1}, backoff={delay:.1f}s"
+                        )
+                    if attempt >= max_retries:
+                        return []
+                    continue
+
+                response.raise_for_status()
+                self._register_success(domain)
+                break
             
             html_content = response.content
             # Apply XPath if configured
@@ -248,7 +687,7 @@ class NewsScraperCore:
             self.logger.error(f"Error scraping feed {url}: {e}")
             return []
     
-    def extract_text_from_url(self, url: str) -> Optional[str]:
+    async def extract_text_from_url(self, url: str) -> Optional[str]:
         """
         Fetch URL and extract plain text content.
         
@@ -261,19 +700,75 @@ class NewsScraperCore:
         self.logger.debug(f"Extracting text from: {url}")
         
         try:
-            self._rate_limit_check()
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # Get HTML content
-            html_content = response.text
+            domain = urlparse(url).netloc
+            referer = self._last_feed_url
+
+            max_retries = max(0, int(self.block_max_retries or 0))
+            html_content = ""
+
+            pw_used = False
+            for attempt in range(max_retries + 1):
+                # Do blocking requests work in a worker thread to avoid blocking the event loop.
+                status_code, body_text, req_err = await asyncio.to_thread(self._fetch_url_text_sync, url, referer)
+
+                blocked_like = self._is_likely_blocked(
+                    status_code=int(status_code or 0),
+                    body_text=body_text,
+                )
+                if blocked_like:
+                    # Optional Playwright fallback on block-like response
+                    pw_cfg = self._get_playwright_cfg()
+                    if bool(pw_cfg.get("playwright_enabled")) and bool(pw_cfg.get("playwright_fallback_on_block", True)):
+                        html_pw = await self._try_playwright_fetch(url=url, referer=referer)
+                        if html_pw:
+                            pw_used = True
+                            self._register_success(domain)
+                            html_content = html_pw
+                            break
+
+                    delay = self._register_block_and_backoff(domain)
+                    if self.logger:
+                        self.logger.warning(
+                            f"Blocked-like article response for {url} (status={status_code}), "
+                            f"attempt={attempt+1}/{max_retries+1}, backoff={delay:.1f}s"
+                        )
+                    if attempt >= max_retries:
+                        return None
+                    continue
+
+                if req_err:
+                    # Not a block but request failed
+                    raise requests.exceptions.RequestException(req_err)
+                self._register_success(domain)
+                html_content = body_text
+                break
             
             # Convert HTML to text
             text_content = self.html_converter.handle(html_content)
-            
-            # Clean up whitespace
             text_content = re.sub(r'\n\s*\n\s*\n+', '\n\n', text_content)  # Multiple newlines
             text_content = text_content.strip()
+
+            # Content sanity: very short text often indicates an interstitial / JS wall
+            if self.stealth_mode and self.min_article_chars and len(text_content) < int(self.min_article_chars):
+                if pw_used:
+                    self.logger.warning(f"Playwright fallback used but content is still too short for {url}")
+                    return None
+                pw_cfg = self._get_playwright_cfg()
+                if bool(pw_cfg.get("playwright_enabled")) and bool(pw_cfg.get("playwright_fallback_on_short_content", True)):
+                    html_pw = await self._try_playwright_fetch(url=url, referer=referer)
+                    if html_pw:
+                        text2 = self.html_converter.handle(html_pw)
+                        text2 = re.sub(r'\n\s*\n\s*\n+', '\n\n', text2).strip()
+                        if text2 and len(text2) >= int(self.min_article_chars):
+                            return text2
+
+                delay = self._register_block_and_backoff(domain)
+                if self.logger:
+                    self.logger.warning(
+                        f"Suspiciously short article text for {url} (len={len(text_content)} < {int(self.min_article_chars)}); "
+                        f"cooldown={delay:.1f}s"
+                    )
+                return None
             
             if not text_content:
                 self.logger.warning(f"No text content extracted from {url}")
@@ -288,14 +783,86 @@ class NewsScraperCore:
         except Exception as e:
             self.logger.error(f"Error extracting text from {url}: {e}")
             return None
+
+    def _get_playwright_cfg(self) -> Dict[str, Any]:
+        scfg = self.scraper_config or {}
+        return scfg.get("playwright") if isinstance(scfg.get("playwright"), dict) else {}
+
+    async def _try_playwright_fetch(self, *, url: str, referer: Optional[str]) -> Optional[str]:
+        """
+        Best-effort Playwright fallback fetch. Returns rendered HTML or None.
+        """
+        pw_cfg = self._get_playwright_cfg()
+        if not bool(pw_cfg.get("playwright_enabled")):
+            return None
+
+        self._pw_fallback_attempted += 1
+        try:
+            if self._pw_fetcher is None:
+                self._pw_fetcher = PlaywrightFetcher(
+                    logger=self.logger,
+                    max_concurrent_pages=int(pw_cfg.get("playwright_max_concurrent_pages", 1) or 1),
+                    headless=bool(pw_cfg.get("playwright_headless", True)),
+                )
+
+            ua = str(pw_cfg.get("playwright_user_agent") or "").strip()
+            if not ua:
+                ua = str(self.scraper_config.get("user_agent") or "").strip()
+            ua = ua or None
+
+            html_pw = await self._pw_fetcher.fetch_rendered_html(
+                url=url,
+                referer=referer,
+                user_agent=ua,
+                timeout_seconds=int(pw_cfg.get("playwright_timeout_seconds", 35) or 35),
+                wait_selector=str(pw_cfg.get("playwright_wait_selector") or "").strip() or None,
+            )
+            if html_pw:
+                self._pw_fallback_succeeded += 1
+            return html_pw
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Playwright fallback error for {url}: {e}")
+            return None
+
+    def _fetch_url_text_sync(self, url: str, referer: Optional[str]) -> tuple[int, str, Optional[str]]:
+        """
+        Blocking requests fetch used by async extract_text_from_url via asyncio.to_thread.
+        Returns: (status_code, body_text, error_message_if_any)
+        """
+        domain = urlparse(url).netloc
+        self._cooldown_before_request(domain)
+        self._rate_limit_check()
+        headers = self._build_request_headers(url=url, referer=referer)
+        try:
+            resp = self.session.get(url, timeout=30, headers=headers)
+            body_text = ""
+            try:
+                body_text = resp.text or ""
+            except Exception:
+                body_text = ""
+            try:
+                resp.raise_for_status()
+            except Exception as e:
+                return int(getattr(resp, "status_code", 0) or 0), body_text, str(e)
+            return int(getattr(resp, "status_code", 0) or 0), body_text, None
+        except Exception as e:
+            return 0, "", str(e)
     
-    def _get_file_path_for_url(self, url: str, article_date: Optional[datetime] = None) -> Path:
+    def _get_file_path_for_url(
+        self,
+        url: str,
+        article_date: Optional[datetime] = None,
+        *,
+        extension: str = ".json",
+    ) -> Path:
         """
         Get the expected file path for a URL (for deduplication check).
         
         Args:
             url: Article URL
             article_date: Article date (defaults to current date)
+            extension: File extension to use (default: .json)
             
         Returns:
             Expected file path
@@ -305,8 +872,12 @@ class NewsScraperCore:
         if article_date is None:
             article_date = datetime.now()
         
+        ext = str(extension or "").strip() or ".json"
+        if not ext.startswith("."):
+            ext = "." + ext
+
         date_folder = self.data_dir / str(article_date.year) / f"{article_date.month:02d}" / f"{article_date.day:02d}"
-        return date_folder / f"{url_hash}.txt"
+        return date_folder / f"{url_hash}{ext}"
     
     def is_url_scraped(self, url: str) -> bool:
         """
@@ -333,7 +904,7 @@ class NewsScraperCore:
                 self._save_index()
         
         # Fallback to file system check
-        file_path = self._get_file_path_for_url(url)
+        file_path = self._get_file_path_for_url(url, extension=".json")
         if file_path.exists():
             # Add to index for future lookups
             self.index[url_hash] = {
@@ -344,48 +915,48 @@ class NewsScraperCore:
             return True
         
         return False
-    
-    def save_article(
+
+    def save_article_json(
         self,
         url: str,
-        text_content: str,
-        article_date: Optional[datetime] = None
+        article_json: Dict[str, Any],
+        article_date: Optional[datetime] = None,
     ) -> Optional[Path]:
         """
-        Save article text to organized folder structure and update index.
-        
-        Args:
-            url: Article URL
-            text_content: Extracted text content
-            article_date: Article date (defaults to current date)
-            
-        Returns:
-            Path to saved file or None if failed
+        Save normalized article as JSON-only and update index.
+
+        The persisted JSON will contain exactly:
+          - title
+          - summary
+          - raw_article
         """
-        if not text_content:
+        if not isinstance(article_json, dict):
+            return None
+
+        if not article_json["title"] and not article_json["summary"] and not article_json["raw_article"]:
             return None
         
-        file_path = self._get_file_path_for_url(url, article_date)
+        article_json["url"] = url
+
+        file_path = self._get_file_path_for_url(url, article_date, extension=".json")
         date_folder = file_path.parent
         date_folder.mkdir(parents=True, exist_ok=True)
-        
+
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(text_content)
-            
-            # Update index
-            url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(article_json, f, ensure_ascii=False, indent=2)
+
+            url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
             self.index[url_hash] = {
                 "file_path": str(file_path),
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": datetime.now().isoformat(),
             }
             self._save_index()
-            
-            self.logger.info(f"Saved article to: {file_path}")
+
+            self.logger.info(f"Saved article JSON to: {file_path}")
             return file_path
-            
         except Exception as e:
-            self.logger.error(f"Error saving article to {file_path}: {e}")
+            self.logger.error(f"Error saving article JSON to {file_path}: {e}")
             return None
     
     def save_index(self):
@@ -419,12 +990,33 @@ class NewsScraperService:
             "start_url": "https://finviz.com/news.ashx",
             "rate_limit": 60,
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            # Background monitor: periodically re-check start_url and scrape any new URLs
+            "auto_monitor": False,
+            "check_interval_hours": 2,
+            # Maximum number of *new* article URLs to process per scrape cycle (0 = unlimited)
+            "max_articles_per_cycle": 0,
             "max_retrieval_depth": 1,
+            # Playwright fallback (disabled by default)
+            "playwright": {
+                "playwright_enabled": False,
+                "playwright_fallback_on_block": True,
+                "playwright_fallback_on_short_content": True,
+                "playwright_timeout_seconds": 35,
+                "playwright_wait_selector": "article",
+                "playwright_user_agent": "",
+                "playwright_headless": True,
+                "playwright_max_concurrent_pages": 1,
+                "playwright_persist_storage": False,
+            },
             "xpath": None
         }
         
         # Merge with defaults
         merged_config = {**defaults, **scraper_config}
+        # Deep-merge playwright block
+        pw_default = defaults.get("playwright") if isinstance(defaults.get("playwright"), dict) else {}
+        pw_override = scraper_config.get("playwright") if isinstance(scraper_config.get("playwright"), dict) else {}
+        merged_config["playwright"] = {**(pw_default or {}), **(pw_override or {})}
         
         return merged_config
     
@@ -432,6 +1024,7 @@ class NewsScraperService:
         self,
         scraper_core: NewsScraperCore,
         analyzer_endpoint: str = "http://localhost:3501/get_financial_news",
+        llm_config: Optional[Dict[str, Any]] = None,
         logger=None
     ):
         """
@@ -445,6 +1038,32 @@ class NewsScraperService:
         self.scraper_core = scraper_core
         self.analyzer_endpoint = analyzer_endpoint
         self.logger = logger
+
+        if not isinstance(llm_config, dict) or not str(llm_config.get("model") or "").strip():
+            raise ValueError("Missing required config: custom.llm_config.model must be set for news_scraper normalization")
+        self.normalizer = NewsScraperLLMClient(llm_config=llm_config, logger=logger)
+
+        # Prevent concurrent runs between manual /start and background monitor.
+        self._scrape_lock = threading.Lock()
+
+        # Analyzer posting queue (async workers; created when an event loop is available)
+        self._analyzer_queue: Optional[asyncio.Queue] = None
+        self._analyzer_worker_tasks: List[asyncio.Task] = []
+        self._analyzer_workers_started = False
+        self.analyzer_enqueued = 0
+        self.analyzer_sent_ok = 0
+        self.analyzer_sent_failed = 0
+
+        # Background monitor configuration
+        scfg = self.scraper_core.scraper_config or {}
+        self._monitor_enabled = bool(scfg.get("auto_monitor", False))
+        try:
+            self._check_interval_hours = float(scfg.get("check_interval_hours", 2) or 2)
+        except Exception:
+            self._check_interval_hours = 2.0
+        self._check_interval_seconds = max(60.0, self._check_interval_hours * 3600.0)
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
         
         # Import requests for HTTP calls
         try:
@@ -486,8 +1105,10 @@ class NewsScraperService:
                     "status": "error",
                     "error": "No start_url provided or configured"
                 }
-            
-            return await self._scrape_direct(start_url, max_depth)
+
+            await self._ensure_analyzer_workers_started()
+            with self._scrape_lock:
+                return await self._scrape_direct(start_url, max_depth)
             
         except Exception as e:
             if self.logger:
@@ -496,8 +1117,147 @@ class NewsScraperService:
                 "status": "error",
                 "error": str(e)
             }
+
+    async def _ensure_analyzer_workers_started(self):
+        """
+        Create analyzer queue and start background worker tasks on the current event loop.
+        """
+        if self._analyzer_workers_started:
+            return
+        loop = asyncio.get_running_loop()
+
+        scfg = self.scraper_core.scraper_config or {}
+        try:
+            maxsize = int(scfg.get("analyzer_queue_maxsize", 500) or 500)
+        except Exception:
+            maxsize = 500
+        maxsize = max(1, maxsize)
+
+        try:
+            worker_count = int(scfg.get("analyzer_worker_count", 2) or 2)
+        except Exception:
+            worker_count = 2
+        worker_count = max(1, min(10, worker_count))
+
+        self._analyzer_queue = asyncio.Queue(maxsize=maxsize)
+        self._analyzer_worker_tasks = [loop.create_task(self._analyzer_worker_loop(i)) for i in range(worker_count)]
+        self._analyzer_workers_started = True
+
+        if self.logger:
+            self.logger.info(f"Analyzer queue started: workers={worker_count}, maxsize={maxsize}")
+
+    async def _enqueue_analyzer_send(self, *, file_path: str, url: str, quality_score: int):
+        """
+        Enqueue a {file_path, url} item for background analyzer posting.
+        """
+        await self._ensure_analyzer_workers_started()
+        assert self._analyzer_queue is not None
+        await self._analyzer_queue.put({"file_path": str(file_path), "url": str(url), "quality_score": quality_score})
+        self.analyzer_enqueued += 1
+
+    async def _analyzer_worker_loop(self, worker_id: int):
+        """
+        Background worker: POST saved file path to analyzer without blocking scrape loop.
+        """
+        scfg = self.scraper_core.scraper_config or {}
+        try:
+            retry_count = int(scfg.get("analyzer_send_retry_count", 2) or 2)
+        except Exception:
+            retry_count = 2
+        retry_count = max(0, min(10, retry_count))
+
+        try:
+            backoff = float(scfg.get("analyzer_send_retry_backoff_seconds", 2.0) or 2.0)
+        except Exception:
+            backoff = 2.0
+        backoff = max(0.0, min(60.0, backoff))
+
+        assert self._analyzer_queue is not None
+        q = self._analyzer_queue
+
+        while True:
+            item = await q.get()
+            try:
+                file_path = str((item or {}).get("file_path") or "")
+                url = str((item or {}).get("url") or "")
+                quality_score = int((item or {}).get("quality_score") or 0)
+                ok = False
+                for attempt in range(retry_count + 1):
+                    ok = await asyncio.to_thread(self._send_to_analyzer, file_path, url, quality_score)
+                    if ok:
+                        break
+                    if backoff > 0 and attempt < retry_count:
+                        await asyncio.sleep(backoff * (2 ** attempt))
+
+                if ok:
+                    self.analyzer_sent_ok += 1
+                else:
+                    self.analyzer_sent_failed += 1
+            except Exception as e:
+                self.analyzer_sent_failed += 1
+                if self.logger:
+                    self.logger.warning(f"Analyzer worker {worker_id} failed to send: {e}")
+            finally:
+                try:
+                    q.task_done()
+                except Exception:
+                    pass
+
+    def start_monitor(self):
+        """
+        Start background monitoring loop if enabled.
+
+        When enabled, the agent will re-check start_url every `check_interval_hours` and
+        scrape any new URLs, then hibernate (sleep) again.
+        """
+        if not self._monitor_enabled:
+            return
+        if self._monitor_thread is not None and self._monitor_thread.is_alive():
+            return
+
+        self._monitor_stop.clear()
+
+        t = threading.Thread(target=self._monitor_loop, name="news_scraper_monitor", daemon=True)
+        self._monitor_thread = t
+        t.start()
+        if self.logger:
+            self.logger.info(f"Auto-monitor enabled: interval_hours={self._check_interval_hours}")
+
+    def stop_monitor(self):
+        self._monitor_stop.set()
+
+    def _monitor_loop(self):
+        """
+        Background loop: every interval, run a scrape cycle to pick up any new URLs.
+        """
+        while not self._monitor_stop.is_set():
+            # Sleep first to avoid immediate duplicate scrape on container start unless user triggers /start.
+            if self._monitor_stop.wait(self._check_interval_seconds):
+                break
+
+            scfg = self.scraper_core.scraper_config or {}
+            start_url = str(scfg.get("start_url") or "").strip()
+            max_depth = int(scfg.get("max_retrieval_depth", 1) or 1)
+            if not start_url:
+                continue
+
+            # Avoid overlapping with manual scrape; skip this cycle if busy.
+            if not self._scrape_lock.acquire(blocking=False):
+                continue
+            try:
+                try:
+                    # Run one async scrape cycle in this thread
+                    asyncio.run(self._scrape_direct(start_url, max_depth))
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"Auto-monitor scrape failed: {e}")
+            finally:
+                try:
+                    self._scrape_lock.release()
+                except Exception:
+                    pass
     
-    def _send_to_analyzer(self, file_path: str, url: str) -> bool:
+    def _send_to_analyzer(self, file_path: str, url: str, quality_score: int) -> bool:
         """
         Send file path to finance_office agent.
         
@@ -519,7 +1279,7 @@ class NewsScraperService:
             payload = {
                 "file_path": str(file_path),
                 "url": url,
-                "metadata": {}
+                "metadata": {"quality_score": quality_score}
             }
             
             response = requests.post(
@@ -548,6 +1308,10 @@ class NewsScraperService:
         """Scrape articles and send file paths to analyzer."""
         if self.logger:
             self.logger.info(f"Starting scrape: {start_url}, max_depth: {max_depth}")
+
+        # Snapshot Playwright counters at cycle start (per-cycle metrics)
+        pw_attempted_0 = int(getattr(self.scraper_core, "_pw_fallback_attempted", 0) or 0)
+        pw_succeeded_0 = int(getattr(self.scraper_core, "_pw_fallback_succeeded", 0) or 0)
         
         # Scrape feed to get article URLs
         article_urls = self.scraper_core.scrape_feed(start_url)
@@ -568,28 +1332,47 @@ class NewsScraperService:
         articles_failed = 0
         sent_to_analyzer = 0
         saved_files = []
+        analyzer_enqueued_this_cycle = 0
+
+        # Cap per cycle: number of *new* article URLs processed (0 = unlimited)
+        max_per_cycle = 0
+        try:
+            max_per_cycle = int(self.scraper_core.scraper_config.get("max_articles_per_cycle", 0) or 0)
+        except Exception:
+            max_per_cycle = 0
+        max_per_cycle = max(0, max_per_cycle)
+        processed_new = 0
         
         for url in article_urls:
+            if max_per_cycle > 0 and processed_new >= max_per_cycle:
+                if self.logger:
+                    self.logger.info(f"Reached max_articles_per_cycle={max_per_cycle}; stopping this cycle early")
+                break
+
             # Check if already scraped (deduplication)
             if self.scraper_core.is_url_scraped(url):
                 if self.logger:
                     self.logger.debug(f"Skipping already scraped: {url}")
                 articles_skipped += 1
                 continue
+
+            processed_new += 1
             
             # Extract text
-            text_content = self.scraper_core.extract_text_from_url(url)
-            
-            if text_content:
-                # Save article
-                saved_path = self.scraper_core.save_article(url, text_content)
+            raw_text = await self.scraper_core.extract_text_from_url(url)
+
+            if raw_text:
+                # Normalize using LLM and save JSON-only
+                normalized = await self.normalizer.normalize_article(url=url, extracted_text=raw_text)
+                saved_path = self.scraper_core.save_article_json(url, normalized)
+                quality_score = normalized.get("quality_score", 0)
                 if saved_path:
                     articles_scraped += 1
                     saved_files.append(str(saved_path))
                     
-                    # Send to analyzer
-                    if self._send_to_analyzer(saved_path, url):
-                        sent_to_analyzer += 1
+                    # Enqueue analyzer send (handled by background workers)
+                    await self._enqueue_analyzer_send(file_path=str(saved_path), url=url, quality_score=quality_score)
+                    analyzer_enqueued_this_cycle += 1
                 else:
                     articles_failed += 1
             else:
@@ -601,17 +1384,23 @@ class NewsScraperService:
         result = {
             "status": "success",
             "articles_found": len(article_urls),
+            "max_articles_per_cycle": max_per_cycle,
+            "articles_processed_this_cycle": processed_new,
             "articles_scraped": articles_scraped,
             "articles_skipped": articles_skipped,
             "articles_failed": articles_failed,
             "sent_to_analyzer": sent_to_analyzer,
+            "analyzer_enqueued_this_cycle": analyzer_enqueued_this_cycle,
+            "analyzer_queue_depth": int(self._analyzer_queue.qsize()) if self._analyzer_queue is not None else 0,
+            "playwright_fallback_attempted": int(getattr(self.scraper_core, "_pw_fallback_attempted", 0) or 0) - pw_attempted_0,
+            "playwright_fallback_succeeded": int(getattr(self.scraper_core, "_pw_fallback_succeeded", 0) or 0) - pw_succeeded_0,
         }
         
         if self.logger:
             self.logger.info(
                 f"Scraping complete: {articles_scraped} scraped, "
                 f"{articles_skipped} skipped, {articles_failed} failed, "
-                f"{sent_to_analyzer} sent to analyzer"
+                f"{analyzer_enqueued_this_cycle} enqueued to analyzer"
             )
         
         return result

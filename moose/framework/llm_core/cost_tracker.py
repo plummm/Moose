@@ -6,10 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 try:
-    from moose.framework.logging import get_core_logger, get_project_log_dir
+    from moose.framework.logging import get_core_logger, get_project_log_dir, get_project_id
 except ImportError:
     # Fallback for development mode
-    from framework.logging import get_core_logger, get_project_log_dir
+    from framework.logging import get_core_logger, get_project_log_dir, get_project_id
 
 
 class CostTracker:
@@ -35,7 +35,15 @@ class CostTracker:
             if project_log_dir:
                 log_dir = project_log_dir
             else:
-                log_dir = Path.cwd()
+                # Logging may not be initialized yet (set_project not called).
+                # Prefer writing cost logs under projects/<project_id>/logs.
+                project_id = get_project_id() or os.environ.get("MOOSE_PROJECT_ID") or "default"
+                projects_base = os.environ.get("MOOSE_PROJECTS_DIR")
+                if projects_base:
+                    projects_base_dir = Path(projects_base)
+                else:
+                    projects_base_dir = Path.cwd() / "projects"
+                log_dir = projects_base_dir / str(project_id) / "logs"
         
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -43,6 +51,25 @@ class CostTracker:
         # Cost log file (daily rotation)
         today = datetime.now().strftime("%Y-%m-%d")
         self.log_file = self.log_dir / f"llm_costs_{today}.log"
+
+        # If a root-level cost file was created before project logging was set up,
+        # move/merge it into the project log directory.
+        try:
+            legacy_path = Path.cwd() / f"llm_costs_{today}.log"
+            if legacy_path.exists() and legacy_path.resolve() != self.log_file.resolve():
+                if self.log_file.exists():
+                    # Merge: append legacy content then remove legacy file
+                    with open(legacy_path, "r", encoding="utf-8") as src, open(self.log_file, "a", encoding="utf-8") as dst:
+                        dst.write(src.read())
+                    legacy_path.unlink(missing_ok=True)
+                else:
+                    legacy_path.replace(self.log_file)
+        except Exception as e:
+            # Non-fatal; proceed with current log_file
+            try:
+                self.logger.debug(f"Failed to move legacy cost log into project directory: {e}")
+            except Exception:
+                pass
         
         self.logger.debug(f"Cost tracker initialized: {self.log_file}")
     

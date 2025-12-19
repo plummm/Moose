@@ -4,10 +4,10 @@ import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 try:
-    from moose.framework.logging import get_core_logger
+    from moose.framework.logging import get_core_logger, get_project_id
 except ImportError:
     # Fallback for development mode
-    from framework.logging import get_core_logger
+    from framework.logging import get_core_logger, get_project_id
 
 try:
     import yaml
@@ -44,20 +44,37 @@ class ModelConfig:
     def _find_config(self) -> Path:
         """Find config.yaml file."""
         # Get config file name from environment variable, default to config.yaml
-        config_name = os.getenv("MOOSE_LLM_CONFIG_NAME", "config.yaml")
+        config_name = os.getenv("MOOSE_LLM_CONFIG_NAME", "model_config.yaml")
         
         # Check if explicit path is provided
         env_path = os.getenv("MOOSE_LLM_CONFIG_PATH")
         if env_path:
             return Path(env_path)
-        
-        # Check current directory
-        current = Path.cwd() / config_name
-        if current.exists():
-            return current
-        
-        # Return default location
-        return Path.cwd() / config_name
+
+        candidates: List[Path] = []
+
+        # 1) If project is set, check project directory first
+        project_id = get_project_id() or os.getenv("MOOSE_PROJECT_ID") or "default"
+        projects_base_dir = Path(os.getenv("MOOSE_PROJECTS_DIR") or (Path.cwd() / "projects"))
+        project_dir = projects_base_dir / str(project_id)
+        candidates.append(project_dir / config_name)
+
+        # 2) Also check common project-root patterns (for backward compatibility)
+        candidates.append(project_dir / "config.yaml")
+        candidates.append(project_dir / "model_config.yaml")
+
+        # 3) Current working directory fallback
+        candidates.append(Path.cwd() / config_name)
+
+        for p in candidates:
+            try:
+                if p.exists():
+                    return p
+            except Exception:
+                continue
+
+        # Default: return the project candidate path (best guess) so logs mention the intended location
+        return candidates[0]
     
     def load(self) -> Dict[str, Any]:
         """Load configuration from YAML file."""

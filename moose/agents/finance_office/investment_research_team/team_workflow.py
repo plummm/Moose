@@ -14,6 +14,16 @@ except Exception:  # pragma: no cover
     StateGraph = None
     END = None
 
+try:
+    from moose.framework.llm_core import LLMClient
+    from investment_research_team.router import load_playbooks, route_request
+    from investment_research_team.specialists import build_specialist_llm_clients, run_specialist
+except ImportError:  
+    from moose.framework.llm_core import LLMClient
+    from moose.agents.finance_office.investment_research_team.router import load_playbooks, route_request
+    from moose.agents.finance_office.investment_research_team.specialists import build_specialist_llm_clients, run_specialist
+
+
 
 def _extract_json(text: str) -> Optional[dict]:
     s = (text or "").strip()
@@ -39,10 +49,6 @@ def create_team_workflow(*, analyzer: Any, logger: Any) -> Any:
     """
     if not LANGGRAPH_AVAILABLE:
         raise ImportError("LangGraph is required. Install with: pip install langgraph")
-
-    from moose.framework.llm_core import LLMClient
-    from moose.agents.finance_office.investment_research_team.router import load_playbooks, route_request
-    from moose.agents.finance_office.investment_research_team.specialists import build_specialist_llm_clients, run_specialist
 
     playbooks_path = Path(__file__).resolve().parent / "playbooks.yaml"
     playbooks = load_playbooks(playbooks_path)
@@ -112,16 +118,6 @@ def create_team_workflow(*, analyzer: Any, logger: Any) -> Any:
             metadata=metadata,
         )
 
-        pb = playbooks.get("playbooks", {}).get(decision.playbook, {}) if isinstance(playbooks.get("playbooks"), dict) else {}
-        max_iters: Dict[str, int] = {}
-        if isinstance(pb, dict):
-            for ph in pb.get("phases", []) or []:
-                if isinstance(ph, dict) and ph.get("agent"):
-                    try:
-                        max_iters[str(ph["agent"])] = int(ph.get("max_tool_calls") or 6)
-                    except Exception:
-                        max_iters[str(ph["agent"])] = 6
-
         # Selected agents are independent; we will run them concurrently.
         selected_agents = [str(x).strip() for x in (decision.selected_agents or []) if str(x).strip()]
 
@@ -132,14 +128,26 @@ def create_team_workflow(*, analyzer: Any, logger: Any) -> Any:
             "selected_agents": selected_agents,
         }
 
+        # Build specialist clients once (no granularity/budget node)
+        specialist_clients: Dict[str, Any] = {}
+        tools_provider = getattr(analyzer, "sec_data_tools", None)
+        if tools_provider is not None:
+            sp_cfg = _node_cfg("run_selected_specialists_parallel")
+            specialist_clients = build_specialist_llm_clients(
+                base_model=str(sp_cfg.get("model") or "").strip(),
+                base_temperature=float(sp_cfg.get("temperature", 0.7)),
+                llm_extra_params=sp_cfg.get("kwargs") or {},
+                tools_provider=tools_provider,
+                max_tool_iterations=state.get("max_tool_iterations", 20),
+                agent_name=main_agent_name,
+            )
+
         return {
             **state,
             "routing": routing,
             "selected_agents": selected_agents,
             "agent_tasks": decision.agent_tasks,
-            # built later by granularity_selector so it can enforce budgets
-            "specialist_clients": {},
-            "max_tool_iterations_by_agent": max_iters,
+            "specialist_clients": specialist_clients,
             "subagent_reports": {},
             "evidence": [],
             # total cost/token usage (debugging; UI uses llm.log as source of truth)
@@ -234,151 +242,6 @@ Return STRICT JSON only:
             last_err = "Prompt engineer returned empty system_message or user_message."
 
         raise RuntimeError(f"prompt_engineer failed after 3 attempts: {last_err or 'unknown error'}")
-
-    async def granularity_selector(state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Decide granularity (minimal/standard/maximum) using a tool-less LLM (semantic override included),
-        rewrite instruction with guidance, and rebuild specialist clients with enforced tool-iteration caps.
-        """
-        instruction = str(state.get("instruction", "") or "").strip()
-        if not instruction:
-            # prompt_engineer abort should have handled this, but keep a safe default
-            return {**state, "granularity": "standard"}
-
-        # Preserve original instruction for debugging (one-time)
-        if not isinstance(state.get("instruction_original"), str) or not str(state.get("instruction_original") or "").strip():
-            state = {**state, "instruction_original": instruction}
-
-        cfg = _node_cfg("granularity_selector")
-        selector_client = LLMClient(
-            model=str(cfg.get("model") or "").strip(),
-            temperature=float(cfg.get("temperature", 0.2)),
-            tools=[],
-            enable_multi_stage_reasoning=False,
-            agent_name=main_agent_name,
-            **(cfg.get("kwargs") or {}),
-        )
-
-        selector_system = """You are a senior investment research operations analyst.
-
-Task:
-- Decide the required analysis granularity for an investment research task: minimal, standard, or maximum.
-- You MUST interpret the instruction semantically (natural language).
-
-Hard override (highest priority):
-- If the instruction clearly indicates urgency/importance (e.g. critical/urgent/not important) OR explicitly requests granularity
-  (e.g. use minimal/standard/maximum analysis; use detailed analysis), you MUST follow that request even if you disagree.
-
-Otherwise, use these heuristics:
-- maximum: complicated/high-stakes/high-impact tasks
-- standard: meaningful but not market-moving tasks
-- minimal: simple/low-priority tasks
-
-Return STRICT JSON only:
-{
-  "granularity": "minimal|standard|maximum",
-  "override_detected": true|false,
-  "override_quote": "<short quote from instruction or empty string>",
-  "rationale": "<1-3 sentences>"
-}
-No extra keys. No markdown."""
-
-        selector_input = {
-            "instruction": instruction,
-            "metadata": state.get("metadata") or {},
-            "routing": state.get("routing") or {},
-            "context_text": state.get("context_text") or "",
-        }
-        selector_user = f"""Decide granularity for this task.\n\nInputs:\n{json.dumps(selector_input, ensure_ascii=False, indent=2)}"""
-
-        data = {}
-        try:
-            resp = await selector_client.send_message(message=selector_user, system_message=selector_system)
-            data = _extract_json(getattr(resp, "content", "") or "") or {}
-        except Exception:
-            data = {}
-
-        granularity = str((data or {}).get("granularity") or "").strip().lower()
-        if granularity not in {"minimal", "standard", "maximum"}:
-            granularity = "standard"
-
-        override_detected = bool((data or {}).get("override_detected")) if isinstance((data or {}).get("override_detected"), bool) else False
-        override_quote = str((data or {}).get("override_quote") or "").strip()
-        rationale = str((data or {}).get("rationale") or "").strip()
-
-        # Append guidance to instruction
-        maximum_guidance = (
-            "This task requires detailed, high-granularity analysis. Gather as much verifiable information as you can, "
-            "cross-check key facts across sources, and surface second-order implications. Use tools aggressively where helpful, "
-            "and don’t stop at the first obvious answer. Prioritize primary sources (e.g., filings) when available, and clearly "
-            "separate facts vs. inference."
-        )
-        standard_guidance = (
-            "This task is standard priority. Apply a balanced analysis: focus on the highest-signal data first, then expand only "
-            "if early results suggest meaningful follow-ups. Keep tool usage disciplined—aim for no more than 2 tool-iterations total, "
-            "and in each iteration prefer 1–3 tool calls. Exceed these limits only if a result is genuinely interesting and additional "
-            "calls are likely to change the conclusion."
-        )
-        minimal_guidance = (
-            "This task is low priority. Keep analysis lightweight and cost-conscious. Use tools only if they are highly relevant and "
-            "likely to resolve a key uncertainty quickly. Aim for 0–1 tool-iterations (hard cap 2). If the task can be answered without "
-            "tools, do so and state assumptions/limits."
-        )
-
-        guidance = standard_guidance
-        if granularity == "maximum":
-            guidance = maximum_guidance
-        elif granularity == "minimal":
-            guidance = minimal_guidance
-
-        rewritten_instruction = instruction
-        if guidance and guidance not in rewritten_instruction:
-            rewritten_instruction = rewritten_instruction.rstrip() + "\n\n" + guidance
-
-        # Rebuild specialist clients with budgets enforced
-        selected_agents = [str(x).strip() for x in (state.get("selected_agents") or []) if str(x).strip()]
-        base_iters = state.get("max_tool_iterations_by_agent", {}) or {}
-        max_iters: Dict[str, int] = {}
-        for agent_name, iters in (base_iters.items() if isinstance(base_iters, dict) else []):
-            try:
-                max_iters[str(agent_name)] = int(iters)
-            except Exception:
-                max_iters[str(agent_name)] = 6
-
-        if granularity in {"standard", "minimal"}:
-            # cap only selected agents
-            for a in selected_agents:
-                prior = max_iters.get(a, 6)
-                max_iters[a] = min(prior, 2)
-
-        specialist_clients: Dict[str, Any] = {}
-        tools_provider = getattr(analyzer, "sec_data_tools", None)
-        if tools_provider is not None:
-            sp_cfg = _node_cfg("run_selected_specialists_parallel")
-            specialist_clients = build_specialist_llm_clients(
-                base_model=str(sp_cfg.get("model") or "").strip(),
-                base_temperature=float(sp_cfg.get("temperature", 0.7)),
-                llm_extra_params=sp_cfg.get("kwargs") or {},
-                tools_provider=tools_provider,
-                max_tool_iterations_by_agent=max_iters,
-                agent_name=main_agent_name,
-            )
-
-        try:
-            logger.info(f"Granularity selected: {granularity} (override={override_detected})")
-        except Exception:
-            pass
-
-        return {
-            **state,
-            "instruction": rewritten_instruction,
-            "granularity": granularity,
-            "granularity_override_detected": override_detected,
-            "granularity_override_quote": override_quote,
-            "granularity_rationale": rationale,
-            "specialist_clients": specialist_clients,
-            "max_tool_iterations_by_agent": max_iters,
-        }
 
     async def run_selected_specialists_parallel(state: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -599,17 +462,16 @@ No extra keys. No markdown."""
     def _route_after_team_route(state: Dict[str, Any]) -> str:
         sm = str(state.get("system_message") or "").strip()
         um = str(state.get("user_message") or "").strip()
-        return "granularity_selector" if (sm and um) else "prompt_engineer"
+        return "run_selected_specialists_parallel" if (sm and um) else "prompt_engineer"
 
     def _route_after_prompt_engineer(state: Dict[str, Any]) -> str:
         if state.get("abort"):
             return "end"
-        return "granularity_selector"
+        return "run_selected_specialists_parallel"
 
     workflow = StateGraph(dict)  # state is plain dict
     workflow.add_node("team_route", team_route)
     workflow.add_node("prompt_engineer", prompt_engineer)
-    workflow.add_node("granularity_selector", granularity_selector)
     workflow.add_node("run_selected_specialists_parallel", run_selected_specialists_parallel)
     workflow.add_node("team_merge", team_merge)
 
@@ -619,15 +481,14 @@ No extra keys. No markdown."""
         _route_after_team_route,
         {
             "prompt_engineer": "prompt_engineer",
-            "granularity_selector": "granularity_selector",
+            "run_selected_specialists_parallel": "run_selected_specialists_parallel",
         },
     )
     workflow.add_conditional_edges(
         "prompt_engineer",
         _route_after_prompt_engineer,
-        {"granularity_selector": "granularity_selector", "end": END},
+        {"run_selected_specialists_parallel": "run_selected_specialists_parallel", "end": END},
     )
-    workflow.add_edge("granularity_selector", "run_selected_specialists_parallel")
     workflow.add_edge("run_selected_specialists_parallel", "team_merge")
     workflow.add_edge("team_merge", END)
 

@@ -195,6 +195,7 @@ class ResearchLead:
         system_message: Optional[str] = None,
         user_message: Optional[str] = None,
         task_goal: Optional[str] = None,
+        additional_states: Optional[Dict[str, Any]] = {},
     ) -> Dict[str, Any]:
         """
         Run a general investment research task via the Investment Research team workflow.
@@ -215,6 +216,7 @@ class ResearchLead:
             "user_message": user_message,
             # future prompt-generator tool can use this
             "task_goal": task_goal or "",
+            **(additional_states),
         }
         team_out = await team_app.ainvoke(team_state) if hasattr(team_app, "ainvoke") else team_app.invoke(team_state)
         final = {}

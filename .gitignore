@@ -6,3 +6,7 @@ venv/
 .env
 pytest.ini
 *.pyc
+build/
+entry.py
+Dockerfile
+agent_config.json

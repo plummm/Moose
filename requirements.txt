@@ -1,7 +1,7 @@
 docker
 pytest
 pytest-cov
-"flask[async]"
+flask[async]
 pypdf
 tiktoken>=0.5.0
 langgraph>=0.0.1

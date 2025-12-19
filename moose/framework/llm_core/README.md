@@ -273,7 +273,7 @@ The framework uses a `config.yaml` file to configure model cost rates.
 The framework will automatically:
 - Find `config.yaml` in current directory
 - Use environment variable `MOOSE_LLM_CONFIG_PATH` to override location
-- Use environment variable `MOOSE_LLM_CONFIG_NAME` to override filename (default: `config.yaml`)
+- Use environment variable `MOOSE_LLM_CONFIG_NAME` to override filename (default: `model_config.yaml`)
 - Generate default config if none found
 
 ### Environment Variables
@@ -289,7 +289,7 @@ export GOOGLE_API_KEY="your-key"
 export MOOSE_LLM_CONFIG_PATH="/path/to/config.yaml"
 
 # Optional: Override config file name
-export MOOSE_LLM_CONFIG_NAME="my_config.yaml"
+export MOOSE_LLM_CONFIG_NAME="my_model_config.yaml"
 ```
 
 ## Cost Tracking
@@ -301,7 +301,7 @@ Cost tracking is automatic when using the client. Costs are calculated based on:
 
 ### Cost Logging
 
-- **Location**: `llm_costs_YYYY-MM-DD.log` in current directory
+- **Location**: `projects/<project_id>/logs/llm_costs_YYYY-MM-DD.log` (falls back to `projects/default/logs/` if project is unset)
 - **Format**: JSON lines with timestamp, model, cost, tokens, request_id
 - **Access**: Use `CostTracker` class to query costs
 

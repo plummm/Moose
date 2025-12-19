@@ -4,7 +4,34 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-
+try:
+    from investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
+    from investment_research_team.fmp_mcp_tools import (
+        AnalystMCPTools,
+        CalendarMCPTools,
+        ChartMCPTools,
+        CompanyMCPTools,
+        EconomicsMCPTools,
+        FinanceMCPTools,
+        IndicatorMCPTools,
+        MarketMCPTools,
+        NewsMCPTools,
+        QuoteMCPTools,
+    )
+except ImportError:
+    from moose.agents.finance_office.investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
+    from moose.agents.finance_office.investment_research_team.fmp_mcp_tools import (
+        AnalystMCPTools,
+        CalendarMCPTools,
+        ChartMCPTools,
+        CompanyMCPTools,
+        EconomicsMCPTools,
+        FinanceMCPTools,
+        IndicatorMCPTools,
+        MarketMCPTools,
+        NewsMCPTools,
+        QuoteMCPTools,
+    )
 @dataclass
 class SpecialistResult:
     agent: str
@@ -29,19 +56,6 @@ def build_tool_scopes() -> Dict[str, Set[str]]:
     """
     Define tool-name sets per specialist agent using category classes' list_mcp_tools().
     """
-    from moose.agents.finance_office.investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
-    from moose.agents.finance_office.investment_research_team.fmp_mcp_tools import (
-        AnalystMCPTools,
-        CalendarMCPTools,
-        ChartMCPTools,
-        CompanyMCPTools,
-        EconomicsMCPTools,
-        FinanceMCPTools,
-        IndicatorMCPTools,
-        MarketMCPTools,
-        NewsMCPTools,
-        QuoteMCPTools,
-    )
 
     scopes: Dict[str, Set[str]] = {}
     scopes["edgar"] = _tool_names_from_specs(EdgarAllMCPTools.list_mcp_tools())
@@ -76,7 +90,7 @@ def build_specialist_llm_clients(
     base_temperature: float,
     llm_extra_params: Optional[Dict[str, Any]],
     tools_provider: Any,
-    max_tool_iterations_by_agent: Dict[str, int],
+    max_tool_iterations: Optional[int] = 20,
     agent_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -95,8 +109,8 @@ def build_specialist_llm_clients(
             temperature=base_temperature,
             tools=tool_list,
             enable_multi_stage_reasoning=True,
-            max_tool_iterations=int(max_tool_iterations_by_agent.get(agent, 6)),
             agent_name=str(agent_name or "").strip() or None,
+            max_tool_iterations=max_tool_iterations,
             **(llm_extra_params or {}),
         )
     return clients

@@ -1,6 +1,7 @@
 """Base agent class with common functionality for all Moose agents."""
 
 import json
+import os
 import sys
 import signal
 import time
@@ -12,10 +13,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
 from abc import abstractmethod
 try:
-    from moose.framework.logging import get_agent_logger, get_project_id, set_global_debug
+    from moose.framework.logging import get_agent_logger, set_project, set_global_debug
 except ImportError:
     # Fallback for development mode
-    from framework.logging import get_agent_logger, get_project_id, set_global_debug
+    from framework.logging import get_agent_logger, set_project, set_global_debug
 
 try:
     from flask import Flask, request, jsonify, Response, stream_with_context
@@ -71,7 +72,9 @@ class BaseAgent():
         # 1. Console (streamed)
         # 2. moose.log (via propagation)
         # 3. agents/<agent_name>.log (dedicated agent log)
-        project_id = get_project_id() or "default"
+        projects_base_dir = Path(os.getenv("MOOSE_PROJECTS_DIR"))
+        project_id = os.getenv("MOOSE_PROJECT_ID")
+        set_project(project_id, projects_base_dir)
         self.logger = get_agent_logger(
             agent_name=self.name,
             project_id=project_id,
@@ -508,6 +511,17 @@ class BaseAgent():
                         
                         # Call handler function
                         result = handler_func(data)
+
+                        # Allow handlers to return raw Flask Response/tuples (e.g., HTML pages)
+                        try:
+                            if isinstance(result, Response):
+                                return result
+                            if isinstance(result, tuple):
+                                # Common Flask patterns: (body, status), (body, status, headers), (Response, status)
+                                if len(result) >= 1 and isinstance(result[0], Response):
+                                    return result
+                        except Exception:
+                            pass
                         
                         # Ensure result is a dict
                         if not isinstance(result, dict):
@@ -538,6 +552,17 @@ class BaseAgent():
                         
                         # Call handler function
                         result = await handler_func(data)
+
+                        # Allow handlers to return raw Flask Response/tuples (e.g., HTML pages)
+                        try:
+                            if isinstance(result, Response):
+                                return result
+                            if isinstance(result, tuple):
+                                # Common Flask patterns: (body, status), (body, status, headers), (Response, status)
+                                if len(result) >= 1 and isinstance(result[0], Response):
+                                    return result
+                        except Exception:
+                            pass
                         
                         # Ensure result is a dict
                         if not isinstance(result, dict):

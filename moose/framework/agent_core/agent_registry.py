@@ -139,10 +139,17 @@ class AgentRegistry:
         code = f"""import os
 import json
 import sys
+import os
 import {entry_point}
 
 if __name__ == "__main__":
     debug = os.getenv("MOOSE_AGENT_DEBUG", "false").lower() in ("true", "1", "yes", "on")
+    projects_base_dir = os.getenv("MOOSE_PROJECTS_DIR")
+    projects_parent_dir = os.path.dirname(projects_base_dir)
+    if not os.path.exists(projects_parent_dir):
+        os.makedirs(projects_parent_dir)
+    
+    os.symlink("/app/projects", projects_base_dir)
     
     with open("./agent_config.json", 'r', encoding='utf-8') as f:
         config = json.load(f)
@@ -198,7 +205,7 @@ if __name__ == "__main__":
         sys.exit(1)"""
 
         with open(agent_path / "entry.py", 'w') as f:
-            f.write(code.format(entry_point=entry_point, entry_class=entry_class))
+            f.write(code)
 
         return
     

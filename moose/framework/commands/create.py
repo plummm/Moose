@@ -4,10 +4,12 @@ import json
 import re
 from pathlib import Path
 try:
-    from moose.framework.logging import setup_project_logger, init_core_logger, get_core_logger, set_global_debug
+    from moose.framework.logging import init_core_logger, get_core_logger, set_global_debug, set_project, get_project_logger
+    from moose.framework.agent_core import AgentLoader
 except ImportError:
     # Fallback for development mode
-    from framework.logging import setup_project_logger, init_core_logger, get_core_logger, set_global_debug
+    from framework.logging import init_core_logger, get_core_logger, set_global_debug, set_project, get_project_logger
+    from framework.agent_core import AgentLoader
 
 
 class CreateCommand:
@@ -23,6 +25,12 @@ class CreateCommand:
             'project_name',
             type=str,
             help='Name of the project to create'
+        )
+        parser.add_argument(
+            '--agents',
+            nargs='+',
+            default=[],
+            help='List of agents to enable for this project (e.g., --agents news_scraper finance_office)'
         )
     
     def validate_project_name(self, name):
@@ -44,13 +52,20 @@ class CreateCommand:
         
         return True
     
-    def create_project_config(self, project_dir):
-        """Create an empty project config file."""
+    def create_project_config(self, project_dir: Path, enabled_agents: list[str]):
+        """Create a project config file (including enabled agents)."""
         logger = get_core_logger()
         config_path = os.path.join(project_dir, 'project_config.json')
         try:
             with open(config_path, 'w') as f:
-                json.dump({}, f, indent=2)
+                json.dump(
+                    {
+                        "enabled_agents": enabled_agents,
+                        "created_at": __import__("datetime").datetime.now().isoformat(),
+                    },
+                    f,
+                    indent=2,
+                )
             logger.info(f"Created project config file: {config_path}")
             return config_path
         except Exception as e:
@@ -104,18 +119,18 @@ __all__ = ['app', 'workflow', 'WorkflowState']
             logger.error(f"Failed to create workflow file: {e}")
             raise
     
-    def create_llm_config(self, project_dir):
+    def create_model_config(self, project_dir):
         """Create LLM config.yaml file in project directory."""
         logger = get_core_logger()
         
         # Get config file name from environment variable, default to config.yaml
-        config_name = os.getenv("MOOSE_LLM_CONFIG_NAME", "config.yaml")
+        config_name = os.getenv("MOOSE_LLM_CONFIG_NAME", "model_config.yaml")
         config_path = project_dir / config_name
         
         try:
             # Read template from framework directory
             framework_dir = Path(__file__).parent.parent.parent
-            template_path = framework_dir / "framework" / "llm_core" / "config.yaml.template"
+            template_path = framework_dir / "framework" / "llm_core" / "model_config.yaml.template"
             
             if template_path.exists():
                 # Copy from template
@@ -147,14 +162,8 @@ __all__ = ['app', 'workflow', 'WorkflowState']
         logger = init_core_logger()
         logger.info(f"Creating project: {project_name}")
         
-        # Get projects directory from environment variable
-        projects_dir = os.getenv('MOOSE_PROJECTS_DIR')
-        if not projects_dir:
-            # Use console logger before project is created
-            logger.error("MOOSE_PROJECTS_DIR environment variable is not set")
-            logger.info("Please set it to the directory where you want to store projects")
-            logger.info("Example: export MOOSE_PROJECTS_DIR=/path/to/projects")
-            return 1
+        # Prefer projects directory from environment variable; fallback to ./projects
+        projects_dir = os.getenv('MOOSE_PROJECTS_DIR') or str(Path.cwd() / "projects")
         
         projects_path = Path(projects_dir)
         
@@ -169,6 +178,23 @@ __all__ = ['app', 'workflow', 'WorkflowState']
         project_dir = projects_path / project_name
         if project_dir.exists():
             logger.error(f"Project directory already exists: {project_dir}")
+            return 1
+
+        # Validate requested agents (if any)
+        enabled_agents: list[str] = []
+        try:
+            requested = [str(a).strip() for a in (getattr(args, "agents", None) or []) if str(a).strip()]
+            if requested:
+                loader = AgentLoader()
+                available = set(loader.discover_agents())
+                missing = [a for a in requested if a not in available]
+                if missing:
+                    logger.error(f"Unknown agent(s): {', '.join(missing)}")
+                    logger.info(f"Available agents: {', '.join(sorted(available))}")
+                    return 1
+                enabled_agents = requested
+        except Exception as e:
+            logger.error(f"Failed to validate agents: {e}")
             return 1
         
         # Create projects directory if it doesn't exist
@@ -187,25 +213,27 @@ __all__ = ['app', 'workflow', 'WorkflowState']
             return 1
         
         # Setup project logger now that project directory exists
-        proj_logger = setup_project_logger(project_dir, debug=debug, project_name=project_name)
-        logger.update_core_logger(log_file=project_dir / 'moose.log', debug=debug)
+        set_project(project_name, projects_path)
+        proj_logger = get_project_logger(project_name, debug=debug)
         proj_logger.info(f"Project directory: {project_dir}")
         proj_logger.debug(f"Debug mode: {debug}")
         
         # Create project files
         try:
-            config_path = self.create_project_config(project_dir)
+            config_path = self.create_project_config(project_dir, enabled_agents=enabled_agents)
             proj_logger.info(f"Created project config: {config_path}")
             
             workflow_path = self.create_workflow_file(project_dir)
             proj_logger.info(f"Created workflow file: {workflow_path}")
             
-            llm_config_path = self.create_llm_config(project_dir)
+            llm_config_path = self.create_model_config(project_dir)
             proj_logger.info(f"Created LLM config: {llm_config_path}")
             
             proj_logger.info(f"Project '{project_name}' created successfully!")
             proj_logger.info(f"Project location: {project_dir}")
-            proj_logger.info(f"Log file location: {project_dir / 'moose.log'}")
+            proj_logger.info(f"Log directory: {project_dir / 'logs'}")
+            if enabled_agents:
+                proj_logger.info(f"Enabled agents: {', '.join(enabled_agents)}")
             return 0
         except Exception as e:
             proj_logger.error(f"Failed to create project files: {e}")
