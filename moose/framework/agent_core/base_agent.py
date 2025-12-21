@@ -73,7 +73,7 @@ class BaseAgent():
         # 2. moose.log (via propagation)
         # 3. agents/<agent_name>.log (dedicated agent log)
         projects_base_dir = Path(os.getenv("MOOSE_PROJECTS_DIR"))
-        project_id = os.getenv("MOOSE_PROJECT_ID")
+        project_id = os.getenv("MOOSE_PROJECT_ID", "default")
         set_project(project_id, projects_base_dir)
         self.logger = get_agent_logger(
             agent_name=self.name,

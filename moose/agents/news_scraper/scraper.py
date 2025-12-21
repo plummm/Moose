@@ -277,10 +277,11 @@ Return STRICT JSON only."""
         summary = str(data.get("summary") or "").strip()
         quality_score = int(data.get("quality_score", 0))
         raw_article = str(data.get("raw_article") or "").strip()
+        rationale = str(data.get("rationale") or "").strip()
         if not raw_article:
             raw_article = cleaned_fallback
 
-        return {"title": title, "summary": summary, "raw_article": raw_article, "quality_score": quality_score}
+        return {"title": title, "summary": summary, "raw_article": raw_article, "quality_score": quality_score, "rationale": rationale}
 
 
 class NewsScraperCore:

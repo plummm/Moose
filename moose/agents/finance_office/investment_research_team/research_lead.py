@@ -5,16 +5,8 @@ from typing import Dict, Any, Optional, List, Iterable, Set, Tuple, Type, Mappin
 from datetime import datetime
 import json
 
-try:
-    from moose.framework.llm_core import LLMClient
-    LLM_AVAILABLE = True
-except ImportError:
-    try:
-        from framework.llm_core import LLMClient
-        LLM_AVAILABLE = True
-    except ImportError:
-        LLM_AVAILABLE = False
-        LLMClient = None
+from moose.framework.llm_core import LLMClient
+LLM_AVAILABLE = True
 
 try:
     from langchain_core.tools import StructuredTool
@@ -172,6 +164,54 @@ class ResearchLead:
         out["model"] = model
         return out
 
+    @staticmethod
+    def build_tool_scopes() -> Dict[str, Set[str]]:
+        """
+        Define tool-name sets per specialist agent using category classes' list_mcp_tools().
+        """
+
+        def _tool_names_from_specs(specs: Iterable[Mapping[str, Any]]) -> Set[str]:
+            out: Set[str] = set()
+            for s in specs or []:
+                nm = (s or {}).get("name")
+                if isinstance(nm, str) and nm:
+                    out.add(nm)
+            return out
+
+        # Import locally to avoid import-time coupling.
+        from .edgar_mcp_tools import EdgarAllMCPTools
+        from .fmp_mcp_tools import (
+            AnalystMCPTools,
+            CalendarMCPTools,
+            ChartMCPTools,
+            CompanyMCPTools,
+            EconomicsMCPTools,
+            FinanceMCPTools,
+            IndicatorMCPTools,
+            MarketMCPTools,
+            NewsMCPTools,
+            QuoteMCPTools,
+        )
+
+        scopes: Dict[str, Set[str]] = {}
+        scopes["edgar"] = _tool_names_from_specs(EdgarAllMCPTools.list_mcp_tools())
+        scopes["fmp_news"] = _tool_names_from_specs(NewsMCPTools.list_mcp_tools())
+        scopes["fmp_fundamentals"] = (
+            _tool_names_from_specs(FinanceMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(CompanyMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(AnalystMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(CalendarMCPTools.list_mcp_tools())
+        )
+        scopes["fmp_macro"] = _tool_names_from_specs(EconomicsMCPTools.list_mcp_tools()) | _tool_names_from_specs(
+            MarketMCPTools.list_mcp_tools()
+        )
+        scopes["fmp_price"] = (
+            _tool_names_from_specs(QuoteMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(ChartMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(IndicatorMCPTools.list_mcp_tools())
+        )
+        return scopes
+
     # Note: Edgar LangChain tool creation now lives in EdgarMCPTools.get_langchain_tools()
 
     def _get_team_workflow_app(self) -> Any:
@@ -179,22 +219,34 @@ class ResearchLead:
         Lazily create and cache the Investment Research team workflow app.
         """
         if self._team_workflow_app is None:
-            from .team_workflow import create_team_workflow
+            # Inline compatibility shim (previously `team_workflow.py`).
+            from moose.framework.logging import get_global_debug
+            from .workflow.workflow import InvestmentResearchWorkflow
 
-            self._team_workflow_app = create_team_workflow(analyzer=self, logger=self.logger)
+            # Follow the same debug-mode behavior as before (global debug → sequential specialists).
+            debug_mode = False
+            try:
+                debug_mode = bool(get_global_debug())
+            except Exception:
+                debug_mode = False
+
+            self._team_workflow_app = InvestmentResearchWorkflow(
+                analyzer=self,
+                logger=self.logger,
+                debug_mode=debug_mode,
+            ).compile()
         return self._team_workflow_app
     
     # News-specific analysis is handled by `moose.agents.finance_office.assistant.FinanceOfficeAssistant`.
 
     async def run_task(
         self,
-        instruction: str,
+        task_instruction: str,
         *,
         context_text: str = "",
         metadata: Optional[Dict[str, Any]] = None,
-        system_message: Optional[str] = None,
-        user_message: Optional[str] = None,
-        task_goal: Optional[str] = None,
+        merge_system_message: Optional[str] = None,
+        merge_user_message: Optional[str] = None,
         additional_states: Optional[Dict[str, Any]] = {},
     ) -> Dict[str, Any]:
         """
@@ -203,19 +255,18 @@ class ResearchLead:
         This uses the same *output schema* as `analyze_article()` (title/high_level_idea/companies/sentiment/...)
         so callers can rely on a consistent shape across task types.
         """
-        # Pass prompts through as-is. If empty, the workflow will route to `prompt_engineer`.
-        system_message = str(system_message or "")
-        user_message = str(user_message or "")
+        # Pass merge prompts through as-is. If empty, the workflow will route to `prompt_engineer`.
+        merge_system_message = str(merge_system_message or "")
+        merge_user_message = str(merge_user_message or "")
 
         team_app = self._get_team_workflow_app()
         team_state = {
-            "instruction": instruction,
+            "task_instruction": task_instruction,
             "metadata": metadata or {},
             "context_text": context_text,
-            "system_message": system_message,
-            "user_message": user_message,
+            "merge_system_message": merge_system_message,
+            "merge_user_message": merge_user_message,
             # future prompt-generator tool can use this
-            "task_goal": task_goal or "",
             **(additional_states),
         }
         team_out = await team_app.ainvoke(team_state) if hasattr(team_app, "ainvoke") else team_app.invoke(team_state)
@@ -286,9 +337,7 @@ class ResearchLead:
 
         if agent_name:
             try:
-                from .specialists import build_tool_scopes
-
-                scopes = build_tool_scopes()
+                scopes = self.build_tool_scopes()
                 allowed = set(scopes.get(str(agent_name), set()) or set())
                 available = available & allowed
             except Exception:

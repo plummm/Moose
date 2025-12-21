@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
@@ -88,7 +88,7 @@ class FinanceOfficeAssistant:
                 "url": url,
                 "file_path": str(file_path),
                 "error": f"Failed to read article: {e}",
-                "analyzed_at": datetime.now().isoformat(),
+                "analyzed_at": datetime.now(timezone.utc).isoformat(),
             }
 
         if not isinstance(payload, dict):
@@ -96,7 +96,7 @@ class FinanceOfficeAssistant:
                 "url": url,
                 "file_path": str(file_path),
                 "error": "Invalid article format: expected JSON object",
-                "analyzed_at": datetime.now().isoformat(),
+                "analyzed_at": datetime.now(timezone.utc).isoformat(),
             }
 
         # News scraper now persists JSON-only: {"summary": "...", "raw_article": "..."}.
@@ -106,7 +106,7 @@ class FinanceOfficeAssistant:
                 "url": url,
                 "file_path": str(file_path),
                 "error": "Empty content: missing raw_article",
-                "analyzed_at": datetime.now().isoformat(),
+                "analyzed_at": datetime.now(timezone.utc).isoformat(),
             }
         
         quality_score = int(payload.get("quality_score", 0))
@@ -115,8 +115,8 @@ class FinanceOfficeAssistant:
         # Preserve existing news contract prompt (system + user)
         system_message = f"""You are a financial news analyst specializing in market-impact evaluation.
 Your goal is to analyze financial news articles and provide structured insights for trading decisions.
-Your input contains the news article content, along with the analysis results from different metrics. 
-Your analysis should take into account the different metrics results and provide a comprehensive analysis of the news article.
+Your input contains the news article content and the target company, along with the analysis results from different metrics. 
+Your analysis of the news should center around the target company, and take into account the different metrics results and provide a comprehensive report of how does the news affect the target company.
 
 Analysis results should follow these rules:
 
@@ -174,7 +174,7 @@ Analysis results should follow these rules:
 For each article, provide:
 
 1. high_level_idea: A concise 4-5 sentence summary of the core news
-2. companies: Array of tickers mentioned, leave empty array if no tickers are mentioned
+2. company: The target company that user wants to analyze the news for
 3. sentiment: "bullish", "bearish", or "neutral"
 4. sentiment_rating: One of {{BL0, BL1, BL2, BR0, BR1, BR2}} or null if neutral
 5. impact_type: One of the categories above
@@ -192,7 +192,7 @@ Format the output strictly as JSON:
 {{
   "title": "",
   "high_level_idea": "",
-  "companies": [],
+  "company": "",
   "sentiment": "",
   "sentiment_rating": "",
   "impact_type": "",
@@ -200,9 +200,11 @@ Format the output strictly as JSON:
   "trading_insights": ""
 }}"""
 
-        user_message = f"""Analyze the following financial news article for trading decision-making:
+        user_message = f"""Analyze the following financial news article for trading decision-making for {{0}}:
 
 URL: {url}
+
+Analysis target company: {{0}}
 
 Content:
 {content}
@@ -220,7 +222,7 @@ Provide a comprehensive financial analysis in JSON format"""
         )
         standard_guidance = (
             "This task is standard priority. Apply a balanced analysis: focus on the highest-signal data first, then expand only "
-            "if early results suggest meaningful follow-ups. Keep tool usage disciplined—aim for no more than 2 tool-iterations total, "
+            "if early results suggest meaningful follow-ups. Keep tool usage disciplined—aim for no more than 4 tool-iterations total, "
             "and in each iteration prefer 1–3 tool calls. Exceed these limits only if a result is genuinely interesting and additional "
             "calls are likely to change the conclusion."
         )
@@ -248,12 +250,11 @@ Provide a comprehensive financial analysis in JSON format"""
 
             state = {"max_tool_iterations": max_tool_iterations}
             team_resp = await self.team_manager.run_task(
-                instruction=instruction,
+                task_instruction=instruction,
                 context_text=content,
                 metadata={"url": url, **(metadata or {})},
-                system_message=system_message,
-                user_message=user_message,
-                task_goal="news_analysis",
+                merge_system_message=system_message,
+                merge_user_message=user_message,
                 additional_states=state,
             )
 
@@ -265,7 +266,7 @@ Provide a comprehensive financial analysis in JSON format"""
                     "url": url,
                     "file_path": str(file_path),
                     "error": str(err or "Investment Research team failed"),
-                    "analyzed_at": datetime.now().isoformat(),
+                    "analyzed_at": datetime.now(timezone.utc).isoformat(),
                 }
 
             # team_resp["result"] is team_out["final"] (envelope: ok/error/result/raw).
@@ -273,25 +274,42 @@ Provide a comprehensive financial analysis in JSON format"""
             analysis_data = final_payload.get("result") if isinstance(final_payload.get("result"), dict) else {}
             last_state = team_resp.get("last_state") if isinstance(team_resp.get("last_state"), dict) else {}
 
+            by_ticker = analysis_data.get("by_ticker") if isinstance(analysis_data.get("by_ticker"), dict) else {}
+            tickers_list = analysis_data.get("tickers") if isinstance(analysis_data.get("tickers"), list) else []
+            tickers_list = [str(t).upper().strip() for t in tickers_list if str(t).strip()]
+
+            per_ticker: Dict[str, Any] = {}
+            # Each per-ticker entry mirrors the original analyze_news output (except url/file_path)
+            # so it can be saved independently under /data/news/<ticker>.
+            for t, payload in (by_ticker or {}).items():
+                # Canonical macro key: use "economy" globally (lowercase).
+                tt_raw = str(t or "").strip()
+                tt = tt_raw.upper().strip() if tt_raw else "economy"
+                payload_dict = payload if isinstance(payload, dict) else {}
+                per_ticker[tt] = {
+                    "title": payload_dict.get("title", "Untitled"),
+                    "high_level_idea": payload_dict.get("high_level_idea", ""),
+                    # In the per-ticker design, the entry is already scoped to one ticker.
+                    "companies": [tt] if tt else [],
+                    "sentiment": payload_dict.get("sentiment", "neutral"),
+                    "sentiment_rating": payload_dict.get("sentiment_rating"),
+                    "impact_type": payload_dict.get("impact_type", "neutral"),
+                    "confidence": payload_dict.get("confidence", 5),
+                    "trading_insights": payload_dict.get("trading_insights", ""),
+                    "analyzed_at": datetime.now(timezone.utc).isoformat(),
+                    "model": self._team_merge_model(),
+                    # additive fields (best-effort; may be graph-level, not per-run)
+                    "routing": last_state.get("routing"),
+                    "subagent_reports": last_state.get("subagent_reports"),
+                    "evidence": last_state.get("evidence"),
+                    "tool_trace": last_state.get("tool_trace"),
+                }
+
             result = {
                 "url": url,
                 "file_path": str(file_path),
-                "title": analysis_data.get("title", "Untitled"),
-                "high_level_idea": analysis_data.get("high_level_idea", ""),
-                "companies": analysis_data.get("companies", []),
-                "sentiment": analysis_data.get("sentiment", "neutral"),
-                "sentiment_rating": analysis_data.get("sentiment_rating"),
-                "impact_type": analysis_data.get("impact_type", "neutral"),
-                "confidence": analysis_data.get("confidence", 5),
-                "trading_insights": analysis_data.get("trading_insights", ""),
-                "analyzed_at": datetime.now().isoformat(),
-                # For news analysis, final output comes from team_merge; report that model when available.
-                "model": self._team_merge_model(),
-                # additive fields (optional)
-                "routing": last_state.get("routing"),
-                "subagent_reports": last_state.get("subagent_reports"),
-                "evidence": last_state.get("evidence"),
-                "tool_trace": last_state.get("tool_trace"),
+                "analyses_by_ticker": per_ticker,
+                "tickers": tickers_list,
             }
             return result
         except Exception as e:
@@ -301,20 +319,23 @@ Provide a comprehensive financial analysis in JSON format"""
                 "url": url,
                 "file_path": str(file_path),
                 "error": str(e),
-                "analyzed_at": datetime.now().isoformat(),
+                "analyzed_at": datetime.now(timezone.utc).isoformat(),
             }
 
     def save_news_analysis_result(self, analysis_result: Dict[str, Any], base_data_dir: Path) -> None:
         """
         Save an analysis result to company-specific folders.
 
-        Expects the news endpoint envelope shape (top-level `url` and `companies`).
+        Expects the news endpoint envelope shape:
+        - top-level `url` and `file_path`
+        - `analyses_by_ticker` mapping ticker -> analysis payload (without url/file_path)
         """
         if "error" in analysis_result:
             return
 
         try:
-            now = datetime.now()
+            # Use UTC to ensure /data/news/<ticker>/<year>/<month> is stable across hosts/timezones.
+            now = datetime.now(timezone.utc)
             year = now.strftime("%Y")
             month = now.strftime("%m")
 
@@ -324,30 +345,36 @@ Provide a comprehensive financial analysis in JSON format"""
             else:
                 filename = now.strftime("%Y_%m_%d_%H_%M.json")
 
-            companies = analysis_result.get("companies", [])
+            analyses_by_ticker = (
+                analysis_result.get("analyses_by_ticker")
+                if isinstance(analysis_result.get("analyses_by_ticker"), dict)
+                else {}
+            )
 
             def normalize_symbol(symbol: str) -> str:
                 if not symbol:
                     return ""
+                # Keep economy folder lower-case for stability (`/data/news/economy`).
+                if str(symbol).strip().lower() == "economy":
+                    return "economy"
                 return re.sub(r"[^A-Z0-9]", "", symbol.upper())
 
-            if not companies:
-                save_folders = ["economy"]
-            else:
-                normalized_symbols = []
-                for company in companies:
-                    normalized = normalize_symbol(str(company))
-                    if normalized and normalized not in normalized_symbols:
-                        normalized_symbols.append(normalized)
-                save_folders = normalized_symbols or ["economy"]
-
-            for folder_name in save_folders:
+            # Persist one file per ticker entry under /data/news/<ticker>/...
+            for ticker_key, payload in (analyses_by_ticker or {}).items():
+                folder_name = normalize_symbol(str(ticker_key))
+                if not folder_name:
+                    folder_name = "economy"
                 try:
                     save_dir = base_data_dir / folder_name / year / month
                     save_dir.mkdir(parents=True, exist_ok=True)
                     out_path = save_dir / filename
                     with open(out_path, "w", encoding="utf-8") as f:
-                        json.dump(analysis_result, f, indent=2, ensure_ascii=False)
+                        per_record = {
+                            "url": analysis_result.get("url"),
+                            "file_path": analysis_result.get("file_path"),
+                            **(payload if isinstance(payload, dict) else {}),
+                        }
+                        json.dump(per_record, f, indent=2, ensure_ascii=False)
                     if self.logger:
                         self.logger.debug(f"Saved analysis result to: {out_path}")
                 except Exception as e:

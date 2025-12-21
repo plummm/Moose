@@ -1,6 +1,6 @@
 """Financial Report Analyzer Agent Package."""
 
-from .agent import FinancialReportAnalyzer
+from .agent import FinanceOffice
 
-__all__ = ['FinancialReportAnalyzer']
+__all__ = ['FinanceOffice']
 

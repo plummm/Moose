@@ -193,7 +193,7 @@ class AgentCommand:
             
             # Instantiate agent with debug flag
             logger.info(f"Loading agent class: {agent_class.__name__}")
-            agent = agent_class(project_id="default", config_path=agent_path / "agent_config.json", debug=debug)
+            agent = agent_class(config_path=agent_path / "agent_config.json", debug=debug)
             
             # Get port from HTTP server config, ports config, or default
             port = 8000

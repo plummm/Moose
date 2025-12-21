@@ -16,7 +16,6 @@ class DepartmentDecision:
     playbook: str
     rationale: str
     selected_teams: List[str]
-    team_tasks: Dict[str, Dict[str, Any]]
 
 
 def load_department_playbooks(path: Path) -> Dict[str, Any]:
@@ -47,54 +46,75 @@ async def route_department_task(
     *,
     llm_client: Any,
     dept_playbooks: Dict[str, Any],
-    instruction: str,
-    context: Optional[Dict[str, Any]] = None,
+    task_instruction: str,
+    context: Optional[Any] = None,
 ) -> DepartmentDecision:
     """
-    Department-head router: pick a department playbook and assign tasks to teams.
+    Department-head router: pick the best department playbook (method) and select the teams
+    defined by that playbook.
     """
-    pb_defs = dept_playbooks.get("playbooks") or {}
-    pb_list = []
-    if isinstance(pb_defs, dict):
-        for name, spec in pb_defs.items():
-            if not isinstance(spec, dict):
+    pb_defs = dept_playbooks.get("playbooks") if isinstance(dept_playbooks.get("playbooks"), dict) else {}
+    team_defs = dept_playbooks.get("teams") if isinstance(dept_playbooks.get("teams"), dict) else {}
+
+    pb_list: List[Dict[str, Any]] = []
+    for name, spec in (pb_defs or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        teams_spec = spec.get("teams") if isinstance(spec.get("teams"), list) else []
+        teams_out: List[Dict[str, Any]] = []
+        for t in teams_spec:
+            if not isinstance(t, dict):
                 continue
-            pb_list.append(
-                {
-                    "name": name,
-                    "description": spec.get("description", ""),
-                    "teams": [t.get("team") for t in (spec.get("teams") or []) if isinstance(t, dict)],
-                }
-            )
+            team_name = str(t.get("team") or "").strip()
+            if not team_name:
+                continue
+            base_goal = str(t.get("goal") or "").strip()
+            team_desc = ""
+            td = team_defs.get(team_name) if isinstance(team_defs.get(team_name), dict) else {}
+            if isinstance(td, dict):
+                team_desc = str(td.get("description") or "").strip()
+            teams_out.append({"team": team_name, "base_goal": base_goal, "team_description": team_desc})
+
+        pb_list.append(
+            {
+                "name": str(name),
+                "description": str(spec.get("description") or ""),
+                "teams": teams_out,
+            }
+        )
 
     system_message = f"""You are the Department Head (router/planner) for finance_office.
 
-You receive arbitrary finance research instructions and must route them to the most suitable department playbook and team(s).
-You do NOT call tools yourself.
+Your task:
+- Read the user's instruction.
+- Select the SINGLE best department playbook (method) from the provided list.
+- Select the teams defined by that playbook.
+
+Important:
+- You do NOT call tools yourself.
+- You MUST only use playbooks and team names provided below.
+- The playbook defines the teams and each team's base goal; downstream code will construct per-team instructions from these goals.
 
 Available department playbooks:
 {json.dumps(pb_list, indent=2)}
 
-Return STRICT JSON:
+Return STRICT JSON (no markdown, no extra keys, no trailing commentary):
 {{
   "playbook": "<one playbook name>",
   "rationale": "<1-3 sentences>",
-  "selected_teams": ["investment_research_team"],
-  "team_tasks": {{
-    "investment_research_team": {{"goal": "...", "notes": "...", "inputs": {{...}}}}
-  }}
+  "selected_teams": ["investment_research_team"]
 }}
 
 Rules:
-- Choose the smallest playbook that fits.
-- Only include the teams you truly need.
-- If missing key inputs (e.g., ticker), ask for them by putting a question in `team_tasks.<team>.notes`."""
+- Choose the smallest playbook that fully fits the instruction.
+- selected_teams MUST match the playbook's teams (same set; order doesn't matter).
+- Do not invent teams or extra fields."""
 
-    user_message = f"""Instruction:
-{instruction}
+    user_message = f"""User instruction:
+{task_instruction}
 
 Context (optional):
-{json.dumps(context or {}, ensure_ascii=False)}
+{json.dumps(context, ensure_ascii=False) if isinstance(context, (dict, list)) else str(context or "")}
 """
 
     resp = await llm_client.send_message(message=user_message, system_message=system_message)
@@ -102,26 +122,26 @@ Context (optional):
     if not isinstance(data, dict):
         data = {}
 
-    playbook = str(data.get("playbook") or "EarningsReport")
+    playbook = str(data.get("playbook") or "").strip()
+    if playbook not in pb_defs:
+        # Prefer a stable fallback if the model returns an unknown playbook.
+        if "EarningsReport" in pb_defs:
+            playbook = "EarningsReport"
+        else:
+            playbook = next(iter(pb_defs.keys()), "")
     rationale = str(data.get("rationale") or "")
-    selected_teams = [str(x).strip() for x in (data.get("selected_teams") or []) if str(x).strip()]
-    team_tasks = data.get("team_tasks") if isinstance(data.get("team_tasks"), dict) else {}
-    team_tasks = {str(k): (v if isinstance(v, dict) else {}) for k, v in team_tasks.items()}
+    selected_teams_raw = [str(x).strip() for x in (data.get("selected_teams") or []) if str(x).strip()]
 
-    if not selected_teams:
-        selected_teams = ["investment_research_team"]
-    if "investment_research_team" not in team_tasks:
-        team_tasks["investment_research_team"] = {
-            "goal": "Complete the requested finance research task.",
-            "notes": "",
-            "inputs": {"instruction": instruction, "context": context or {}},
-        }
+    # Enforce playbook-defined teams as the source of truth.
+    pb_spec = pb_defs.get(playbook) if isinstance(pb_defs.get(playbook), dict) else {}
+    pb_teams = pb_spec.get("teams") if isinstance(pb_spec.get("teams"), list) else []
+    playbook_team_names = [str(t.get("team") or "").strip() for t in pb_teams if isinstance(t, dict) and str(t.get("team") or "").strip()]
+    selected_teams = playbook_team_names or selected_teams_raw or []
 
     return DepartmentDecision(
         playbook=playbook,
         rationale=rationale,
         selected_teams=selected_teams,
-        team_tasks=team_tasks,
     )
 
 
