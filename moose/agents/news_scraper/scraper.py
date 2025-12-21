@@ -9,7 +9,7 @@ import threading
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
 import re
 
@@ -54,15 +54,17 @@ class PlaywrightFetcher:
         self._browser = None
         self._lock = asyncio.Lock()
 
-    async def _ensure_started(self):
+    async def _ensure_started(self, *, timeout_seconds: int = 30):
         # Lazy init because Playwright is heavy.
         if self._browser is not None:
             return
         async with self._lock:
             if self._browser is not None:
                 return
-            self._pw = await async_playwright().start()  # type: ignore[misc]
-            self._browser = await self._pw.chromium.launch(headless=self._headless)
+            # Guard startup to avoid indefinite hangs during browser launch.
+            to_s = max(5, int(timeout_seconds or 30))
+            self._pw = await asyncio.wait_for(async_playwright().start(), timeout=to_s)  # type: ignore[misc]
+            self._browser = await asyncio.wait_for(self._pw.chromium.launch(headless=self._headless), timeout=to_s)  # type: ignore[union-attr]
             if self.logger:
                 self.logger.info("Playwright Chromium launched (fallback fetcher ready)")
 
@@ -75,7 +77,7 @@ class PlaywrightFetcher:
         timeout_seconds: int,
         wait_selector: Optional[str],
     ) -> Optional[str]:
-        await self._ensure_started()
+        await self._ensure_started(timeout_seconds=timeout_seconds)
 
         try:
             await asyncio.wait_for(self._sem.acquire(), timeout=max(1, int(timeout_seconds or 30)))
@@ -710,7 +712,24 @@ class NewsScraperCore:
             pw_used = False
             for attempt in range(max_retries + 1):
                 # Do blocking requests work in a worker thread to avoid blocking the event loop.
-                status_code, body_text, req_err = await asyncio.to_thread(self._fetch_url_text_sync, url, referer)
+                fetch_timeout_s = 45.0
+                try:
+                    fetch_timeout_s = float(self.scraper_config.get("fetch_timeout_seconds", 45) or 45)
+                except Exception:
+                    fetch_timeout_s = 45.0
+                fetch_timeout_s = max(5.0, fetch_timeout_s)
+                try:
+                    status_code, body_text, req_err = await asyncio.wait_for(
+                        asyncio.to_thread(self._fetch_url_text_sync, url, referer),
+                        timeout=fetch_timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    # requests' timeout does not reliably cover DNS resolution; protect the scrape loop.
+                    if self.logger:
+                        self.logger.warning(
+                            f"Timed out fetching URL after {fetch_timeout_s:.0f}s (possible DNS hang): {url}"
+                        )
+                    status_code, body_text, req_err = 0, "", f"timeout_after_{int(fetch_timeout_s)}s"
 
                 blocked_like = self._is_likely_blocked(
                     status_code=int(status_code or 0),
@@ -720,6 +739,8 @@ class NewsScraperCore:
                     # Optional Playwright fallback on block-like response
                     pw_cfg = self._get_playwright_cfg()
                     if bool(pw_cfg.get("playwright_enabled")) and bool(pw_cfg.get("playwright_fallback_on_block", True)):
+                        if self.logger:
+                            self.logger.debug(f"Playwright fallback starting (blocked-like): {url}")
                         html_pw = await self._try_playwright_fetch(url=url, referer=referer)
                         if html_pw:
                             pw_used = True
@@ -756,6 +777,8 @@ class NewsScraperCore:
                     return None
                 pw_cfg = self._get_playwright_cfg()
                 if bool(pw_cfg.get("playwright_enabled")) and bool(pw_cfg.get("playwright_fallback_on_short_content", True)):
+                    if self.logger:
+                        self.logger.debug(f"Playwright fallback starting (short content): {url}")
                     html_pw = await self._try_playwright_fetch(url=url, referer=referer)
                     if html_pw:
                         text2 = self.html_converter.handle(html_pw)
@@ -811,12 +834,17 @@ class NewsScraperCore:
                 ua = str(self.scraper_config.get("user_agent") or "").strip()
             ua = ua or None
 
-            html_pw = await self._pw_fetcher.fetch_rendered_html(
+            # Guard Playwright fetch with an outer timeout too.
+            pw_timeout_s = int(pw_cfg.get("playwright_timeout_seconds", 35) or 35)
+            html_pw = await asyncio.wait_for(
+                self._pw_fetcher.fetch_rendered_html(
                 url=url,
                 referer=referer,
                 user_agent=ua,
-                timeout_seconds=int(pw_cfg.get("playwright_timeout_seconds", 35) or 35),
+                    timeout_seconds=pw_timeout_s,
                 wait_selector=str(pw_cfg.get("playwright_wait_selector") or "").strip() or None,
+                ),
+                timeout=max(5, pw_timeout_s + 5),
             )
             if html_pw:
                 self._pw_fallback_succeeded += 1
@@ -1222,7 +1250,11 @@ class NewsScraperService:
         self._monitor_thread = t
         t.start()
         if self.logger:
-            self.logger.info(f"Auto-monitor enabled: interval_hours={self._check_interval_hours}")
+            next_run = datetime.now(timezone.utc) + timedelta(seconds=self._check_interval_seconds)
+            self.logger.info(
+                f"Auto-monitor enabled: interval_hours={self._check_interval_hours} "
+                f"(next_run_utc={next_run.isoformat(timespec='seconds')})"
+            )
 
     def stop_monitor(self):
         self._monitor_stop.set()
@@ -1231,10 +1263,20 @@ class NewsScraperService:
         """
         Background loop: every interval, run a scrape cycle to pick up any new URLs.
         """
+        cycle = 0
         while not self._monitor_stop.is_set():
             # Sleep first to avoid immediate duplicate scrape on container start unless user triggers /start.
+            if self.logger:
+                next_run = datetime.now(timezone.utc) + timedelta(seconds=self._check_interval_seconds)
+                self.logger.info(
+                    f"Auto-monitor sleeping: next_run_utc={next_run.isoformat(timespec='seconds')} "
+                    f"in={self._check_interval_seconds:.0f}s"
+                )
             if self._monitor_stop.wait(self._check_interval_seconds):
                 break
+            cycle += 1
+            if self.logger:
+                self.logger.info(f"Auto-monitor woke up: starting cycle={cycle}")
 
             scfg = self.scraper_core.scraper_config or {}
             start_url = str(scfg.get("start_url") or "").strip()
@@ -1244,6 +1286,8 @@ class NewsScraperService:
 
             # Avoid overlapping with manual scrape; skip this cycle if busy.
             if not self._scrape_lock.acquire(blocking=False):
+                if self.logger:
+                    self.logger.info(f"Auto-monitor cycle={cycle} skipped (scrape already running)")
                 continue
             try:
                 try:
