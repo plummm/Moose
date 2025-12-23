@@ -130,12 +130,21 @@ Scoped tools for this sub-agent:
         effective_context = (context_text or "").strip() or "(none provided)"
 
         current_ticker = str((task or {}).get("current_ticker") or "").strip()
+        ticker_list = (task or {}).get("ticker_list", [])
+        ticker_info = ""
+        if isinstance(ticker_list, list) and ticker_list:
+            # New mode: Multiple tickers
+            ticker_info = f"Ticker list: {', '.join(str(t) for t in ticker_list if t)}"
+        else:
+            # Old mode: Single ticker
+            ticker_info = f"Current ticker (empty means macro/economy mode): {current_ticker or 'MACRO/ECONOMY'}"
+        
         user_message = f"""You are `{agent}`. Execute your part of the research.
 
 Task (from Research Lead):
 {json.dumps(task or {}, ensure_ascii=False, indent=2)}
 
-Current ticker (empty means macro/economy mode): {current_ticker or "MACRO/ECONOMY"}
+{ticker_info}
 
 Context (may be a news article, notes, or a user instruction):
 {effective_context}
@@ -221,11 +230,14 @@ Return STRICT JSON only."""
         clients: Dict[str, Any],
         prior_reports: Dict[str, Any],
         current_ticker: str,
+        ticker_list: Optional[List[str]] = None,
     ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]], Dict[str, int], float]:
         async with sem:
             task = dict((agent_tasks or {}).get(agent_name, {}) or {})
             task.setdefault("task_instruction", task_instruction)
             task["current_ticker"] = str(current_ticker or "").strip()
+            if ticker_list is not None:
+                task["ticker_list"] = ticker_list
 
             client = clients.get(agent_name) or self.agent_client
 
@@ -292,7 +304,17 @@ Return STRICT JSON only."""
         agent_tasks = state.get("agent_tasks", {}) or {}
         clients = state.get("specialist_clients", {}) or {}
         prior_reports = state.get("subagent_reports", {}) or {}
-        current_ticker = str(state.get("current_ticker") or "").strip()
+        per_ticker_merge_mode = bool(state.get("per_ticker_merge_mode", False))
+        
+        # Determine ticker info based on mode
+        current_ticker = ""
+        ticker_list = None
+        if per_ticker_merge_mode:
+            # New mode: Use ticker_list
+            ticker_list = state.get("ticker_list", []) if isinstance(state.get("ticker_list"), list) else []
+        else:
+            # Old mode: Use current_ticker
+            current_ticker = str(state.get("current_ticker") or "").strip()
 
         try:
             max_parallel = int(state.get("max_parallel_specialists") or 5)
@@ -316,6 +338,7 @@ Return STRICT JSON only."""
                             clients=clients,
                             prior_reports=prior_reports,
                             current_ticker=current_ticker,
+                            ticker_list=ticker_list,
                         )
                     )
                 except Exception as e:
@@ -332,6 +355,7 @@ Return STRICT JSON only."""
                         clients=clients,
                         prior_reports=prior_reports,
                         current_ticker=current_ticker,
+                        ticker_list=ticker_list,
                     )
                     for a in selected_agents
                 ],

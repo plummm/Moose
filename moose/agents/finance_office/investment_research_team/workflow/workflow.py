@@ -40,6 +40,11 @@ class InvestmentResearchWorkflow:
         self.analyzer = analyzer
         self.logger = logger
         self.debug_mode = bool(debug_mode)
+        
+        # Read per_ticker_merge_mode from config (default: True for new mode)
+        config = getattr(analyzer, "config", {}) if analyzer else {}
+        custom_config = config.get("custom", {}) if isinstance(config, dict) else {}
+        self.per_ticker_merge_mode = custom_config.get("per_ticker_merge_mode", True)
 
         playbooks_path = Path(__file__).resolve().parents[1] / "playbooks.yaml"
         self.playbooks = load_playbooks(playbooks_path)
@@ -110,6 +115,88 @@ class InvestmentResearchWorkflow:
         return g.compile()
 
     def compile(self) -> Any:
+        if self.per_ticker_merge_mode:
+            # New mode: per-ticker merge with single graph execution
+            return self._compile_ticker_merge_mode()
+        else:
+            # Old mode: per-ticker graph (backward compatible)
+            return self._compile_per_ticker_graph_mode()
+    
+    def _compile_ticker_merge_mode(self) -> Any:
+        """
+        New mode: Process ticker list in single graph with per-ticker team merge.
+        
+        State contract:
+        - routing.tickers -> state.ticker_list
+        - per-ticker merge results in state.final.result (dict by ticker)
+        """
+        g = StateGraph(dict)
+        
+        g.add_node("load_ticker_memory", self.load_ticker_memory.run)
+        g.add_node("prompt_engineer", self.prompt_engineer.run)
+        g.add_node("run_selected_specialists_parallel", self.run_selected_specialists_parallel.run)
+        g.add_node("team_merge", self.team_merge.run)
+        g.add_node("write_monthly_memory", self.write_monthly_memory.run)
+        
+        def _route_after_load_ticker_memory(state: Dict[str, Any]) -> str:
+            sm = str(state.get("merge_system_message") or "").strip()
+            um = str(state.get("merge_user_message") or "").strip()
+            return "run_selected_specialists_parallel" if (sm and um) else "prompt_engineer"
+        
+        def _route_after_prompt_engineer(state: Dict[str, Any]) -> str:
+            if state.get("abort"):
+                return "end"
+            return "run_selected_specialists_parallel"
+        
+        def _route_after_team_merge(state: Dict[str, Any]) -> str:
+            routing = state.get("routing", {}) if isinstance(state.get("routing"), dict) else {}
+            neutral = bool(routing.get("neutral_analysis"))
+            ticker_list = state.get("ticker_list", []) if isinstance(state.get("ticker_list"), list) else []
+            return "write_monthly_memory" if (neutral and ticker_list) else "end"
+        
+        g.set_entry_point("load_ticker_memory")
+        g.add_conditional_edges(
+            "load_ticker_memory",
+            _route_after_load_ticker_memory,
+            {"prompt_engineer": "prompt_engineer", "run_selected_specialists_parallel": "run_selected_specialists_parallel"},
+        )
+        g.add_conditional_edges(
+            "prompt_engineer",
+            _route_after_prompt_engineer,
+            {"run_selected_specialists_parallel": "run_selected_specialists_parallel", "end": END},
+        )
+        g.add_edge("run_selected_specialists_parallel", "team_merge")
+        g.add_conditional_edges(
+            "team_merge",
+            _route_after_team_merge,
+            {"write_monthly_memory": "write_monthly_memory", "end": END},
+        )
+        g.add_edge("write_monthly_memory", END)
+        
+        async def setup_ticker_list(state: Dict[str, Any]) -> Dict[str, Any]:
+            """Extract ticker list from routing and set per_ticker_merge_mode flag."""
+            routing = state.get("routing", {}) if isinstance(state.get("routing"), dict) else {}
+            tickers = routing.get("tickers") if isinstance(routing.get("tickers"), list) else []
+            tickers = [str(t).upper().strip() for t in tickers if str(t).strip()]
+            ticker_list = tickers if tickers else [""]
+            return {**state, "ticker_list": ticker_list, "per_ticker_merge_mode": True}
+        
+        per_ticker_app = g.compile()
+        
+        workflow = StateGraph(dict)
+        workflow.add_node("team_route", self.team_route.run)
+        workflow.add_node("setup_ticker_list", setup_ticker_list)
+        workflow.add_node("process_tickers", per_ticker_app)
+        workflow.set_entry_point("team_route")
+        workflow.add_edge("team_route", "setup_ticker_list")
+        workflow.add_edge("setup_ticker_list", "process_tickers")
+        workflow.add_edge("process_tickers", END)
+        return workflow.compile()
+    
+    def _compile_per_ticker_graph_mode(self) -> Any:
+        """
+        Old mode: Per-ticker graph fan-out (backward compatible).
+        """
         # Lazily compile the per-ticker subgraph once per workflow instance.
         if self._per_ticker_app is None:
             self._per_ticker_app = self._compile_per_ticker_app()
@@ -145,6 +232,7 @@ class InvestmentResearchWorkflow:
                 per_state.pop("final", None)
                 per_state["llm_usage_total"] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                 per_state["llm_cost_total"] = 0.0
+                per_state["per_ticker_merge_mode"] = False  # Old mode flag
 
                 # Format analyze_news merge_user_message template once per ticker.
                 formatted_user = base_merge_user_message

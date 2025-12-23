@@ -6,10 +6,11 @@ from pathlib import Path
 
 commands_list = {}
 
-# Get the directory where moose.py is located
-MOOSE_DIR = Path(__file__).parent.absolute()
-# Add the moose directory to Python path so we can import framework.commands
-sys.path.insert(0, str(MOOSE_DIR))
+# `import moose` requires the *project root* on sys.path, not the `moose/` package directory.
+# When running from source (e.g. `python -m moose`), ensure the parent of `moose/` is on sys.path.
+MOOSE_DIR = Path(__file__).resolve().parent  # .../Moose/moose
+PROJECT_ROOT = MOOSE_DIR.parent             # .../Moose
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def create_parser():

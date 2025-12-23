@@ -22,20 +22,12 @@ from moose.framework.llm_core import LLMClient
 # LangGraph (assumed available in this environment)
 from langgraph.graph import END, StateGraph
 
-# Import local modules
-try:
-    from assistant import FinanceOfficeAssistant
-    from investment_research_team.research_lead import ResearchLead
-    from investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
-    from investment_research_team.fmp_mcp_tools import FMPAllMCPTools
-    from investment_research_team.mcp_tools import CombinedFinanceMCPTools
-except ImportError:
-    # Fallback for direct execution
-    from moose.agents.finance_office.assistant import FinanceOfficeAssistant
-    from moose.agents.finance_office.investment_research_team.research_lead import ResearchLead
-    from moose.agents.finance_office.investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
-    from moose.agents.finance_office.investment_research_team.fmp_mcp_tools import FMPAllMCPTools
-    from moose.agents.finance_office.investment_research_team.mcp_tools import CombinedFinanceMCPTools
+# Import local agent modules (agent code is mounted into /app; do not import from the installed `moose` package)
+from assistant import FinanceOfficeAssistant
+from investment_research_team.research_lead import ResearchLead
+from investment_research_team.edgar_mcp_tools import EdgarAllMCPTools
+from investment_research_team.fmp_mcp_tools import FMPAllMCPTools
+from investment_research_team.mcp_tools import CombinedFinanceMCPTools
 
 
 class FinanceOffice(BaseAgent):
@@ -1026,7 +1018,9 @@ a {{ color: inherit; }}
             return {**state, "final_response": {"status": "error", "error": "Analyzer is not initialized", "result": None}}
 
         # Department-head router (tool-less) selects team + goal; currently routes into investment_research_team.
-        from .department_router import load_department_playbooks, route_department_task
+        # NOTE: `agent.py` is imported as a top-level module in /app (see generated entry.py), so avoid
+        # relative imports like `from .department_router ...`.
+        from department_router import load_department_playbooks, route_department_task
 
         playbooks_path = Path(__file__).resolve().parent / "department_playbooks.yaml"
         dept_playbooks = load_department_playbooks(playbooks_path)

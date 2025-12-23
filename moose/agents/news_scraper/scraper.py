@@ -232,7 +232,7 @@ JSON rules:
 Quality score (1-10):
 - <1-3> (either one of the following reasons): 
     - The source of the article is not trustworthy; 
-    - The article is not complete, or missing important information; 
+    - The article is not complete, or missing important information; (e.g., news article was not fully loaded, the current content contain limited interesting insights)
     - The article is bad written, confusing, or self-contradictory;
     - The article has obvious flaws, errors, or inconsistencies;
     - A pure stock prompting article with no interesting insights;
@@ -250,7 +250,8 @@ Mandatory rules:
 - Do NOT change any wording of the article, keep the text as is for the article content. Do NOT summarize, add, or remove any article main text.
 - Keep the image href as is in the article main text
 - Title should be a short in one sentence.
-- Keep summary concise (3-6 sentences)."""
+- Keep summary concise (3-6 sentences).
+- Article length cannot be a solo factor to determine the quality of the article; A breaking news can be short and concise, in fact, these short breaking news offen come with extrememly important updates."""
 
         user_message = f"""URL: {url}
 
@@ -1079,6 +1080,8 @@ class NewsScraperService:
         self._analyzer_queue: Optional[asyncio.Queue] = None
         self._analyzer_worker_tasks: List[asyncio.Task] = []
         self._analyzer_workers_started = False
+        # The event loop that owns the analyzer queue/tasks (important when monitor uses threads/loops).
+        self._analyzer_loop: Optional[asyncio.AbstractEventLoop] = None
         self.analyzer_enqueued = 0
         self.analyzer_sent_ok = 0
         self.analyzer_sent_failed = 0
@@ -1151,9 +1154,50 @@ class NewsScraperService:
         """
         Create analyzer queue and start background worker tasks on the current event loop.
         """
-        if self._analyzer_workers_started:
-            return
         loop = asyncio.get_running_loop()
+
+        # If we already started workers on *this* loop and they are still alive, do nothing.
+        if self._analyzer_workers_started and self._analyzer_loop is loop:
+            if self._analyzer_worker_tasks and not any(t.done() for t in self._analyzer_worker_tasks):
+                return
+
+        # If workers were started on a different (possibly closed) loop, tear down best-effort and recreate.
+        old_loop = self._analyzer_loop
+        old_tasks = list(self._analyzer_worker_tasks or [])
+        if old_tasks:
+            # Try to cancel tasks on their owning loop (if it is still running).
+            if old_loop is not None and old_loop is not loop and not old_loop.is_closed():
+                for t in old_tasks:
+                    try:
+                        old_loop.call_soon_threadsafe(t.cancel)
+                    except Exception:
+                        pass
+            else:
+                for t in old_tasks:
+                    try:
+                        t.cancel()
+                    except Exception:
+                        pass
+
+            # Only await tasks that belong to the current loop (cross-loop awaiting will error).
+            tasks_to_await: List[asyncio.Task] = []
+            for t in old_tasks:
+                try:
+                    if getattr(t, "get_loop", None) and t.get_loop() is loop:
+                        tasks_to_await.append(t)
+                except Exception:
+                    pass
+            if tasks_to_await:
+                try:
+                    await asyncio.gather(*tasks_to_await, return_exceptions=True)
+                except Exception:
+                    pass
+
+        # Reset state before recreating.
+        self._analyzer_queue = None
+        self._analyzer_worker_tasks = []
+        self._analyzer_workers_started = False
+        self._analyzer_loop = None
 
         scfg = self.scraper_core.scraper_config or {}
         try:
@@ -1171,6 +1215,7 @@ class NewsScraperService:
         self._analyzer_queue = asyncio.Queue(maxsize=maxsize)
         self._analyzer_worker_tasks = [loop.create_task(self._analyzer_worker_loop(i)) for i in range(worker_count)]
         self._analyzer_workers_started = True
+        self._analyzer_loop = loop
 
         if self.logger:
             self.logger.info(f"Analyzer queue started: workers={worker_count}, maxsize={maxsize}")
@@ -1210,6 +1255,7 @@ class NewsScraperService:
                 file_path = str((item or {}).get("file_path") or "")
                 url = str((item or {}).get("url") or "")
                 quality_score = int((item or {}).get("quality_score") or 0)
+                self.logger.debug(f"Dequeued item to analyzer: {file_path}, {url}, {quality_score}")
                 ok = False
                 for attempt in range(retry_count + 1):
                     ok = await asyncio.to_thread(self._send_to_analyzer, file_path, url, quality_score)
@@ -1263,42 +1309,70 @@ class NewsScraperService:
         """
         Background loop: every interval, run a scrape cycle to pick up any new URLs.
         """
+        # IMPORTANT: do not call asyncio.run() per cycle. That creates and closes a new event loop each time,
+        # which breaks long-lived async components (Playwright + analyzer worker tasks) that outlive a cycle.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         cycle = 0
-        while not self._monitor_stop.is_set():
-            # Sleep first to avoid immediate duplicate scrape on container start unless user triggers /start.
-            if self.logger:
-                next_run = datetime.now(timezone.utc) + timedelta(seconds=self._check_interval_seconds)
-                self.logger.info(
-                    f"Auto-monitor sleeping: next_run_utc={next_run.isoformat(timespec='seconds')} "
-                    f"in={self._check_interval_seconds:.0f}s"
-                )
-            if self._monitor_stop.wait(self._check_interval_seconds):
-                break
-            cycle += 1
-            if self.logger:
-                self.logger.info(f"Auto-monitor woke up: starting cycle={cycle}")
-
-            scfg = self.scraper_core.scraper_config or {}
-            start_url = str(scfg.get("start_url") or "").strip()
-            max_depth = int(scfg.get("max_retrieval_depth", 1) or 1)
-            if not start_url:
-                continue
-
-            # Avoid overlapping with manual scrape; skip this cycle if busy.
-            if not self._scrape_lock.acquire(blocking=False):
+        try:
+            while not self._monitor_stop.is_set():
+                # Sleep first to avoid immediate duplicate scrape on container start unless user triggers /start.
                 if self.logger:
-                    self.logger.info(f"Auto-monitor cycle={cycle} skipped (scrape already running)")
-                continue
-            try:
-                try:
-                    # Run one async scrape cycle in this thread
-                    asyncio.run(self._scrape_direct(start_url, max_depth))
-                except Exception as e:
+                    next_run = datetime.now(timezone.utc) + timedelta(seconds=self._check_interval_seconds)
+                    self.logger.info(
+                        f"Auto-monitor sleeping: next_run_utc={next_run.isoformat(timespec='seconds')} "
+                        f"in={self._check_interval_seconds:.0f}s"
+                    )
+                if self._monitor_stop.wait(self._check_interval_seconds):
+                    break
+                cycle += 1
+                if self.logger:
+                    self.logger.info(f"Auto-monitor woke up: starting cycle={cycle}")
+
+                scfg = self.scraper_core.scraper_config or {}
+                start_url = str(scfg.get("start_url") or "").strip()
+                max_depth = int(scfg.get("max_retrieval_depth", 1) or 1)
+                if not start_url:
+                    continue
+
+                # Avoid overlapping with manual scrape; skip this cycle if busy.
+                if not self._scrape_lock.acquire(blocking=False):
                     if self.logger:
-                        self.logger.warning(f"Auto-monitor scrape failed: {e}")
+                        self.logger.info(f"Auto-monitor cycle={cycle} skipped (scrape already running)")
+                    continue
+                try:
+                    try:
+                        # Run one async scrape cycle on the persistent loop for this monitor thread
+                        loop.run_until_complete(self._scrape_direct(start_url, max_depth))
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning(f"Auto-monitor scrape failed: {e}")
+                finally:
+                    try:
+                        self._scrape_lock.release()
+                    except Exception:
+                        pass
+        finally:
+            # Best-effort: cancel analyzer workers if they were started on this loop.
+            try:
+                if self._analyzer_loop is loop and self._analyzer_worker_tasks:
+                    for t in list(self._analyzer_worker_tasks):
+                        try:
+                            t.cancel()
+                        except Exception:
+                            pass
+                    try:
+                        loop.run_until_complete(asyncio.gather(*self._analyzer_worker_tasks, return_exceptions=True))
+                    except Exception:
+                        pass
+                if self._analyzer_loop is loop:
+                    self._analyzer_queue = None
+                    self._analyzer_worker_tasks = []
+                    self._analyzer_workers_started = False
+                    self._analyzer_loop = None
             finally:
                 try:
-                    self._scrape_lock.release()
+                    loop.close()
                 except Exception:
                     pass
     
@@ -1416,6 +1490,9 @@ class NewsScraperService:
                     saved_files.append(str(saved_path))
                     
                     # Enqueue analyzer send (handled by background workers)
+                    if quality_score > 0 and quality_score <= 2:
+                        self.logger.info(f"Low quality article [{str(saved_path)}] will be skipped from analyzer")
+                        continue
                     await self._enqueue_analyzer_send(file_path=str(saved_path), url=url, quality_score=quality_score)
                     analyzer_enqueued_this_cycle += 1
                 else:

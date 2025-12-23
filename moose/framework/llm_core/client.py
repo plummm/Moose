@@ -5,22 +5,17 @@ import inspect
 import uuid
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union, Tuple
-try:
-    from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
-    from moose.framework.llm_core.providers import LLMProvider, get_provider
-    from moose.framework.llm_core.cost_tracker import CostTracker
-    from moose.framework.llm_core.langchain_integration import LangChainLLM
-    from moose.framework.llm_core.config import ModelConfig
-    from moose.framework.logging import get_core_logger
-except ImportError:
-    # Fallback for development mode
-    from framework.llm_core.models import Message, MessageRole, LLMResponse
-    from framework.llm_core.providers import LLMProvider, get_provider
-    from framework.llm_core.cost_tracker import CostTracker
-    from framework.llm_core.langchain_integration import LangChainLLM
-    from framework.llm_core.config import ModelConfig
-    from framework.logging import get_core_logger
+from typing import List, Optional, Dict, Any, Union, Tuple, TYPE_CHECKING
+from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
+from moose.framework.llm_core.providers import LLMProvider, get_provider
+from moose.framework.llm_core.cost_tracker import CostTracker
+from moose.framework.llm_core.langchain_integration import LangChainLLM
+from moose.framework.llm_core.config import ModelConfig
+from moose.framework.logging import get_core_logger
+from moose.framework.llm_core.tool_runtime import ToolRuntime
+
+if TYPE_CHECKING:
+    from moose.framework.llm_core.tool_runtime import ToolRuntime
 
 # Try to import tiktoken for token counting
 try:
@@ -769,7 +764,8 @@ Provide your final combined response:"""
     async def _execute_tool_calls(
         self,
         tool_calls: List[Any],
-        messages: Optional[List[Message]] = None
+        messages: Optional[List[Message]] = None,
+        runtime: Optional["ToolRuntime"] = None,
     ) -> List[Message]:
         """
         Execute tool calls and return tool result messages.
@@ -817,26 +813,9 @@ Provide your final combined response:"""
             
             try:
                 self.logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
-                
-                # Execute tool (LangChain tools support both sync and async)
-                # LangChain StructuredTool has invoke/ainvoke methods
-                if hasattr(tool, 'ainvoke'):
-                    # Async invoke
-                    result = await tool.ainvoke(tool_args)
-                elif hasattr(tool, 'invoke'):
-                    # Sync invoke - run in executor for async context
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, lambda: tool.invoke(tool_args))
-                elif callable(tool):
-                    # Direct function call (fallback)
-                    if asyncio.iscoroutinefunction(tool):
-                        result = await tool(**tool_args)
-                    else:
-                        loop = asyncio.get_event_loop()
-                        result = await loop.run_in_executor(None, lambda: tool(**tool_args))
-                else:
-                    raise ValueError(f"Tool {tool_name} is not callable")
-                
+
+                result = await self._invoke_one_tool(tool, tool_name, tool_args, runtime=runtime)
+
                 # Convert result to string
                 if isinstance(result, str):
                     result_str = result
@@ -864,6 +843,53 @@ Provide your final combined response:"""
                 ))
         
         return tool_messages
+
+    async def _invoke_one_tool(
+        self,
+        tool: Any,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        *,
+        runtime: Optional["ToolRuntime"] = None,
+    ) -> Any:
+        """
+        Shared tool invocation logic used by both:
+        - top-level LLM tool calls (_execute_tool_calls)
+        - nested tool→tool calls (ToolRuntime.call_tool)
+
+        Note: runtime is *not* passed via tool args (to avoid polluting tool schemas). Instead it is
+        made available via ToolRuntime.current() contextvar while the tool executes.
+        """
+        # The ToolRuntime sets its own contextvar in call_tool, but top-level calls need to set it here.
+        token = None
+        if runtime is not None:
+            import moose.framework.llm_core.tool_runtime as _tr
+            token = _tr._CURRENT_RUNTIME.set(runtime)
+        try:
+            # Execute tool (LangChain tools support both sync and async)
+            # LangChain StructuredTool has invoke/ainvoke methods
+            if hasattr(tool, "ainvoke"):
+                result = await tool.ainvoke(tool_args)
+            elif hasattr(tool, "invoke"):
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, lambda: tool.invoke(tool_args))
+            elif callable(tool):
+                if asyncio.iscoroutinefunction(tool):
+                    result = await tool(**tool_args)
+                else:
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, lambda: tool(**tool_args))
+            else:
+                raise ValueError(f"Tool {tool_name} is not callable")
+
+            # Some wrappers can still return awaitables.
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        finally:
+            if token is not None:
+                import moose.framework.llm_core.tool_runtime as _tr
+                _tr._CURRENT_RUNTIME.reset(token)
     
     async def _send_message_direct(
         self,
@@ -904,6 +930,7 @@ Provide your final combined response:"""
         total_cost = 0.0
         total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         final_response = None
+        runtime = None
         
         # Augment system message for multi-stage reasoning mode
         if self.enable_multi_stage_reasoning and system_message:
@@ -990,7 +1017,20 @@ Provide your final combined response:"""
                 self.logger.debug(f"Iteration {iteration + 1}: LLM requested {len(response.tool_calls)} tool calls")
                 
                 # Execute tools
-                tool_messages = await self._execute_tool_calls(response.tool_calls, conversation_messages)
+                # Create a per-request runtime so tools can call other tools (nested calls remain internal).
+                # Initialized lazily here to avoid overhead when no tools are used.
+                if runtime is None:
+                    runtime = ToolRuntime(
+                        tool_map=self.tool_map,
+                        # Nested calls already run inside ToolRuntime.call_tool which sets the runtime contextvar.
+                        invoke_tool=lambda t, n, a: self._invoke_one_tool(t, n, a),
+                        request_id=request_id,
+                        agent_name=self.agent_name,
+                        logger=self.logger,
+                    )
+                    await runtime.start()
+
+                tool_messages = await self._execute_tool_calls(response.tool_calls, conversation_messages, runtime=runtime)
                 
                 conversation_messages.extend(tool_messages)
                 
@@ -1011,7 +1051,7 @@ Provide your final combined response:"""
                     # In multi-stage mode, prompt for decision if no marker found
                     conversation_messages.append(Message(
                         role=MessageRole.USER,
-                        content=f"Do you need more tools or is this your final answer? If final, start with {self.multi_stage_marker}"
+                        content=f"Do you need more tools or is this your final answer? If it's final, start your response with {self.multi_stage_marker}. (e.g., {self.multi_stage_marker}My final answer)"
                     ))
                     self.logger.debug(f"No tool calls and no marker at iteration {iteration + 1}, prompting for decision")
                     continue
@@ -1033,7 +1073,7 @@ Provide your final combined response:"""
                     role=MessageRole.USER,
                     content=(
                         "Tool budget exhausted. Do NOT call any tools.\n"
-                        f"Respond with {self.multi_stage_marker} and then provide your complete final answer now."
+                        f"Respond starting with {self.multi_stage_marker} and then provide your complete final answer now."
                     ),
                 )
             )
@@ -1108,6 +1148,12 @@ Provide your final combined response:"""
         if final_response.cost is not None:
             self.logger.debug(f"Cost: ${final_response.cost:.6f}")
         
+        if runtime is not None:
+            try:
+                await runtime.close()
+            except Exception:
+                pass
+
         return final_response
     
     def send_messages_sync(

@@ -25,6 +25,52 @@ The framework uses native LangChain provider classes:
 - **Anthropic** → `ChatAnthropic`
 - **Google Gemini** → `ChatGoogleGenerativeAI`
 
+### ToolRuntime (tool→tool calls)
+
+`ToolRuntime` enables **tool→tool calls** during a single `_send_message_direct` request, with shared safety controls and tracing.
+
+Key properties:
+- Nested tool→tool calls are **internal**: they are executed and logged, but **not appended as ToolMessages** in the LLM conversation. Only the top-level LLM-requested tool results become ToolMessages.
+- Any running tool can access the runtime via `ToolRuntime.current()` (contextvar), and call other tools by name with `await runtime.call_tool(name, args)`.
+- Guardrails are enforced (depth limit, cycle detection, per-call timeout).
+
+#### Example: calling another tool from inside a tool
+
+```python
+from moose.framework.llm_core.tool_runtime import ToolRuntime
+
+async def some_tool(symbol: str) -> dict:
+    rt = ToolRuntime.current()
+    if rt is None:
+        return {"ok": False, "error": "ToolRuntime not available"}
+
+    edgar_env = await rt.call_tool("list_financing_documents_index", {"ticker": symbol, "since_days": 365})
+    return {"ok": True, "data": {"edgar_financing_index": edgar_env}}
+```
+
+#### Dataflow
+
+```mermaid
+sequenceDiagram
+participant LLMClient
+participant LLM
+participant ToolRuntime
+participant ToolA
+participant ToolB
+
+LLMClient->>LLM: send_messages
+LLM-->>LLMClient: tool_call(ToolA)
+LLMClient->>ToolRuntime: execute_top_level(ToolA)
+ToolRuntime->>ToolA: invoke
+ToolA->>ToolRuntime: call_tool(ToolB)
+ToolRuntime->>ToolB: invoke
+ToolB-->>ToolRuntime: resultB
+ToolRuntime-->>ToolA: resultB
+ToolA-->>ToolRuntime: resultA
+ToolRuntime-->>LLMClient: resultA
+LLMClient-->>LLM: ToolMessage(resultA)
+```
+
 ## Supported Providers
 
 - **OpenAI** (GPT-4, GPT-4 Turbo, GPT-3.5, GPT-4o, etc.)

@@ -43,6 +43,20 @@ class MonthlyMemoryWriterNode(BaseNode):
         self.node_name = "write_monthly_memory"
         # Note: config key is `memory_summarizer` (node name differs from config key intentionally)
         self.agent_client = self._build_agent_client(node_name="memory_summarizer", tools=[])
+        
+        # NEW: Dedicated client for deduplication with retrieve_memory tool
+        if LANGCHAIN_TOOLS_AVAILABLE and StructuredTool:
+            retrieve_memory_tool = StructuredTool.from_function(
+                func=MonthlyMemoryWriterNode.retrieve_memory,
+                name="retrieve_memory",
+                description="Safely load memory object from file_path. Only works for paths under NEWS_RESULT_DIR. Returns memory data dict with keys like 'title', 'summary', 'high_level_idea', etc.",
+            )
+            self.dedup_client = self._build_agent_client(
+                node_name="memory_summarizer",  # Reuse same config
+                tools=[retrieve_memory_tool]
+            )
+        else:
+            self.dedup_client = None
 
     @staticmethod
     def compute_memory_parameter(
@@ -124,28 +138,35 @@ class MonthlyMemoryWriterNode(BaseNode):
 
         return {"sentiment_number": float(sentiment_number), "memory_weight": float(memory_weight)}
 
-    @staticmethod
-    def manage_memory_list(
+    async def manage_memory_list(
+        self,
         existing_list: Optional[List[Dict[str, Any]]],
         analyses: Union[Dict[str, Any], List[Dict[str, Any]], Any],
         ticker: Optional[str] = None,
         max_memories: int = 30,
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
-        Build/update a list of memory entries, maintaining up to max_memories entries.
+        Build/update a list of memory entries with automatic deduplication.
+        Performs deduplication if memory_list is not empty.
 
         Args:
             existing_list: Optional previous `memory_list` (e.g., from memory.json).
-                List of dicts with keys: `memory_title`, `file_path`, `confidence`.
+                List of dicts with keys: `memory_title`, `file_path`, `confidence`, `summary`.
             analyses: Analysis dicts. Expected keys (best-effort):
                 - `url`: str URL of the news article (used to compute analysis file path)
                 - `file_path`: str fallback path if URL not available
                 - `title` or `memory_title`: str title of the memory
                 - `confidence`: numeric (1–10)
+                - `summary` or `high_level_idea`: summary of the news
             ticker: Optional ticker symbol (e.g., "AAPL"). If provided, computes analysis file paths from URLs.
+            max_memories: Maximum memories to keep (default 30).
 
         Returns:
-            List[Dict[str, Any]]: List of memory dicts (deduplicated by file_path, newest first).
+            Dict with keys:
+                - memory_list: List of memory entries
+                - duplicate_detected: bool (True if duplicate found)
+                - duplicate_reason: str (explanation if duplicate)
+                - matching_memory_title: str (title of matching memory if duplicate)
         """
         # Start with existing list
         result: List[Dict[str, Any]] = []
@@ -161,11 +182,16 @@ class MonthlyMemoryWriterNode(BaseNode):
                 if fp in seen_paths:
                     continue
                 
+                # Preserve existing entry (including summary if present)
                 memory_entry = {
                     "memory_title": str(item.get("memory_title") or ""),
                     "file_path": fp,
                     "confidence": float(item.get("confidence") or 0.0),
                 }
+                # Include summary if present (for dedup)
+                if "summary" in item:
+                    memory_entry["summary"] = str(item.get("summary") or "")
+                
                 result.append(memory_entry)
                 seen_paths.add(fp)
         
@@ -199,17 +225,78 @@ class MonthlyMemoryWriterNode(BaseNode):
             if not analysis_file_path or analysis_file_path in seen_paths:
                 continue
             
-            # Extract title (prefer memory_title, fallback to title)
+            # Extract current analysis info
             title = str(a.get("memory_title") or a.get("title") or "")
+            current_summary = str(a.get("summary") or a.get("high_level_idea") or "")
+            
             try:
                 confidence = float(a.get("confidence") or 0.0)
             except Exception:
                 confidence = 0.0
             
+            # DEDUPLICATION CHECK (only if existing list is not empty)
+            if result and self.dedup_client:  # result contains existing memories
+                # Build memory list with summaries for comparison
+                memories_for_comparison = []
+                for mem in result:
+                    mem_summary = mem.get("summary", "")
+                    if not mem_summary:
+                        # Load from file_path and construct compact object
+                        mem_file_path = mem.get("file_path", "")
+                        if mem_file_path:
+                            loaded_mem = MonthlyMemoryWriterNode.retrieve_memory(mem_file_path)
+                            if "error" not in loaded_mem:
+                                compact_mem = {
+                                    "memory_title": mem.get("memory_title") or loaded_mem.get("title", ""),
+                                    "summary": loaded_mem.get("summary") or loaded_mem.get("high_level_idea", ""),
+                                    "file_path": mem.get("file_path", "")
+                                }
+                                memories_for_comparison.append(compact_mem)
+                            # Skip if error loading
+                        else:
+                            # No file_path, use what we have
+                            memories_for_comparison.append({
+                                "memory_title": mem.get("memory_title", ""),
+                                "summary": "",
+                                "file_path": ""
+                            })
+                    else:
+                        # Already has summary
+                        memories_for_comparison.append({
+                            "memory_title": mem.get("memory_title", ""),
+                            "summary": mem_summary,
+                            "file_path": mem.get("file_path", "")
+                        })
+                
+                # Call LLM for deduplication
+                try:
+                    is_duplicate, matching_title, reasoning = await self._check_duplicate(
+                        current_title=title,
+                        current_summary=current_summary,
+                        current_url=url,
+                        current_date=a.get("date", ""),
+                        existing_memories=memories_for_comparison
+                    )
+                    
+                    if is_duplicate:
+                        # Return unchanged list with duplicate flag
+                        return {
+                            "memory_list": result,
+                            "duplicate_detected": True,
+                            "duplicate_reason": reasoning,
+                            "matching_memory_title": matching_title
+                        }
+                except Exception as e:
+                    # If dedup fails, log and proceed (fail open)
+                    if hasattr(self, 'logger') and self.logger:
+                        self.logger.warning(f"Dedup check failed: {e}. Proceeding to add memory.")
+            
+            # Not duplicate or no existing memories - add to list
             memory_entry = {
                 "memory_title": title,
                 "file_path": analysis_file_path,
                 "confidence": confidence,
+                "summary": current_summary  # Include for future dedup
             }
             result.append(memory_entry)
             seen_paths.add(analysis_file_path)
@@ -218,7 +305,96 @@ class MonthlyMemoryWriterNode(BaseNode):
         if len(result) > max_memories:
             result = result[-max_memories:]
         
-        return result
+        return {
+            "memory_list": result,
+            "duplicate_detected": False
+        }
+
+    async def _check_duplicate(
+        self,
+        current_title: str,
+        current_summary: str,
+        current_url: str,
+        current_date: str,
+        existing_memories: List[Dict[str, Any]]
+    ) -> tuple:
+        """
+        Call LLM to check if current analysis is duplicate of existing memories.
+        
+        Returns:
+            (is_duplicate, matching_memory_title, reasoning)
+        """
+        system_prompt = """You are a news deduplication analyst for financial market news.
+
+Objective: Determine if a new analysis covers the SAME news event as any existing memory.
+
+Steps:
+1. Read the current analysis summary carefully
+2. Compare with EACH memory summary in the existing memory_list
+3. Use the summary field to identify semantic similarity
+4. Determine if ANY memory covers the same core news event
+5. Consider: Different URLs/sources may report the same event with different wording
+
+Duplication Criteria:
+- DUPLICATE: Same company event, same timeframe, same core facts
+  Examples: 
+  - "Apple announces iPhone 15 on Sept 12" vs "Apple unveils new iPhone 15 at September event"
+  - "Tesla recalls 2M vehicles for safety issue" vs "Tesla issues massive recall of 2 million cars"
+  - "NVDA Q3 earnings beat estimates" vs "Nvidia reports strong Q3 results"
+  
+- NOT DUPLICATE: Related but different events or different timeframes
+  Examples:
+  - "Apple Q1 earnings beat" vs "Apple Q2 earnings miss" (different quarters)
+  - "Tesla opens Texas factory" vs "Tesla announces layoffs" (different events)
+  - "Fed raises rates 0.25%" vs "Fed holds rates steady" (different actions)
+
+Important: Focus on the CORE EVENT, not peripheral details or commentary.
+
+Return Format (STRICT JSON only, no markdown):
+{
+  "is_duplicate": true,
+  "matching_memory_title": "Title of the duplicate memory found",
+  "reasoning": "Brief explanation focusing on why this is the same event"
+}
+
+OR if not duplicate:
+
+{
+  "is_duplicate": false,
+  "matching_memory_title": "",
+  "reasoning": "Brief explanation of why this is a unique event"
+}"""
+
+        user_message = f"""Current Analysis to Check:
+{{
+  "title": "{current_title}",
+  "summary": "{current_summary}",
+  "url": "{current_url}",
+  "date": "{current_date}"
+}}
+
+Existing Memory List (each with summary for comparison):
+{json.dumps(existing_memories, indent=2)}
+
+Task: Determine if the current analysis is a duplicate of any existing memory based on summary comparison."""
+
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=system_prompt),
+            Message(role=MessageRole.USER, content=user_message)
+        ]
+        
+        response = await self.dedup_client.send_message(
+            messages=messages
+        )
+        
+        # Parse response
+        result = extract_json(response.content) if hasattr(response, 'content') else {}
+        
+        is_duplicate = result.get("is_duplicate", False)
+        matching_title = result.get("matching_memory_title", "")
+        reasoning = result.get("reasoning", "")
+        
+        return is_duplicate, matching_title, reasoning
 
     @staticmethod
     def remove_memories_from_list(
@@ -258,6 +434,35 @@ class MonthlyMemoryWriterNode(BaseNode):
                 result.append(mem)
         
         return result
+
+    @staticmethod
+    def retrieve_memory(file_path: str) -> Dict[str, Any]:
+        """
+        Safely retrieve memory object from file path.
+        
+        Security: Only allows paths under NEWS_RESULT_DIR.
+        
+        Args:
+            file_path: Path to memory analysis JSON file
+            
+        Returns:
+            Dict with memory data or empty dict if invalid/not found
+        """
+        # Validate path is under NEWS_RESULT_DIR
+        base_news_dir = Path(os.getenv("NEWS_RESULT_DIR", "/data/news"))
+        try:
+            file_path_obj = Path(file_path).resolve()
+            # Check if path is under base_news_dir
+            if not str(file_path_obj).startswith(str(base_news_dir.resolve())):
+                return {"error": "Invalid path: outside NEWS_RESULT_DIR"}
+            
+            if not file_path_obj.exists() or not file_path_obj.is_file():
+                return {"error": "File not found"}
+            
+            data = json.loads(file_path_obj.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            return {"error": str(e)}
 
     @staticmethod
     def compute_memory_weight_ratio(*, existing_memory_weight: float, latest_confidence: float) -> float:
@@ -444,12 +649,16 @@ Mandatory rules:
             name="compute_memory_parameter",
             description="Compute updated memory parameters from existing_params and a list of analyses. Returns {sentiment_number, memory_weight}.",
         )
-        # Create partial function with ticker pre-filled to compute analysis file paths from URLs
-        from functools import partial
+        # Direct reference to instance method - performs automatic deduplication
         manage_list_tool = StructuredTool.from_function(  # type: ignore[union-attr]
-            func=MonthlyMemoryWriterNode.manage_memory_list,
+            func=self.manage_memory_list,
             name="manage_memory_list",
-            description="Build/update memory_list from existing_list and analyses (max 30). Computes analysis file paths from URLs. Returns list of dicts with memory_title, file_path, confidence.",
+            description=(
+                "Build/update memory_list from existing entries and new analysis. "
+                "Performs automatic deduplication check if memory_list is not empty. "
+                "Returns dict with keys: memory_list (list), duplicate_detected (bool), "
+                "duplicate_reason (str), matching_memory_title (str)."
+            ),
         )
         ratio_tool = StructuredTool.from_function(  # type: ignore[union-attr]
             func=MonthlyMemoryWriterNode.compute_memory_weight_ratio,
@@ -502,11 +711,22 @@ Required workflow (follow exactly):
    - existing_list = memory.memory_list
    - analyses = latest_merge_result
    - ticker = current ticker
-   Put result into output key: `memory_list`.
+   
+   This tool performs automatic deduplication check if memory_list is not empty.
+   If duplicate detected, it returns unchanged list with duplicate_detected=true.
+   
+   The returned dict contains:
+   - memory_list: the updated or unchanged list
+   - duplicate_detected: boolean flag (True if duplicate found)
+   - duplicate_reason: explanation if duplicate
+   - matching_memory_title: title of matching memory if duplicate
 
 5) Call tool `derive_sentiment` with:
    - sentiment_number = output.parameters.sentiment_number
    Put result into output key: `sentiment`.
+
+6) Store results in output keys: "sentiment", "parameters", "memory_list", 
+   and include "duplicate_detected", "duplicate_reason", "matching_memory_title" if present
 
 When you are done calling tools, respond with <FINAL_ANSWER> followed by STRICT JSON (no markdown).
 Return exactly this schema:
@@ -515,7 +735,10 @@ Return exactly this schema:
   "trading_insights": "...",
   "memory_weight_ratio": 0.0,
   "parameters": {"sentiment_number": 0.0, "memory_weight": 0.0},
-  "memory_list": [{"memory_title": "...", "file_path": "...", "confidence": 0.0}, ...]
+  "memory_list": [{"memory_title": "...", "file_path": "...", "confidence": 0.0}, ...],
+  "duplicate_detected": false,
+  "duplicate_reason": "",
+  "matching_memory_title": ""
 }
 """
         messages: List[Message] = []
@@ -586,8 +809,39 @@ Return exactly this schema:
             if isinstance(out, dict):
                 ti = str(out.get("trading_insights") or "").strip()
                 params = out.get("parameters") if isinstance(out.get("parameters"), dict) else None
-                mem_list = out.get("memory_list") if isinstance(out.get("memory_list"), list) else None
+                mem_list_result = out.get("memory_list")
+                
+                # Extract duplicate detection info from manage_memory_list result
+                duplicate_detected = False
+                duplicate_reason = ""
+                matching_memory_title = ""
+                mem_list = None
+                
+                if isinstance(mem_list_result, dict):
+                    # manage_memory_list returned dict with flags
+                    duplicate_detected = mem_list_result.get("duplicate_detected", False)
+                    duplicate_reason = mem_list_result.get("duplicate_reason", "")
+                    matching_memory_title = mem_list_result.get("matching_memory_title", "")
+                    mem_list = mem_list_result.get("memory_list", [])
+                elif isinstance(mem_list_result, list):
+                    # Direct list (backward compat or if LLM bypassed)
+                    mem_list = mem_list_result
+                    # Check if duplicate info is at top level
+                    duplicate_detected = out.get("duplicate_detected", False)
+                    duplicate_reason = out.get("duplicate_reason", "")
+                    matching_memory_title = out.get("matching_memory_title", "")
+                
                 sentiment = str(out.get("sentiment") or "").strip().lower()
+                
+                # Add duplicate info to output for downstream handling
+                out["duplicate_detected"] = duplicate_detected
+                if duplicate_detected:
+                    out["duplicate_reason"] = duplicate_reason
+                    out["matching_memory_title"] = matching_memory_title
+                
+                # Ensure memory_list is the actual list for validation
+                out["memory_list"] = mem_list
+                
                 if ti and params and mem_list is not None and sentiment in allowed_sentiments:
                     return out
             last_err = "memory_summarizer (tool mode) returned invalid JSON or missing required keys."
@@ -802,6 +1056,17 @@ Return exactly this schema:
         if not bool(routing.get("neutral_analysis")):
             return state
 
+        per_ticker_merge_mode = bool(state.get("per_ticker_merge_mode", False))
+        
+        if per_ticker_merge_mode:
+            # New mode: Process multiple tickers from ticker_list
+            return await self._run_per_ticker_merge_mode(state)
+        else:
+            # Old mode: Process single current_ticker
+            return await self._run_single_ticker_mode(state)
+    
+    async def _run_single_ticker_mode(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Old mode: Write memory for single current_ticker."""
         current_ticker = str(state.get("current_ticker") or "").upper().strip()
         if not current_ticker:
             return state
@@ -925,7 +1190,8 @@ Return exactly this schema:
                         analyses_for_tools.append(latest_merge_result)
 
                 params = MonthlyMemoryWriterNode.compute_memory_parameter(existing_params, analyses_for_tools)
-                mem_list = MonthlyMemoryWriterNode.manage_memory_list(existing_list, analyses_for_tools, ticker=t)
+                mem_list_result = await self.manage_memory_list(existing_list, analyses_for_tools, ticker=t)
+                mem_list = mem_list_result.get("memory_list", []) if isinstance(mem_list_result, dict) else []
                 sentiment = MonthlyMemoryWriterNode.derive_sentiment_tool(
                     sentiment_number=float((params or {}).get("sentiment_number") or 0.0)
                 )
@@ -951,10 +1217,25 @@ Return exactly this schema:
                     "memory_weight_ratio": float(ratio_val),
                     "parameters": params,
                     "memory_list": mem_list,
+                    "duplicate_detected": mem_list_result.get("duplicate_detected", False) if isinstance(mem_list_result, dict) else False,
                 }
         except Exception as e:
             try:
                 self.logger.error(f"write_monthly_memory failed for {t}: {e}")
+            except Exception:
+                pass
+            return {**state, "monthly_memory_written": written}
+
+        # Check for duplicate detection - skip writing if duplicate found
+        if summary.get("duplicate_detected"):
+            try:
+                if self.logger:
+                    reason = summary.get("duplicate_reason", "Duplicate detected")
+                    matching_title = summary.get("matching_memory_title", "unknown")
+                    self.logger.info(
+                        f"Skipping memory update for {t}: duplicate news detected. "
+                        f"Matching memory: '{matching_title}'. Reason: {reason}"
+                    )
             except Exception:
                 pass
             return {**state, "monthly_memory_written": written}
@@ -970,4 +1251,213 @@ Return exactly this schema:
             except Exception:
                 pass
 
+        return {**state, "monthly_memory_written": written}
+    
+    async def _run_per_ticker_merge_mode(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """New mode: Write memory for multiple tickers from ticker_list."""
+        ticker_list = state.get("ticker_list", []) if isinstance(state.get("ticker_list"), list) else []
+        if not ticker_list:
+            return state
+        
+        final = state.get("final") if isinstance(state.get("final"), dict) else {}
+        final_result = final.get("result") if isinstance(final.get("result"), dict) else {}
+        results_by_ticker = final_result.get("by_ticker", {}) if isinstance(final_result.get("by_ticker"), dict) else {}
+        
+        base_news_dir = os.getenv("NEWS_RESULT_DIR", "/data/news") or "/data/news"
+        now = datetime.now(timezone.utc)
+        year = now.strftime("%Y")
+        month = now.strftime("%m")
+        
+        written: Dict[str, Any] = (
+            dict(state.get("monthly_memory_written") or {})
+            if isinstance(state.get("monthly_memory_written"), dict)
+            else {}
+        )
+        
+        # Process each ticker
+        for t in ticker_list:
+            t = str(t).upper().strip()
+            if not t:
+                continue
+            
+            latest_merge_result = results_by_ticker.get(t)
+            if not isinstance(latest_merge_result, dict) or not latest_merge_result:
+                continue
+            
+            # Add URL to merge result
+            metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            url = metadata.get("url")
+            if url:
+                latest_merge_result['url'] = url
+            
+            # Process this ticker's memory
+            try:
+                dir_path = Path(base_news_dir) / t / year / month
+                dir_path.mkdir(parents=True, exist_ok=True)
+                mem_path = dir_path / "memory.json"
+                
+                # Load existing memory
+                existing_memory: Optional[Dict[str, Any]] = None
+                if mem_path.exists() and mem_path.is_file():
+                    try:
+                        ex = json.loads(mem_path.read_text(encoding="utf-8"))
+                        existing_memory = ex if isinstance(ex, dict) else None
+                    except Exception:
+                        existing_memory = None
+                
+                # Bootstrap monthly articles if no existing memory
+                monthly_articles: Optional[List[Dict[str, Any]]] = None
+                if existing_memory is None:
+                    items: List[Dict[str, Any]] = []
+                    try:
+                        files = [p for p in dir_path.glob("*.json") if p.name != "memory.json"]
+                        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        for fp in files[:50]:
+                            try:
+                                d = json.loads(fp.read_text(encoding="utf-8"))
+                                if not isinstance(d, dict):
+                                    continue
+                                if not isinstance(d.get("file_path"), str) or not str(d.get("file_path") or "").strip():
+                                    d["file_path"] = str(fp)
+                                items.append(d)
+                            except Exception:
+                                continue
+                    except Exception:
+                        items = []
+                    monthly_articles = items
+                
+                # Check if memory_list is at capacity and needs dropping
+                if isinstance(existing_memory, dict):
+                    mem_list = existing_memory.get("memory_list")
+                    if isinstance(mem_list, list) and len(mem_list) >= 30:
+                        try:
+                            if self.logger:
+                                self.logger.info(f"Memory list at capacity ({len(mem_list)} memories) for {t}, initiating drop manager")
+                        except Exception:
+                            pass
+                        
+                        memory_metadata = MonthlyMemoryWriterNode.extract_memory_metadata(mem_list)
+                        
+                        try:
+                            updated_memory = await self.llm_memory_drop_manager(
+                                ticker=t,
+                                year=year,
+                                month=month,
+                                existing_memory=existing_memory,
+                                memory_metadata_list=memory_metadata,
+                            )
+                            if isinstance(updated_memory, dict):
+                                existing_memory = updated_memory
+                                try:
+                                    if self.logger:
+                                        dropped_paths = updated_memory.get("dropped_memory_paths", [])
+                                        if isinstance(dropped_paths, list):
+                                            paths_str = ", ".join(dropped_paths)
+                                        else:
+                                            paths_str = str(dropped_paths)
+                                        self.logger.info(f"Successfully dropped memory(ies): {paths_str}")
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            try:
+                                if self.logger:
+                                    self.logger.error(f"Memory drop manager error for {t}: {e}")
+                            except Exception:
+                                pass
+                
+                # Generate memory summary
+                try:
+                    summary = await self.llm_monthly_memory_summary(
+                        ticker=t,
+                        year=year,
+                        month=month,
+                        latest_merge_result=latest_merge_result,
+                        existing_memory=existing_memory,
+                        monthly_articles=monthly_articles
+                    )
+                    if not isinstance(summary, dict):
+                        # Fallback to local computation
+                        existing_params = existing_memory.get("parameters") if isinstance(existing_memory, dict) else None
+                        existing_list = existing_memory.get("memory_list") if isinstance(existing_memory, dict) else None
+                        analyses_for_tools: List[Dict[str, Any]] = []
+                        if isinstance(existing_memory, dict):
+                            if isinstance(latest_merge_result, dict):
+                                analyses_for_tools = [latest_merge_result]
+                        else:
+                            analyses_for_tools = list(monthly_articles or [])
+                            if isinstance(latest_merge_result, dict):
+                                analyses_for_tools.append(latest_merge_result)
+
+                        params = MonthlyMemoryWriterNode.compute_memory_parameter(existing_params, analyses_for_tools)
+                        mem_list_result = await self.manage_memory_list(existing_list, analyses_for_tools, ticker=t)
+                        mem_list = mem_list_result.get("memory_list", []) if isinstance(mem_list_result, dict) else []
+                        sentiment = MonthlyMemoryWriterNode.derive_sentiment_tool(
+                            sentiment_number=float((params or {}).get("sentiment_number") or 0.0)
+                        )
+                        trading_insights = await self.llm_trading_insights(
+                            ticker=t,
+                            year=year,
+                            month=month,
+                            latest_merge_result=latest_merge_result,
+                            existing_memory=existing_memory,
+                            monthly_articles=monthly_articles,
+                        )
+                        ratio_val = MonthlyMemoryWriterNode.compute_memory_weight_ratio(
+                            existing_memory_weight=float((existing_params or {}).get("memory_weight") or 0.0)
+                            if isinstance(existing_params, dict)
+                            else 0.0,
+                            latest_confidence=float((latest_merge_result or {}).get("confidence") or 0.0)
+                            if isinstance(latest_merge_result, dict)
+                            else 0.0,
+                        )
+                        summary = {
+                            "sentiment": sentiment,
+                            "trading_insights": trading_insights,
+                            "memory_weight_ratio": float(ratio_val),
+                            "parameters": params,
+                            "memory_list": mem_list,
+                            "duplicate_detected": mem_list_result.get("duplicate_detected", False) if isinstance(mem_list_result, dict) else False,
+                        }
+                except Exception as e:
+                    try:
+                        if self.logger:
+                            self.logger.error(f"write_monthly_memory failed for {t}: {e}")
+                    except Exception:
+                        pass
+                    continue
+                
+                # Check for duplicate detection - skip writing if duplicate found
+                if summary.get("duplicate_detected"):
+                    try:
+                        if self.logger:
+                            reason = summary.get("duplicate_reason", "Duplicate detected")
+                            matching_title = summary.get("matching_memory_title", "unknown")
+                            self.logger.info(
+                                f"Skipping memory update for {t}: duplicate news detected. "
+                                f"Matching memory: '{matching_title}'. Reason: {reason}"
+                            )
+                    except Exception:
+                        pass
+                    continue
+                
+                # Write memory to disk
+                tmp_path = dir_path / "memory.json.tmp"
+                try:
+                    tmp_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+                    tmp_path.replace(mem_path)
+                    written[t] = summary
+                except Exception as e:
+                    try:
+                        if self.logger:
+                            self.logger.error(f"Failed to write memory.json for {t}: {e}")
+                    except Exception:
+                        pass
+            
+            except Exception as e:
+                try:
+                    if self.logger:
+                        self.logger.error(f"Error processing ticker {t}: {e}")
+                except Exception:
+                    pass
+        
         return {**state, "monthly_memory_written": written}

@@ -16,11 +16,7 @@ import html
 from urllib.parse import quote
 
 # Import local modules
-try:
-    from scraper import NewsScraperCore, NewsScraperService
-except ImportError:
-    # Fallback for direct execution
-    from moose.agents.news_scraper.scraper import NewsScraperCore, NewsScraperService
+from scraper import NewsScraperCore, NewsScraperService
 
 
 class NewsScraper(BaseAgent):

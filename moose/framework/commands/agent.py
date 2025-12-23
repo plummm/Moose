@@ -169,8 +169,29 @@ class AgentCommand:
             # Load agent module
             spec = importlib.util.spec_from_file_location("agent_module", agent_file)
             agent_module = importlib.util.module_from_spec(spec)
-            sys.path.insert(0, str(os.getcwd()))
-            spec.loader.exec_module(agent_module)
+            # Ensure imports work in local debug mode.
+            # - `project_root` allows `import moose`
+            # - `agent_dir` allows sibling imports like `import department_router`
+            #
+            # IMPORTANT: We keep `agent_dir` on sys.path for the duration of the debug
+            # session so late imports inside handlers work.
+            agent_dir = str(agent_file.parent)
+            project_root = str(Path(__file__).resolve().parents[3])
+
+            if project_root and project_root not in sys.path:
+                sys.path.insert(0, project_root)
+
+            # Put agent_dir at the front only for the initial module load.
+            sys.path.insert(0, agent_dir)
+            try:
+                spec.loader.exec_module(agent_module)
+            finally:
+                if sys.path and sys.path[0] == agent_dir:
+                    sys.path.pop(0)
+
+            # Keep agent_dir available for late imports during runtime.
+            if agent_dir not in sys.path:
+                sys.path.append(agent_dir)
             
             # Find agent class (look for class that extends BaseAgent)
             agent_class = None

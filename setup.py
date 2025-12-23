@@ -24,7 +24,16 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Xiaochen Zou",
-    packages=find_packages(exclude=["moose/tests/", "moose/agents/"]),
+    # Agents are deployed separately (e.g., mounted into /app in containers) and should NOT be part of the
+    # installed `moose` package. Exclude them by package name patterns (find_packages does not accept paths).
+    packages=find_packages(
+        exclude=(
+            "moose.tests",
+            "moose.tests.*",
+            "moose.agents",
+            "moose.agents.*",
+        )
+    ),
     python_requires=">=3.10",
     install_requires=requirements,
     extras_require={

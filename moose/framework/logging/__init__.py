@@ -75,6 +75,9 @@ def _get_unique_log_file(log_dir: Path, base_name: str) -> Path:
     
     base_path = log_dir / base_name
     
+    if 'MOOSE_LOG_SUFFIX' in os.environ:
+        _current_log_suffix = os.environ['MOOSE_LOG_SUFFIX']
+    
     # If we already have a suffix for this run, use it
     if _current_log_suffix is not None:
         if _current_log_suffix == "":
