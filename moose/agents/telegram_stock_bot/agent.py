@@ -38,10 +38,15 @@ from ticker_heuristics import looks_like_ticker
 from llm_tools import create_tools
 from llm_router import RouterConfig, run_router
 from finance_office_client import FinanceOfficeClient
+from text_formatting import (
+    TELEGRAM_MESSAGE_CHAR_LIMIT,
+    TELEGRAM_SAFE_CHAR_LIMIT,
+    format_finance_office_reply,
+    split_telegram_html,
+)
 
 
 ASK_TICKER, ASK_TZ = range(2)
-
 
 def _get_required_env(key: str) -> str:
     val = os.getenv(key, "").strip()
@@ -70,7 +75,7 @@ class TelegramStockBotAgent(BaseAgent):
 
         self.db = StockBotDB(self._db_path)
         self.fmp = FmpClient(FmpConfig(api_key=self._fmp_key))
-        self.finance_office = FinanceOfficeClient()
+        self.finance_office = FinanceOfficeClient(timeout_s=600.0)
 
         custom = self.config.get("custom", {}) if isinstance(self.config.get("custom"), dict) else {}
         polling = custom.get("polling", {}) if isinstance(custom.get("polling"), dict) else {}
@@ -265,27 +270,49 @@ class TelegramStockBotAgent(BaseAgent):
         text: str,
         reply_to_message_id: int | None = None,
         parse_mode: ParseMode | None = None,
+        allow_split: bool = True,
     ):
         assert self._app is not None
-        msg = await self._app.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_to_message_id=reply_to_message_id,
-            parse_mode=parse_mode,
-        )
-        self.db.add_chat_message(
-            chat_id=msg.chat_id,
-            message_id=msg.message_id,
-            date_ts=int(msg.date.timestamp()),
-            from_user_id=None,
-            from_username=None,
-            from_is_bot=True,
-            text=self._get_text(msg),
-            reply_to_message_id=(msg.reply_to_message.message_id if msg.reply_to_message else None),
-            entities=None,
-            keep_last=100,
-        )
-        return msg
+
+        raw_text = text or ""
+
+        # If splitting is disallowed, truncate to avoid Telegram "message is too long" errors.
+        # If we truncated HTML, disable parse_mode to avoid malformed-tag errors.
+        if not allow_split and len(raw_text) > TELEGRAM_MESSAGE_CHAR_LIMIT:
+            truncated = raw_text[:TELEGRAM_SAFE_CHAR_LIMIT].rstrip()
+            truncated += "\n\n[truncated: exceeded Telegram message length limit]"
+            raw_text = truncated
+            if parse_mode is not None:
+                parse_mode = None
+
+        chunks = split_telegram_html(raw_text, limit=TELEGRAM_SAFE_CHAR_LIMIT) if allow_split else [raw_text]
+
+        last_msg = None
+        for i, chunk in enumerate(chunks):
+            chunk = (chunk or "").strip()
+            if not chunk:
+                continue
+            msg = await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                reply_to_message_id=(reply_to_message_id if i == 0 else None),
+                parse_mode=parse_mode,
+            )
+            self.db.add_chat_message(
+                chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                date_ts=int(msg.date.timestamp()),
+                from_user_id=None,
+                from_username=None,
+                from_is_bot=True,
+                text=self._get_text(msg),
+                reply_to_message_id=(msg.reply_to_message.message_id if msg.reply_to_message else None),
+                entities=None,
+                keep_last=100,
+            )
+            last_msg = msg
+
+        return last_msg
 
     def _should_route_free_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
         chat = update.effective_chat
@@ -534,6 +561,7 @@ class TelegramStockBotAgent(BaseAgent):
                 ),
                 reply_to_message_id=msg.message_id,
                 parse_mode=ParseMode.HTML,
+                allow_split=False,
             )
             if flow_id:
                 self.db.update_pending_flow(chat_id=chat.id, flow_id=flow_id, clarification_message_id=sent.message_id)
@@ -569,17 +597,20 @@ class TelegramStockBotAgent(BaseAgent):
                         context=ctx_text,
                         analyzer_data=analyzer_data,
                     )
-                    if resp.get("status") != "success":
-                        text = f"FinanceOffice error: {resp.get('error') or 'unknown'}"
-                    else:
-                        text = str(resp.get("result") or "") or "(FinanceOffice returned empty result)"
-                    await self._send_and_store(chat_id=chat.id, text=text, reply_to_message_id=msg.message_id)
+                    text = format_finance_office_reply(instruction=instruction, resp=resp if isinstance(resp, dict) else {})
+                    await self._send_and_store(
+                        chat_id=chat.id,
+                        text=text,
+                        reply_to_message_id=msg.message_id,
+                        parse_mode=ParseMode.HTML,
+                    )
                 except Exception as e:
                     await self._send_and_store(
                         chat_id=chat.id,
-                        text=f"FinanceOffice call failed: {e}",
+                        text=f"Failed to gather necessary data",
                         reply_to_message_id=msg.message_id,
                     )
+                    self.logger.error(f"FinanceOffice call failed: {e}", exc_info=True)
 
             asyncio.create_task(_do())
             return
@@ -1293,22 +1324,7 @@ class TelegramStockBotAgent(BaseAgent):
                 direction = "up" if pct >= 0 else "down"
                 msg = f"Alert: {fmt_symbol_html(symbol)} is {direction} {pct:+.2f}% today (base {base:.4f} → now {p:.4f})."
                 try:
-                    sent = await context.bot.send_message(chat_id=chat.chat_id, text=msg, parse_mode=ParseMode.HTML)
-                    try:
-                        self.db.add_chat_message(
-                            chat_id=sent.chat_id,
-                            message_id=sent.message_id,
-                            date_ts=int(sent.date.timestamp()),
-                            from_user_id=None,
-                            from_username=None,
-                            from_is_bot=True,
-                            text=self._get_text(sent),
-                            reply_to_message_id=(sent.reply_to_message.message_id if sent.reply_to_message else None),
-                            entities=None,
-                            keep_last=100,
-                        )
-                    except Exception:
-                        pass
+                    await self._send_and_store(chat_id=chat.chat_id, text=msg, parse_mode=ParseMode.HTML)
                     self.db.upsert_daily_state(chat.chat_id, symbol, day_key, last_alert_threshold=new_thr)
                 except Exception as e:
                     self.logger.warning(f"Failed to send alert to {chat.chat_id}: {e}")
@@ -1371,22 +1387,7 @@ class TelegramStockBotAgent(BaseAgent):
                 move_txt = f"{move:+.2f}%" if move is not None else "n/a"
                 lines.append(f"- {fmt_symbol_html(symbol)} open: {op} (overnight: {move_txt}) now: {price}")
             try:
-                sent = await context.bot.send_message(chat_id=chat.chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
-                try:
-                    self.db.add_chat_message(
-                        chat_id=sent.chat_id,
-                        message_id=sent.message_id,
-                        date_ts=int(sent.date.timestamp()),
-                        from_user_id=None,
-                        from_username=None,
-                        from_is_bot=True,
-                        text=self._get_text(sent),
-                        reply_to_message_id=(sent.reply_to_message.message_id if sent.reply_to_message else None),
-                        entities=None,
-                        keep_last=100,
-                    )
-                except Exception:
-                    pass
+                await self._send_and_store(chat_id=chat.chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
             except Exception as e:
                 self.logger.warning(f"Failed to send open msg to {chat.chat_id}: {e}")
             self.db.set_market_open_sent(chat.chat_id, today.isoformat())
@@ -1424,22 +1425,7 @@ class TelegramStockBotAgent(BaseAgent):
                     lines.append(f"- {fmt_symbol_html(symbol)} close: {price} ({chg}, {pct}%)")
             lines.append(f"Next market open: {phrase} ({next_open.isoformat()})")
             try:
-                sent = await context.bot.send_message(chat_id=chat.chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
-                try:
-                    self.db.add_chat_message(
-                        chat_id=sent.chat_id,
-                        message_id=sent.message_id,
-                        date_ts=int(sent.date.timestamp()),
-                        from_user_id=None,
-                        from_username=None,
-                        from_is_bot=True,
-                        text=self._get_text(sent),
-                        reply_to_message_id=(sent.reply_to_message.message_id if sent.reply_to_message else None),
-                        entities=None,
-                        keep_last=100,
-                    )
-                except Exception:
-                    pass
+                await self._send_and_store(chat_id=chat.chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
             except Exception as e:
                 self.logger.warning(f"Failed to send close msg to {chat.chat_id}: {e}")
             self.db.set_market_close_sent(chat.chat_id, today.isoformat())

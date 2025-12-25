@@ -9,7 +9,7 @@ from moose.framework.agent_core.agent_endpoints import resolve_agent_base_url
 
 
 class FinanceOfficeClient:
-    def __init__(self, *, base_url: Optional[str] = None, timeout_s: float = 120.0):
+    def __init__(self, *, base_url: Optional[str] = None, timeout_s: float = 300.0):
         # Local debug: https://localhost:<port>
         # Docker: http://{image_prefix}finance_office-{project_id}:3501
         self.base_url = base_url or resolve_agent_base_url(agent_name="finance_office", port=3501)

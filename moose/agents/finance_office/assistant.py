@@ -249,10 +249,14 @@ Provide a comprehensive financial analysis in JSON format"""
                 self.logger.debug(f"Analyzing news: {url} [quality_score: {quality_score}]")
 
             state = {"max_tool_iterations": max_tool_iterations}
+            # News/article inputs contain new external knowledge → opt into memory updates downstream.
+            run_metadata = dict(metadata or {})
+            run_metadata["url"] = url
+            run_metadata["update_memory"] = True
             team_resp = await self.team_manager.run_task(
                 task_instruction=instruction,
                 context_text=content,
-                metadata={"url": url, **(metadata or {})},
+                metadata=run_metadata,
                 merge_system_message=system_message,
                 merge_user_message=user_message,
                 additional_states=state,

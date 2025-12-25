@@ -89,9 +89,9 @@ class InvestmentResearchWorkflow:
 
         def _route_after_team_merge(state: Dict[str, Any]) -> str:
             routing = state.get("routing", {}) if isinstance(state.get("routing"), dict) else {}
-            neutral = bool(routing.get("neutral_analysis"))
+            update_memory = bool(routing.get("update_memory"))
             current_ticker = str(state.get("current_ticker") or "").strip()
-            return "write_monthly_memory" if (neutral and bool(current_ticker)) else "end"
+            return "write_monthly_memory" if (update_memory and bool(current_ticker)) else "end"
 
         g.set_entry_point("load_ticker_memory")
         g.add_conditional_edges(
@@ -150,9 +150,9 @@ class InvestmentResearchWorkflow:
         
         def _route_after_team_merge(state: Dict[str, Any]) -> str:
             routing = state.get("routing", {}) if isinstance(state.get("routing"), dict) else {}
-            neutral = bool(routing.get("neutral_analysis"))
+            update_memory = bool(routing.get("update_memory"))
             ticker_list = state.get("ticker_list", []) if isinstance(state.get("ticker_list"), list) else []
-            return "write_monthly_memory" if (neutral and ticker_list) else "end"
+            return "write_monthly_memory" if (update_memory and ticker_list) else "end"
         
         g.set_entry_point("load_ticker_memory")
         g.add_conditional_edges(
@@ -213,6 +213,9 @@ class InvestmentResearchWorkflow:
             tickers = routing.get("tickers") if isinstance(routing.get("tickers"), list) else []
             tickers = [str(t).upper().strip() for t in tickers if str(t).strip()]
             tickers_to_run = tickers if tickers else [""]
+            # Keep parity with the newer per-ticker mode: make ticker_list explicit in state.
+            # (Some downstream nodes / debugging tools expect this field.)
+            state = {**state, "ticker_list": list(tickers_to_run)}
 
             base_merge_user_message = str(state.get("merge_user_message") or "")
 
@@ -233,6 +236,7 @@ class InvestmentResearchWorkflow:
                 per_state["llm_usage_total"] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                 per_state["llm_cost_total"] = 0.0
                 per_state["per_ticker_merge_mode"] = False  # Old mode flag
+                per_state["ticker_list"] = list(tickers_to_run)
 
                 # Format analyze_news merge_user_message template once per ticker.
                 formatted_user = base_merge_user_message

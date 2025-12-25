@@ -1268,11 +1268,35 @@ Return plain text instruction only."""
                 },
             }
 
+        # The investment_research_team returns an envelope that may include a `raw` snapshot of the full
+        # LangGraph state. That snapshot can contain non-JSON-serializable objects (e.g., LLMClient instances
+        # under `specialist_clients`). Since finance_office is an HTTP JSON API, strip `raw` before returning.
+        team_result = team_resp.get("result")
+        if isinstance(team_result, dict) and "raw" in team_result:
+            try:
+                team_result = dict(team_result)
+                team_result.pop("raw", None)
+            except Exception:
+                pass
+
+        # Plumb InvestmentResearchWorkflow's token usage/cost totals into the department workflow state so
+        # FinanceOffice.run_task can attach them to the outgoing response.
+        # ResearchLead.run_task provides them both top-level and inside last_state (keep this defensive).
+        last_state = team_resp.get("last_state") if isinstance(team_resp.get("last_state"), dict) else {}
+        usage_total = team_resp.get("llm_usage_total")
+        cost_total = team_resp.get("llm_cost_total")
+        if usage_total is None:
+            usage_total = last_state.get("llm_usage_total")
+        if cost_total is None:
+            cost_total = last_state.get("llm_cost_total")
+
         per_team_prev = state.get("previous_team_result") if isinstance(state.get("previous_team_result"), dict) else {}
         return {
             **state,
-            "previous_team_result": {**per_team_prev, team_name: team_resp.get("result")},
-            "final_response": {"status": "success", "error": None, "result": team_resp.get("result")},
+            "previous_team_result": {**per_team_prev, team_name: team_result},
+            "final_response": {"status": "success", "error": None, "result": team_result},
+            "llm_usage_total": usage_total,
+            "llm_cost_total": cost_total,
         }
 
     async def run_task(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1297,10 +1321,23 @@ Return plain text instruction only."""
             state_out = await app.ainvoke(state_in)
             final_response = state_out.get("final_response") if isinstance(state_out, dict) else None
             if isinstance(final_response, dict):
+                # Include token usage/cost totals for downstream callers (e.g., telegram_stock_bot).
+                try:
+                    usage_total = state_out.get("llm_usage_total") if isinstance(state_out, dict) else None
+                    cost_total = state_out.get("llm_cost_total") if isinstance(state_out, dict) else None
+                    if isinstance(usage_total, dict) and "llm_usage_total" not in final_response:
+                        final_response["llm_usage_total"] = usage_total
+                    if cost_total is not None and "llm_cost_total" not in final_response:
+                        try:
+                            final_response["llm_cost_total"] = float(cost_total)
+                        except Exception:
+                            final_response["llm_cost_total"] = cost_total
+                except Exception:
+                    pass
                 return final_response
             return {"status": "error", "error": "Invalid department workflow response", "result": None}
         except Exception as e:
-            self.logger.error(f"Error in run_task endpoint: {e}")
+            self.logger.error(f"Error in run_task endpoint: {e}", exc_info=True)
             return {"status": "error", "error": str(e), "result": None}
     
     def process(self, input_data=None) -> Any:

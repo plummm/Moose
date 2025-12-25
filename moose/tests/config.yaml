@@ -5,43 +5,43 @@
 models:
   # OpenAI Models
   - model_name: gpt-5
-    input_cost_per_token: 0.00000125
-    output_cost_per_token: 0.00001
+    input_cost_per_million_token: 1.25
+    output_cost_per_million_token: 10.0
   
   - model_name: gpt-4-turbo
-    input_cost_per_token: 0.00001
-    output_cost_per_token: 0.00003
+    input_cost_per_million_token: 10.0
+    output_cost_per_million_token: 30.0
 
   - model_name: gpt-4o
-    input_cost_per_token: 0.000005
-    output_cost_per_token: 0.000015
+    input_cost_per_million_token: 5.0
+    output_cost_per_million_token: 15.0
   
   - model_name: gpt-3.5-turbo
-    input_cost_per_token: 0.0000015
-    output_cost_per_token: 0.000002
+    input_cost_per_million_token: 1.5
+    output_cost_per_million_token: 2.0
   
   # Anthropic Models
   - model_name: claude-sonnet-4-5-20250929
-    input_cost_per_token: 0.000003
-    output_cost_per_token: 0.000015
+    input_cost_per_million_token: 3.0
+    output_cost_per_million_token: 15.0
   
   - model_name: claude-sonnet-4-20250514
-    input_cost_per_token: 0.000003
-    output_cost_per_token: 0.000015
+    input_cost_per_million_token: 3.0
+    output_cost_per_million_token: 15.0
   
   - model_name: claude-3-sonnet
-    input_cost_per_token: 0.000003
-    output_cost_per_token: 0.000015
+    input_cost_per_million_token: 3.0
+    output_cost_per_million_token: 15.0
   
   - model_name: claude-3-haiku
-    input_cost_per_token: 0.00000025
-    output_cost_per_token: 0.00000125
+    input_cost_per_million_token: 0.25
+    output_cost_per_million_token: 1.25
   
   # Google Models
   - model_name: gemini-2.5-flash
-    input_cost_per_token: 0.000000125
-    output_cost_per_token: 0.0000005
+    input_cost_per_million_token: 0.125
+    output_cost_per_million_token: 0.5
   
   - model_name: gemini-ultra
-    input_cost_per_token: 0.00000125
-    output_cost_per_token: 0.000005
+    input_cost_per_million_token: 1.25
+    output_cost_per_million_token: 5.0

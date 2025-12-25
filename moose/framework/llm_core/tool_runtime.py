@@ -54,6 +54,27 @@ class ToolRuntime:
         self._active: set[str] = set()
         self._depth: int = 0
 
+        # Accumulates LLM usage/cost incurred "externally" during this request (e.g., meeting-room helper calls).
+        self.external_cost: float = 0.0
+        self.external_usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+    def add_external_llm_usage(
+        self,
+        *,
+        usage: Optional[Dict[str, int]] = None,
+        cost: Optional[float] = None,
+    ) -> None:
+        """
+        Add LLM usage/cost that occurred outside the current LLMClient request but should be attributed to it.
+        """
+        if isinstance(cost, (int, float)):
+            self.external_cost += float(cost)
+
+        if isinstance(usage, dict):
+            self.external_usage["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
+            self.external_usage["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+            self.external_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+
     async def start(self) -> None:
         """Optional hook for initializing shared resources (no-op by default)."""
         return None

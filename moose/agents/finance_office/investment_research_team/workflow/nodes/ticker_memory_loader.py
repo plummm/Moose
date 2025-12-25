@@ -15,7 +15,7 @@ class TickerMemoryLoaderNode:
 
     Reads:
     - state.routing.tickers (list[str])
-    - state.routing.neutral_analysis (bool)
+    - state.routing.update_memory (bool)
 
     Writes:
     - state.ticker_memory (dict[ticker -> memory dict]) loaded from:

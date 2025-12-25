@@ -55,7 +55,6 @@ class AnalystMCPTools(FMPMCPTools):
 
         Parameters
         - symbol: Stock ticker (e.g., `"AAPL"`).
-        - period: `"annual"` or `"quarter"`.
         - page: Page index (non-negative integer).
         - limit: Maximum number of records per page (positive integer).
 
@@ -73,7 +72,7 @@ class AnalystMCPTools(FMPMCPTools):
         ```
 
         Data source: FMP Stable Financial Estimates API
-        - GET `https://financialmodelingprep.com/stable/analyst-estimates?symbol=...&period=...&page=...&limit=...`
+        - GET `https://financialmodelingprep.com/stable/analyst-estimates?symbol=...&page=...&limit=...`
         Reference: https://site.financialmodelingprep.com/developer/docs
         """
         meta = {"tool": "get_financial_estimates", "symbol": symbol, "period": period, "page": page, "limit": limit}

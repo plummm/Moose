@@ -42,10 +42,10 @@ class CombinedFinanceMCPTools:
         self._langchain_tools: Optional[List[Any]] = None
         self.mcp_tools: Dict[str, Any] = {}
 
-    def get_langchain_tools(self) -> List[Any]:
+    def get_langchain_tools(self, *, meeting_room_enabled: bool = False) -> List[Any]:
         """Return the concatenated LangChain tool list from enabled providers."""
         cached = self._langchain_tools
-        if cached is not None:
+        if cached is not None and getattr(self, "_meeting_room_enabled_cache", None) == bool(meeting_room_enabled):
             return cached
 
         tools: List[Any] = []
@@ -56,7 +56,11 @@ class CombinedFinanceMCPTools:
                 continue
             if not hasattr(provider, "get_langchain_tools"):
                 raise TypeError(f"Provider {provider!r} does not implement get_langchain_tools()")
-            provider_tools = provider.get_langchain_tools()
+            try:
+                provider_tools = provider.get_langchain_tools(meeting_room_enabled=meeting_room_enabled)
+            except TypeError:
+                # Back-compat if a provider doesn't accept the flag.
+                provider_tools = provider.get_langchain_tools()
             tools.extend(provider_tools or [])
 
             # Prefer provider.mcp_tools (StructuredTool objects by name) if present; otherwise derive from list.
@@ -72,6 +76,7 @@ class CombinedFinanceMCPTools:
 
         # Cache + expose for summarization
         self._langchain_tools = tools
+        setattr(self, "_meeting_room_enabled_cache", bool(meeting_room_enabled))
         self.mcp_tools = merged
         return tools
 

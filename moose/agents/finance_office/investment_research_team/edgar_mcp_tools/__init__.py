@@ -63,15 +63,18 @@ class EdgarAllMCPTools(
     - Reporting / governance / ownership-change analysis (10-K/10-Q/6-K/DEF 14A/13D/13G/NT/Reg CF)
     """
 
-    def get_langchain_tools(self) -> List[Any]:
+    def get_langchain_tools(self, *, meeting_room_enabled: bool = False) -> List[Any]:
         """
         Create LangChain `StructuredTool` wrappers for all inherited `@mcp_tool` methods.
 
         This is built via reflection (see `EdgarMCPTools.list_mcp_tools()`), so adding new
         `@mcp_tool` methods to any inherited category class automatically shows up here.
         """
-        # Cache
-        cached = getattr(self, "_langchain_tools", None)
+        cache = getattr(self, "_langchain_tools_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(self, "_langchain_tools_cache", cache)
+        cached = cache.get(bool(meeting_room_enabled))
         if cached is not None:
             return cached
 
@@ -84,6 +87,8 @@ class EdgarAllMCPTools(
         m: Dict[str, Any] = {}
 
         for spec in self.__class__.list_mcp_tools():
+            if bool(spec.get("meeting_room_only")) and not bool(meeting_room_enabled):
+                continue
             name = spec.get("name")
             method_name = spec.get("method_name")
             doc = (spec.get("doc") or "").strip()
@@ -104,7 +109,7 @@ class EdgarAllMCPTools(
 
         # Expose for summarization / external inspection
         setattr(self, "mcp_tools", m)
-        setattr(self, "_langchain_tools", tools)
+        cache[bool(meeting_room_enabled)] = tools
         return tools
 
     async def close(self) -> None:

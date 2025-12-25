@@ -294,6 +294,9 @@ class ResearchLead:
             "error": None if ok_flag else (err_val or "unknown_error"),
             "result": final if isinstance(final, dict) else {},
             "last_state": team_out if isinstance(team_out, dict) else {},
+            # Convenience passthroughs for upstream callers (e.g., finance_office) so they don't have to dig into last_state.
+            "llm_usage_total": (team_out.get("llm_usage_total") if isinstance(team_out, dict) else None),
+            "llm_cost_total": (team_out.get("llm_cost_total") if isinstance(team_out, dict) else None),
         }
     
     def _summarize_tools(self, *, agent_name: Optional[str] = None) -> str:

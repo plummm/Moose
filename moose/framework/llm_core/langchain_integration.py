@@ -240,7 +240,7 @@ class LangChainLLM:
         usage: Optional[Dict[str, int]]
     ) -> Optional[float]:
         """
-        Calculate cost from token usage using cost per token rates from config.
+        Calculate cost from token usage using per-million-token rates from config.
         
         Args:
             usage: Token usage dictionary with input_tokens and output_tokens
@@ -269,20 +269,20 @@ class LangChainLLM:
                 self.logger.error(f"Model info not found for {self.model}, cannot calculate cost")
                 return None
             
-            input_cost_per_token = model_info.get('input_cost_per_token')
-            output_cost_per_token = model_info.get('output_cost_per_token')
+            input_cost_per_million = model_info.get('input_cost_per_million_token')
+            output_cost_per_million = model_info.get('output_cost_per_million_token')
             
-            if input_cost_per_token is None or output_cost_per_token is None:
+            if input_cost_per_million is None or output_cost_per_million is None:
                 self.logger.debug(f"Cost per token rates not found for {self.model}")
                 return None
             
-            # Calculate cost: (input_tokens * input_cost) + (output_tokens * output_cost)
-            cost = (input_tokens * input_cost_per_token) + (output_tokens * output_cost_per_token)
+            # Calculate cost using USD per 1,000,000 tokens.
+            cost = ((input_tokens * float(input_cost_per_million)) + (output_tokens * float(output_cost_per_million))) / 1_000_000.0
             
             self.logger.debug(
                 f"Calculated cost for {self.model}: "
-                f"{input_tokens} prompt * ${input_cost_per_token:.8f} + "
-                f"{output_tokens} completion * ${output_cost_per_token:.8f} = ${cost:.8f}"
+                f"{input_tokens} input * ${float(input_cost_per_million):.6f}/1M + "
+                f"{output_tokens} output * ${float(output_cost_per_million):.6f}/1M = ${cost:.8f}"
             )
             
             return cost

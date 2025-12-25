@@ -169,7 +169,7 @@ client = LLMClient(
 client = LLMClient(
     model="gpt-4",
     temperature=0.7,
-    max_tokens=500,
+    max_output_tokens=500,
     max_input_tokens=128000,  # Default: 128000
     timeout=30.0
 )
@@ -244,7 +244,8 @@ Initialize the LLM client.
 - `provider` (LLMProvider, optional): Explicit provider. Auto-detected if None.
 - `api_key` (str, optional): API key. Uses environment variables if None.
 - `temperature` (float): Sampling temperature (default: 1.0)
-- `max_tokens` (int, optional): Maximum tokens to generate
+- `max_output_tokens` (int, optional): Maximum output tokens to generate
+- `max_tokens` (int, optional): Deprecated alias for `max_output_tokens` (backward compatibility)
 - `max_input_tokens` (int, optional): Maximum input tokens for the model (default: 128000)
 - `timeout` (float, optional): Request timeout in seconds
 - `config` (ModelConfig, optional): ModelConfig instance for cost calculation
@@ -309,11 +310,11 @@ The framework uses a `config.yaml` file to configure model cost rates.
    ```yaml
    models:
      - model_name: gpt-4
-       input_cost_per_token: 0.00003
-       output_cost_per_token: 0.00006
+       input_cost_per_million_token: 30.0
+       output_cost_per_million_token: 60.0
      - model_name: claude-3-opus-20240229
-       input_cost_per_token: 0.000015
-       output_cost_per_token: 0.000075
+       input_cost_per_million_token: 15.0
+       output_cost_per_million_token: 75.0
    ```
 
 The framework will automatically:
@@ -500,8 +501,8 @@ Add your model to `config.yaml`:
 ```yaml
 models:
   - model_name: your-custom-model
-    input_cost_per_token: 0.00001
-    output_cost_per_token: 0.00002
+    input_cost_per_million_token: 10.0
+    output_cost_per_million_token: 20.0
 ```
 
 The provider will be auto-detected from the model name, or you can specify it explicitly:

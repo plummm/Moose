@@ -67,7 +67,7 @@ class LLMClient:
         provider: Optional[LLMProvider] = None,
         api_key: Optional[str] = None,
         temperature: float = 1.0,
-        max_tokens: Optional[int] = None,
+        max_output_tokens: Optional[int] = None,
         max_input_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         config: Optional[ModelConfig] = None,
@@ -86,8 +86,8 @@ class LLMClient:
             provider: Explicit provider. If None, will be inferred from model name.
             api_key: API key for the provider. If None, will use environment variables.
             temperature: Sampling temperature (0.0 to 2.0)
-            max_tokens: Maximum tokens to generate
-            max_input_tokens: Maximum input tokens for the model (default: 128000)
+            max_output_tokens: Maximum output tokens to generate (if unset, uses config max_output_tokens when available)
+            max_input_tokens: Maximum input tokens for the model (if unset, uses config max_input_tokens when available; default fallback: 128000)
             timeout: Request timeout in seconds
             config: Optional ModelConfig instance (for cost calculation)
             tools: Optional list of LangChain tools to bind to the LLM
@@ -100,8 +100,21 @@ class LLMClient:
         self.model = model
         self.provider = provider or get_provider(model)
         self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.max_input_tokens = max_input_tokens or kwargs.pop('max_input_tokens', 128000)
+        # Allow legacy kwargs-style overrides too
+        if max_input_tokens is None and "max_input_tokens" in kwargs:
+            try:
+                max_input_tokens = int(kwargs.pop("max_input_tokens"))
+            except Exception:
+                max_input_tokens = None
+
+        if max_output_tokens is None and "max_output_tokens" in kwargs:
+            try:
+                max_output_tokens = int(kwargs.pop("max_output_tokens"))
+            except Exception:
+                max_output_tokens = None
+
+        self.max_output_tokens = max_output_tokens
+        self.max_input_tokens = max_input_tokens  # may be filled from config below
         self.timeout = timeout
         self.extra_params = kwargs
         # Main-agent attribution for cost tracking + UI rollups
@@ -131,6 +144,31 @@ class LLMClient:
             except Exception as e:
                 self.logger.warning(f"Failed to load config: {e}, cost calculation may not work")
                 config = None
+
+        # Apply model token limits from config if caller didn't provide explicit overrides.
+        if config is not None:
+            try:
+                mi = config.get_model_info(self.model) or {}
+            except Exception:
+                mi = {}
+            if self.max_input_tokens is None:
+                try:
+                    v = mi.get("max_input_tokens")
+                    self.max_input_tokens = int(v) if v is not None else None
+                except Exception:
+                    self.max_input_tokens = None
+            if self.max_output_tokens is None:
+                try:
+                    v = mi.get("max_output_tokens")
+                    self.max_output_tokens = int(v) if v is not None else None
+                except Exception:
+                    self.max_output_tokens = None
+
+        # Final fallback defaults when config doesn't have the model.
+        if self.max_input_tokens is None:
+            self.max_input_tokens = 128000
+        # Keep the historical attribute name for internal/backward compatibility.
+        self.max_tokens = self.max_output_tokens
         
         # Store tools for potential tool execution
         self.tools = tools or []
@@ -151,7 +189,7 @@ class LLMClient:
             self.langchain_llm = LangChainLLM(
                 model=model,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=self.max_output_tokens,
                 timeout=timeout,
                 config=config,
                 tools=tools,
@@ -318,6 +356,183 @@ class LLMClient:
         total += 10  # Base overhead
         
         return total
+
+    def _normalize_content_to_text(self, content: Any) -> str:
+        """
+        Normalize provider/LangChain content into a plain text string.
+
+        Some providers (and some LangChain versions) can return content as a list of
+        structured blocks (e.g., [{"type":"text","text":"..."}]). Downstream code frequently
+        assumes `LLMResponse.content` is a string (e.g., for JSON extraction), so we
+        normalize to text at the client boundary.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(str(block.get("text", "")))
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            out = "\n".join([t for t in text_parts if str(t).strip()])
+            if out:
+                return out
+            return str(content)
+        return str(content)
+
+    def _safe_input_budget(self, *, safety_margin: int = 256) -> int:
+        """
+        Compute a conservative safe input token budget for the current model context window.
+
+        We reserve space for:
+        - expected output tokens
+        - protocol/formatting overhead margin
+        """
+        try:
+            max_in = int(self.max_input_tokens or 0)
+        except Exception:
+            max_in = 0
+        if max_in <= 0:
+            # Fallback to a reasonable default; upstream defaults max_input_tokens to 128k.
+            max_in = 128000
+        try:
+            sm = int(safety_margin or 0)
+        except Exception:
+            sm = 256
+        budget = max_in - max(0, sm)
+        # Never allow a trivially small budget; compaction needs some room to work.
+        return max(1024, int(budget))
+
+    def _compact_conversation_messages_for_budget(
+        self,
+        *,
+        conversation_messages: List[Message],
+        system_message: Optional[Union[str, Message]],
+        safe_budget: int,
+        reserved_output_tokens: int,
+        iteration: int,
+    ) -> List[Message]:
+        """
+        Compact assistant/tool history when we exceed the model input context window.
+
+        Strategy:
+        - Keep ALL user messages (do not remove them).
+        - Replace non-user history with a bounded, lossy summary message inserted BEFORE the last user message.
+        - If user messages alone exceed budget, truncate older user message contents (while preserving message objects).
+        """
+        # Count before
+        before_tokens = self._count_message_tokens(message="", system_message=system_message, messages=conversation_messages)
+
+        # Split messages
+        user_msgs: List[Message] = [m for m in conversation_messages if getattr(m, "role", None) == MessageRole.USER]
+        other_msgs: List[Message] = [m for m in conversation_messages if getattr(m, "role", None) != MessageRole.USER]
+
+        # If there's no user message, we can't preserve "latest user is last" semantics; fall back to original list.
+        if not user_msgs:
+            return conversation_messages
+
+        last_user = user_msgs[-1]
+        prefix_users = user_msgs[:-1]
+
+        # Build a bounded summary of recent assistant/tool messages.
+        # Aim for ~35% of safe budget (or at least 512 tokens).
+        max_summary_tokens = max(512, int(safe_budget * 0.35))
+        remaining = max_summary_tokens
+        summary_lines: List[str] = []
+        kept_items = 0
+
+        def _push(label: str, text: str) -> None:
+            nonlocal remaining, kept_items
+            if remaining <= 0:
+                return
+            s = (text or "").strip()
+            if not s:
+                return
+            # Hard cap per item for sanity
+            s = s[:4000]
+            line = f"{label}: {s}"
+            t = self._count_tokens(line)
+            if t <= 0:
+                t = max(1, len(line) // 4)
+            if t > remaining:
+                # Truncate further to fit remaining budget
+                approx_chars = max(80, remaining * 4)
+                line = line[:approx_chars] + " …(truncated)"
+                t = self._count_tokens(line)
+            if t <= 0 or t > remaining:
+                return
+            summary_lines.append(line)
+            remaining -= t
+            kept_items += 1
+
+        # Prioritize tool messages first (usually largest + most valuable), newest-first.
+        for m in reversed(other_msgs):
+            if remaining <= 0:
+                break
+            role = getattr(m, "role", None)
+            if role == MessageRole.TOOL:
+                nm = getattr(m, "name", None) or "tool"
+                _push(f"TOOL[{nm}]", str(getattr(m, "content", "") or ""))
+
+        # Then include a small tail of assistant messages (newest-first).
+        for m in reversed(other_msgs):
+            if remaining <= 0:
+                break
+            role = getattr(m, "role", None)
+            if role == MessageRole.ASSISTANT:
+                _push("ASSISTANT", str(getattr(m, "content", "") or ""))
+
+        header = (
+            "CONTEXT COMPACTION NOTICE (internal):\n"
+            f"- reason: input context exceeded model limit; compacting assistant/tool history at iteration={iteration}\n"
+            f"- before_tokens_estimate: {before_tokens}\n"
+            f"- safe_input_budget: {safe_budget} (reserved_output_tokens={reserved_output_tokens})\n"
+            "- policy: user messages preserved; assistant/tool history summarized and truncated.\n"
+            "\n"
+            "PARTIAL SUMMARY OF PRIOR ASSISTANT/TOOL RESULTS (lossy):\n"
+        )
+        summary_text = header + ("\n".join(summary_lines) if summary_lines else "(no prior assistant/tool messages to summarize)")
+        summary_text += (
+            "\n\n"
+            "IMPORTANT:\n"
+            "- The summary above may omit details due to token limits.\n"
+            "- Proceed using the user messages + this summary.\n"
+            "- If you need more information, you may call tools again.\n"
+        )
+        if self.enable_multi_stage_reasoning:
+            summary_text += (
+                f"- When finished, start your final response with {self.multi_stage_marker}.\n"
+            )
+
+        compact_msg = Message(role=MessageRole.USER, content=summary_text)
+
+        # New conversation order: keep older user msgs, then compaction summary, then last user.
+        new_msgs: List[Message] = [*prefix_users, compact_msg, last_user]
+
+        # If still over budget (user messages too large), truncate older user messages (keep last user intact).
+        after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
+        if after_tokens > safe_budget:
+            # Reserve room for last user + compaction msg; truncate prefix users as needed.
+            # We'll truncate oldest-first.
+            for i in range(len(prefix_users)):
+                if after_tokens <= safe_budget:
+                    break
+                m = prefix_users[i]
+                c = getattr(m, "content", "")
+                if not isinstance(c, str):
+                    c = str(c)
+                if len(c) <= 200:
+                    continue
+                # Truncate aggressively.
+                new_c = c[:200] + " …(truncated due to token budget)"
+                prefix_users[i] = Message(role=MessageRole.USER, content=new_c)
+                new_msgs = [*prefix_users, compact_msg, last_user]
+                after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
+
+        return new_msgs
     
     def _chunk_content(self, content: str, chunk_size_tokens: int) -> List[str]:
         """
@@ -661,6 +876,12 @@ Provide your final combined response:"""
             request_id=request_id,
             **kwargs
         )
+
+        # Normalize summary content to plain text (providers may return content blocks).
+        try:
+            final_response.content = self._normalize_content_to_text(getattr(final_response, "content", None))
+        except Exception:
+            pass
         
         # Aggregate usage and cost from all chunks + summary
         total_input_tokens = sum(
@@ -956,6 +1177,35 @@ Provide your final combined response:"""
         
         # Iterate until we get a final response (no more tool calls) or hit max iterations
         for iteration in range(self.max_tool_iterations + 1):
+            # Before calling the LLM, ensure our full prompt fits the model context window.
+            # This loop can grow due to assistant/tool messages; we compact only when necessary.
+            try:
+                reserved_output_tokens = int(
+                    kwargs.get("max_output_tokens")
+                    or self.max_output_tokens
+                    or 2048
+                )
+            except Exception:
+                reserved_output_tokens = 2048
+            safe_budget = self._safe_input_budget(safety_margin=256)
+            current_tokens = self._count_message_tokens(
+                message="",
+                system_message=system_message,
+                messages=conversation_messages,
+            )
+            if current_tokens > safe_budget:
+                self.logger.warning(
+                    f"Context budget exceeded before LLM call (iter={iteration}): "
+                    f"tokens_estimate={current_tokens} > safe_budget={safe_budget}. Compacting history."
+                )
+                conversation_messages = self._compact_conversation_messages_for_budget(
+                    conversation_messages=conversation_messages,
+                    system_message=system_message,
+                    safe_budget=safe_budget,
+                    reserved_output_tokens=reserved_output_tokens,
+                    iteration=iteration,
+                )
+
             # Use LangChain LLM wrapper asynchronously
             response = await self.langchain_llm.ainvoke(
                 message=None,  # Don't split - pass everything in messages
@@ -974,19 +1224,8 @@ Provide your final combined response:"""
                 total_usage["output_tokens"] += response.usage.get("output_tokens", 0)
                 total_usage["total_tokens"] += response.usage.get("total_tokens", 0)
             
-            # LangChain/Anthropic can return content as a list of content blocks when tools are involved.
-            # Normalize to the concatenated text blocks for marker checks and for storing assistant messages.
-            response_text: str
-            if isinstance(response.content, list):
-                text_parts: List[str] = []
-                for block in response.content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(str(block.get("text", "")))
-                response_text = "\n".join([t for t in text_parts if t])
-            elif isinstance(response.content, str):
-                response_text = response.content
-            else:
-                response_text = "" if response.content is None else str(response.content)
+            # Normalize content blocks (some providers may return a list) to text for all downstream logic.
+            response_text = self._normalize_content_to_text(response.content)
 
             # Check for termination marker FIRST (multi-stage reasoning mode)
             if self.enable_multi_stage_reasoning and self._has_final_answer_marker(response_text):
@@ -1057,7 +1296,17 @@ Provide your final combined response:"""
                     continue
                 else:
                     # Standard mode - return response
-                    final_response = response
+                    # Ensure we never return list-typed content to callers (breaks JSON extraction).
+                    final_response = LLMResponse(
+                        content=response_text,
+                        model=response.model,
+                        finish_reason=response.finish_reason,
+                        usage=response.usage,
+                        cost=response.cost,
+                        raw_response=response.raw_response,
+                        request_id=response.request_id,
+                        tool_calls=response.tool_calls,
+                    )
                     break
         
         if final_response is None:
@@ -1128,6 +1377,18 @@ Provide your final combined response:"""
                 request_id=getattr(forced, "request_id", None) or request_id,
                 tool_calls=None,
             )
+
+        # Include external LLM usage/cost accrued during tool execution (e.g., meeting-room helper calls).
+        if runtime is not None:
+            try:
+                total_cost += float(getattr(runtime, "external_cost", 0.0) or 0.0)
+                eu = getattr(runtime, "external_usage", None)
+                if isinstance(eu, dict):
+                    total_usage["input_tokens"] += int(eu.get("input_tokens", 0) or 0)
+                    total_usage["output_tokens"] += int(eu.get("output_tokens", 0) or 0)
+                    total_usage["total_tokens"] += int(eu.get("total_tokens", 0) or 0)
+            except Exception:
+                pass
         
         # Update final response with accumulated cost and usage
         final_response.cost = total_cost if total_cost > 0 else final_response.cost

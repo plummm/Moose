@@ -16,7 +16,6 @@ class RoutingDecision:
     playbook: str
     rationale: str
     tickers: List[str]
-    neutral_analysis: bool
     selected_agents: List[str]
     agent_tasks: Dict[str, Dict[str, Any]]
 
@@ -46,7 +45,7 @@ class TeamRouteNode(BaseNode):
     - state.metadata (dict)
 
     Writes:
-    - state.routing (dict) including: playbook, rationale, tickers, neutral_analysis, selected_agents
+    - state.routing (dict) including: playbook, rationale, tickers, update_memory, selected_agents
     - state.selected_agents (list[str])
     - state.agent_tasks (dict)
     - state.specialist_clients (dict)
@@ -74,11 +73,17 @@ class TeamRouteNode(BaseNode):
         )
 
         selected_agents = [str(x).strip() for x in (getattr(decision, "selected_agents", None) or []) if str(x).strip()]
+        # `update_memory` is NOT decided by the router LLM anymore. It is sourced from the caller's run_task metadata.
+        # Default is False unless explicitly provided.
+        try:
+            update_memory_flag = bool((metadata or {}).get("update_memory", False))
+        except Exception:
+            update_memory_flag = False
         routing = {
             "playbook": getattr(decision, "playbook", ""),
             "rationale": getattr(decision, "rationale", ""),
             "tickers": getattr(decision, "tickers", []),
-            "neutral_analysis": bool(getattr(decision, "neutral_analysis", False)),
+            "update_memory": update_memory_flag,
             "selected_agents": selected_agents,
         }
 
@@ -191,7 +196,6 @@ Return STRICT JSON matching exactly this schema (no extra keys, no markdown):
 "playbook": "<one of the playbook names>",
 "rationale": "<1-3 sentences explaining why this playbook and why these sub-agents>",
 "tickers": ["<TICKER>", ...],
-"neutral_analysis": <true|false>,
 "selected_agents": ["edgar","fmp_news","fmp_fundamentals","fmp_macro","fmp_price"],
 "agent_tasks": {{
     "edgar": {{"goal": "...", "notes": "...", "tickers": ["..."]}},
@@ -203,9 +207,6 @@ Return STRICT JSON matching exactly this schema (no extra keys, no markdown):
 }}
 
 Rules:
-- neutral_analysis:
-    - true for neutral/objective tasks like news/article analysis, summarization, factual reporting without positioning or directional conclusions.
-    - false for tasks that seek trading/positioning/technical signals, bullish/bearish views, “should I buy/sell”, setups, or directional conclusions.
 - selected_agents must be a subset of the allowed agent names.
 - agent_tasks should include entries only for selected_agents (omit others).
 - If you cannot infer any ticker reliably, set tickers to [] and ask for clarification in notes."""
@@ -229,7 +230,6 @@ Context text (may be empty):
                 "playbook": "CatalystValidation",
                 "rationale": "Defaulted due to routing parse failure.",
                 "tickers": [],
-                "neutral_analysis": False,
                 "selected_agents": ["fmp_news", "edgar", "fmp_fundamentals", "fmp_price"],
                 "agent_tasks": {
                     "fmp_news": {"goal": "Summarize the catalyst claim and extract tickers.", "notes": "", "tickers": []},
@@ -239,16 +239,10 @@ Context text (may be empty):
                 },
             }
 
-        try:
-            neutral_analysis = bool(data.get("neutral_analysis"))
-        except Exception:
-            neutral_analysis = False
-
         return RoutingDecision(
             playbook=str(data.get("playbook") or "CatalystValidation"),
             rationale=str(data.get("rationale") or ""),
             tickers=[str(x).upper().strip() for x in (data.get("tickers") or []) if str(x).strip()],
-            neutral_analysis=neutral_analysis,
             selected_agents=[str(x).strip() for x in (data.get("selected_agents") or []) if str(x).strip()],
             agent_tasks={k: (v if isinstance(v, dict) else {}) for k, v in (data.get("agent_tasks") or {}).items()},
         )

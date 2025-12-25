@@ -125,6 +125,11 @@ Rules:
 
 Scoped tools for this sub-agent:
 {tool_summary.strip()}
+
+Cross-specialist help:
+Cross-specialist help is not available in this context.
+You do not need other tools to help with your analysis, you are only responsible for gathering evidence using your existing tools.
+The final report will be produced by a different agent with combination of evidences from all the specialists, including the evidence you wanted from other tools, so please proceed your analysis even it will be incomplete.
 """
 
         effective_context = (context_text or "").strip() or "(none provided)"
@@ -194,6 +199,7 @@ Return STRICT JSON only."""
         base_temperature: float,
         llm_extra_params: Optional[Dict[str, Any]],
         tools_provider: Any,
+        meeting_room_enabled: bool = False,
         max_tool_iterations: Optional[int] = 20,
         agent_name: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -203,7 +209,7 @@ Return STRICT JSON only."""
         from moose.framework.llm_core import LLMClient
 
         scopes = analyzer.build_tool_scopes()
-        all_tools = tools_provider.get_langchain_tools()
+        all_tools = tools_provider.get_langchain_tools(meeting_room_enabled=meeting_room_enabled)
 
         clients: Dict[str, Any] = {}
         for agent, allowed_names in (scopes or {}).items():
@@ -323,13 +329,31 @@ Return STRICT JSON only."""
         max_parallel = max(1, min(5, max_parallel))
         sem = asyncio.Semaphore(max_parallel)
 
-        run_sequential = bool(self.debug_mode)
-        if run_sequential:
-            results: List[Any] = []
-            for a in selected_agents:
-                try:
-                    results.append(
-                        await self._run_one(
+        try:
+            run_sequential = bool(self.debug_mode)
+            if run_sequential:
+                results: List[Any] = []
+                for a in selected_agents:
+                    try:
+                        results.append(
+                            await self._run_one(
+                                sem=sem,
+                                agent_name=a,
+                                task_instruction=task_instruction,
+                                context_text=context_text,
+                                agent_tasks=agent_tasks,
+                                clients=clients,
+                                prior_reports=prior_reports,
+                                current_ticker=current_ticker,
+                                ticker_list=ticker_list,
+                            )
+                        )
+                    except Exception as e:
+                        results.append(e)
+            else:
+                results = await asyncio.gather(
+                    *[
+                        self._run_one(
                             sem=sem,
                             agent_name=a,
                             task_instruction=task_instruction,
@@ -340,27 +364,12 @@ Return STRICT JSON only."""
                             current_ticker=current_ticker,
                             ticker_list=ticker_list,
                         )
-                    )
-                except Exception as e:
-                    results.append(e)
-        else:
-            results = await asyncio.gather(
-                *[
-                    self._run_one(
-                        sem=sem,
-                        agent_name=a,
-                        task_instruction=task_instruction,
-                        context_text=context_text,
-                        agent_tasks=agent_tasks,
-                        clients=clients,
-                        prior_reports=prior_reports,
-                        current_ticker=current_ticker,
-                        ticker_list=ticker_list,
-                    )
-                    for a in selected_agents
-                ],
-                return_exceptions=True,
-            )
+                        for a in selected_agents
+                    ],
+                    return_exceptions=True,
+                )
+        finally:
+            pass
 
         reports_out = dict(prior_reports)
         evidence_out = list(state.get("evidence") or [])

@@ -99,7 +99,7 @@ def example_explicit_provider():
         model="claude-3-opus",
         provider=LLMProvider.ANTHROPIC,
         temperature=0.7,
-        max_tokens=100
+        max_output_tokens=100
     )
     
     response = client.send_message("Hello!")

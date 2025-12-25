@@ -1053,7 +1053,7 @@ Return exactly this schema:
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         routing = state.get("routing", {}) if isinstance(state.get("routing"), dict) else {}
-        if not bool(routing.get("neutral_analysis")):
+        if not bool(routing.get("update_memory")):
             return state
 
         per_ticker_merge_mode = bool(state.get("per_ticker_merge_mode", False))

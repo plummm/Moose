@@ -173,6 +173,7 @@ def mcp_tool(
     *,
     name: Optional[str] = None,
     examples: Optional[List[str]] = None,
+    meeting_room_only: bool = False,
 ) -> Any:
     """
     Decorator to mark a method as an MCP-exposed tool.
@@ -182,6 +183,7 @@ def mcp_tool(
         setattr(func, "_is_mcp_tool", True)
         setattr(func, "_mcp_name", name or func.__name__)
         setattr(func, "_mcp_examples", examples or [])
+        setattr(func, "_mcp_meeting_room_only", bool(meeting_room_only))
         return func
 
     if _func is None:
@@ -294,8 +296,137 @@ class EdgarMCPTools:
                         "method_name": attr_name,
                         "doc": (getattr(fn, "__doc__", None) or "").strip(),
                         "examples": list(getattr(fn, "_mcp_examples", []) or []),
+                        "meeting_room_only": bool(getattr(fn, "_mcp_meeting_room_only", False)),
                     }
                 )
         return out
+
+    @mcp_tool(meeting_room_only=True)
+    async def ask_specialist(self, target: str, instruction: str, thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Ask another specialist to do work you cannot do with your current tool scope.
+
+        When to use
+        - Use this tool when you need another specialist's domain tools or expertise (e.g., you are the EDGAR specialist
+          but you need FMP data; or you are missing a specific tool in your current scope).
+        - Ask for a *specific*, reproducible action. Provide exact tool name(s) and argument values when possible.
+
+        Parameters
+        - target: str
+          The specialist identifier to ask. Use one of the meeting-room participant ids, for example:
+          - \"fmp_fundamentals\" (financial statements, fundamentals, company snapshot)
+          - \"fmp_price\" (quotes, charts, technical indicators)
+          - \"fmp_news\" (news/search/news context)
+          - \"fmp_macro\" (macro/economic indicators)
+          (Exact available targets depend on the current meeting room setup.)
+
+        - instruction: str
+          A clear instruction to the target specialist. Include:
+          - the goal (what question you need answered),
+          - required tool call(s) and exact args (preferred),
+          - the expected output format (short summary + evidence).
+
+          Good example:
+            \"Get Nvidia's market cap and company profile.\"
+
+          Bad example:
+            \"Tell me about NVDA\" (too vague; may waste tokens and miss the data you need)
+
+        - thread_id: Optional[str]
+          Optional private-thread id for correlation / follow-ups.
+          - If you pass the same thread_id again, the target will see the same private thread context.
+          - If omitted, a new thread is created automatically.
+
+        Return value (MCP JSON envelope)
+        - ok: bool
+        - data: dict (present when ok=true)
+          - target: str (the same target you requested)
+          - thread_id: str (private thread id used)
+          - request: dict (the request message you sent)
+          - reply: dict (the target's first reply message)
+
+        Message dict schema (`request` / `reply`)
+        - id: str
+        - ts: float (unix timestamp)
+        - sender_id: str
+        - role: str (\"system\"|\"human\"|\"assistant\"|\"tool\")
+        - content: str
+        - targets: list[str] | null
+        - thread_id: str | null
+        - metadata: dict
+
+        - error: null | {\"type\": str, \"message\": str}
+        - meta: dict (includes tool inputs)
+
+        Notes for best results
+        - Prefer asking the target to call 1–2 concrete tools and return compact evidence.
+        - If you need a follow-up, reuse `thread_id` to stay in the same private thread.
+        """
+        meta = {"tool": "ask_specialist", "target": target, "thread_id": thread_id}
+        if not isinstance(target, str) or not target.strip():
+            return mcp_envelope_err("target is required", meta=meta)
+        if not isinstance(instruction, str) or not instruction.strip():
+            return mcp_envelope_err("instruction is required", meta=meta)
+
+        try:
+            from moose.framework.meet_room.room import MeetingRoom
+            from moose.framework.meet_room.types import MeetingRole
+        except Exception as e:
+            return mcp_envelope_err(f"MeetingRoom is not available: {e}", meta=meta)
+
+        room = MeetingRoom.current()
+        if room is None:
+            return mcp_envelope_err(
+                "MeetingRoom context is not set. Use MeetingRoom.set_current(room) around the specialist run.",
+                meta=meta,
+            )
+
+        target_id = target.strip()
+        sender_id = MeetingRoom.current_sender_id() or "edgar"
+        result = await room.ask_private(
+            sender_id=sender_id,
+            role=MeetingRole.HUMAN,
+            content=instruction.strip(),
+            targets=[target_id],
+            thread_id=thread_id,
+        )
+
+        if not bool(result.get("complete")):
+            missing = result.get("missing_targets") or [target_id]
+            return mcp_envelope_err(
+                f"Timeout waiting for specialist reply: missing={missing}",
+                meta={**meta, "missing_targets": missing, "thread_id": result.get("thread_id")},
+            )
+
+        replies = result.get("replies") if isinstance(result.get("replies"), dict) else {}
+        reply = replies.get(target_id) if isinstance(replies.get(target_id), dict) else None
+        if reply is None:
+            return mcp_envelope_err(
+                "No reply payload found for target despite completion flag.",
+                meta={**meta, "thread_id": result.get("thread_id")},
+            )
+
+        # Attribute helper LLM usage/cost back to the requesting LLMClient request (if running inside ToolRuntime).
+        try:
+            from moose.framework.llm_core.tool_runtime import ToolRuntime
+
+            rt = ToolRuntime.current()
+            if rt is not None and isinstance(reply, dict):
+                rmeta = reply.get("metadata") if isinstance(reply.get("metadata"), dict) else {}
+                rt.add_external_llm_usage(
+                    usage=rmeta.get("llm_usage") if isinstance(rmeta.get("llm_usage"), dict) else None,
+                    cost=rmeta.get("llm_cost") if isinstance(rmeta.get("llm_cost"), (int, float)) else None,
+                )
+        except Exception:
+            pass
+
+        data = {
+            "target": target_id,
+            "thread_id": str(result.get("thread_id") or ""),
+            "request": result.get("request"),
+            "reply": reply,
+        }
+        tf = f"Asked specialist '{target_id}' via meeting room; received reply."
+        return mcp_envelope_ok(data=data, meta=meta, text_fallback=tf)
 
 
