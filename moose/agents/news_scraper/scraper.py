@@ -156,6 +156,53 @@ def _extract_json(text: str) -> Optional[dict]:
         return None
 
 
+def _json_decode_error(text: str) -> str:
+    """
+    Best-effort JSON error message for LLM outputs, aligned with `_extract_json` behavior.
+    """
+    s = (text or "").strip()
+    if not s:
+        return "Empty output."
+    # Strip common code fences (same as _extract_json)
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", s).strip()
+        s = re.sub(r"\s*```$", "", s).strip()
+    start = s.find("{")
+    end = s.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return "No JSON object boundaries found (missing '{' or '}')."
+    try:
+        json.loads(s[start : end + 1])
+        return "Unknown JSON error (parsed successfully in diagnostic)."
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+async def _repair_json_once(llm_client: Any, *, bad_output: str, error_hint: str) -> Any:
+    """
+    One-shot JSON repair retry (minimal context).
+    Returns the new LLM response object.
+    """
+    repair_system_message = (
+        "You are a JSON repair tool.\n"
+        "CRITICAL OUTPUT REQUIREMENT:\n"
+        "- Return ONLY a single valid JSON object (no markdown fences, no leading/trailing quotes, no commentary).\n"
+        "- JSON strings MUST be valid: do not include raw double quotes (\") inside string values.\n"
+        "  If you need to quote text, use \\\" ... \\\" or use Chinese quotes 「...」.\n"
+        "- Use \\n for newlines inside string values.\n"
+    )
+    repair_user_message = (
+        "Your previous output was invalid JSON and could not be parsed.\n"
+        f"Parser error: {error_hint}\n\n"
+        "Fix the INVALID OUTPUT below so it becomes strict valid JSON.\n"
+        "Keep the same keys/structure and preserve content as much as possible.\n\n"
+        "INVALID OUTPUT:\n"
+        + str(bad_output or "")
+        + "\n\nNow output the corrected JSON object ONLY."
+    )
+    return await llm_client.send_message(message=repair_user_message, system_message=repair_system_message)
+
+
 def _basic_whitespace_cleanup(text: str) -> str:
     """
     Lightweight cleanup used as a fallback when the LLM fails.
@@ -271,6 +318,16 @@ Return STRICT JSON only."""
             return {"title": "", "summary": "", "raw_article": cleaned_fallback, "quality_score": 0}
 
         data = _extract_json(content)
+        if not isinstance(data, dict):
+            # One-shot JSON repair retry
+            try:
+                repaired = await _repair_json_once(self.client, bad_output=str(content), error_hint=_json_decode_error(content))
+                repaired_content = getattr(repaired, "content", "") or ""
+                if not isinstance(repaired_content, str):
+                    repaired_content = str(repaired_content)
+                data = _extract_json(repaired_content)
+            except Exception:
+                data = None
         if not isinstance(data, dict):
             if self.logger:
                 self.logger.warning(f"LLM returned non-JSON for {url}; falling back to cleaned extraction")

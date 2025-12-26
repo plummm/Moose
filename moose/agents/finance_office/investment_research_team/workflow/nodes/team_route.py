@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .utils import normalize_usage
+from .utils import json_decode_error, normalize_usage, repair_json_once
 from .base import BaseNode
 from .specialists_runner import SpecialistsRunnerNode
 
@@ -223,7 +223,15 @@ Context text (may be empty):
 """
 
         resp = await llm_client.send_message(message=user_message, system_message=system_message)
-        data = _extract_json(getattr(resp, "content", "") or "")
+        content = getattr(resp, "content", "") or ""
+        data = _extract_json(content)
+        if data is None:
+            # One-shot JSON repair retry
+            try:
+                repaired = await repair_json_once(llm_client, bad_output=str(content), error_hint=json_decode_error(content))
+                data = _extract_json(getattr(repaired, "content", "") or "")
+            except Exception:
+                data = None
         if not isinstance(data, dict):
             # Conservative default: catalyst validation with minimal set
             data = {

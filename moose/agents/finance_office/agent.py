@@ -1054,6 +1054,24 @@ a {{ color: inherit; }}
             context=context_text,
         )
 
+        # Department-level usage/cost (router call). This will be combined later with team workflow totals.
+        llm_usage_total: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        llm_cost_total: float = 0.0
+        try:
+            du = getattr(decision, "llm_usage_total", None)
+            if isinstance(du, dict):
+                llm_usage_total["input_tokens"] += int(du.get("input_tokens", 0) or 0)
+                llm_usage_total["output_tokens"] += int(du.get("output_tokens", 0) or 0)
+                llm_usage_total["total_tokens"] += int(du.get("total_tokens", 0) or 0)
+        except Exception:
+            pass
+        try:
+            dc = getattr(decision, "llm_cost_total", None)
+            if dc is not None:
+                llm_cost_total += float(dc or 0.0)
+        except Exception:
+            pass
+
         # For now we only implement a single team node, but state is structured per-team for future expansion.
         selected_team = str((decision.selected_teams or [""])[0] or "").strip()
         if not selected_team:
@@ -1114,6 +1132,8 @@ a {{ color: inherit; }}
             "user_message": {selected_team: user_message},
             "system_message": {selected_team: system_message},
             "previous_team_result": {},
+            "llm_usage_total": llm_usage_total,
+            "llm_cost_total": llm_cost_total,
         }
 
     async def _node_prompt_engineer(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1217,6 +1237,23 @@ Return plain text instruction only."""
         if not rewritten:
             rewritten = seed or instruction
 
+        # Accumulate department prompt-engineer usage/cost into department totals.
+        try:
+            usage_total = state.get("llm_usage_total") if isinstance(state.get("llm_usage_total"), dict) else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            u = getattr(resp, "usage", None) or {}
+            usage_total["input_tokens"] = int(usage_total.get("input_tokens", 0) or 0) + int(u.get("input_tokens", 0) or 0)
+            usage_total["output_tokens"] = int(usage_total.get("output_tokens", 0) or 0) + int(u.get("output_tokens", 0) or 0)
+            usage_total["total_tokens"] = int(usage_total.get("total_tokens", 0) or 0) + int(u.get("total_tokens", 0) or 0)
+            state["llm_usage_total"] = usage_total
+        except Exception:
+            pass
+        try:
+            cost_total = float(state.get("llm_cost_total") or 0.0)
+            cost_total += float(getattr(resp, "cost", 0.0) or 0.0)
+            state["llm_cost_total"] = cost_total
+        except Exception:
+            pass
+
         return {**state, "task_instruction": {**per_team_task_instruction, selected_team: rewritten}}
 
     async def _node_investment_research_team(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1279,9 +1316,9 @@ Return plain text instruction only."""
             except Exception:
                 pass
 
-        # Plumb InvestmentResearchWorkflow's token usage/cost totals into the department workflow state so
-        # FinanceOffice.run_task can attach them to the outgoing response.
-        # ResearchLead.run_task provides them both top-level and inside last_state (keep this defensive).
+        # Add InvestmentResearchWorkflow usage/cost totals into the running totals carried in state
+        # so the outgoing FinanceOffice /run_task response reflects *all* LLM calls executed so far.
+        # ResearchLead.run_task provides team totals both top-level and inside last_state (keep this defensive).
         last_state = team_resp.get("last_state") if isinstance(team_resp.get("last_state"), dict) else {}
         usage_total = team_resp.get("llm_usage_total")
         cost_total = team_resp.get("llm_cost_total")
@@ -1290,13 +1327,31 @@ Return plain text instruction only."""
         if cost_total is None:
             cost_total = last_state.get("llm_cost_total")
 
+        current_usage = state.get("llm_usage_total") if isinstance(state.get("llm_usage_total"), dict) else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        try:
+            current_cost_f = float(state.get("llm_cost_total") or 0.0)
+        except Exception:
+            current_cost_f = 0.0
+
+        team_usage = usage_total if isinstance(usage_total, dict) else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        new_usage_total: Dict[str, int] = {
+            "input_tokens": int(current_usage.get("input_tokens", 0) or 0) + int(team_usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(current_usage.get("output_tokens", 0) or 0) + int(team_usage.get("output_tokens", 0) or 0),
+            "total_tokens": int(current_usage.get("total_tokens", 0) or 0) + int(team_usage.get("total_tokens", 0) or 0),
+        }
+        try:
+            team_cost_f = float(cost_total or 0.0)
+        except Exception:
+            team_cost_f = 0.0
+        new_cost_total = float(current_cost_f + team_cost_f)
+
         per_team_prev = state.get("previous_team_result") if isinstance(state.get("previous_team_result"), dict) else {}
         return {
             **state,
             "previous_team_result": {**per_team_prev, team_name: team_result},
             "final_response": {"status": "success", "error": None, "result": team_result},
-            "llm_usage_total": usage_total,
-            "llm_cost_total": cost_total,
+            "llm_usage_total": new_usage_total,
+            "llm_cost_total": new_cost_total,
         }
 
     async def run_task(self, data: Dict[str, Any]) -> Dict[str, Any]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
-from .utils import extract_json, raw_snapshot
+from .utils import extract_json, json_decode_error, raw_snapshot, repair_json_once
 from .base import BaseNode
 
 
@@ -95,7 +95,16 @@ Return STRICT JSON only:
         last_err: Optional[str] = None
         for _ in range(3):
             resp = await self.agent_client.send_message(message=pe_user, system_message=pe_system)
-            data = extract_json(getattr(resp, "content", "") or "") or {}
+            content = getattr(resp, "content", "") or ""
+            data = extract_json(content)
+            if data is None:
+                # One-shot JSON repair retry
+                try:
+                    repaired = await repair_json_once(self.agent_client, bad_output=str(content), error_hint=json_decode_error(content))
+                    data = extract_json(getattr(repaired, "content", "") or "")
+                except Exception:
+                    data = None
+            data = data or {}
             if not isinstance(data, dict):
                 last_err = "Prompt engineer output was not JSON."
                 continue

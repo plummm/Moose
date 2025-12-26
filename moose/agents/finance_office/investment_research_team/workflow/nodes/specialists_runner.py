@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Optional, Sequence, Set
 
-from .utils import normalize_usage
+from .utils import json_decode_error, normalize_usage, repair_json_once
 from .base import BaseNode
 
 
@@ -160,7 +160,18 @@ Return STRICT JSON only."""
         content = getattr(resp, "content", "") or ""
         if type(content) != str:
             raise ValueError(f"Tool {agent} repsonse is not a string: {type(content)}")
-        data = SpecialistsRunnerNode._extract_json(content) or {}
+        data = SpecialistsRunnerNode._extract_json(content)
+        if data is None:
+            # One-shot JSON repair retry
+            try:
+                repaired = await repair_json_once(llm_client, bad_output=str(content), error_hint=json_decode_error(content))
+                repaired_content = getattr(repaired, "content", "") or ""
+                if type(repaired_content) != str:
+                    repaired_content = str(repaired_content)
+                data = SpecialistsRunnerNode._extract_json(repaired_content)
+            except Exception:
+                data = None
+        data = data or {}
 
         summary = str(data.get("summary") or content[:800]).strip()
         key_findings = [str(x).strip() for x in (data.get("key_findings") or []) if str(x).strip()]

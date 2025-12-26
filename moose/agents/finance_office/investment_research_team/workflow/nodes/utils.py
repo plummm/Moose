@@ -18,6 +18,56 @@ def extract_json(text: str) -> Optional[dict]:
         return None
 
 
+def json_decode_error(text: str) -> str:
+    """
+    Best-effort JSON error message for LLM outputs.
+    We intentionally keep extraction rules aligned with `extract_json`.
+    """
+    s = (text or "").strip()
+    if not s:
+        return "Empty output."
+    start = s.find("{")
+    end = s.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return "No JSON object boundaries found (missing '{' or '}')."
+    try:
+        json.loads(s[start : end + 1])
+        return "Unknown JSON error (parsed successfully in diagnostic)."
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+async def repair_json_once(
+    llm_client: Any,
+    *,
+    bad_output: str,
+    error_hint: str,
+) -> Any:
+    """
+    Ask the model to re-emit a STRICT JSON object, given its previous invalid output.
+    Minimal-context: we only provide the invalid output and a parse error hint.
+    Returns the new LLM response object (provider-specific type).
+    """
+    repair_system_message = (
+        "You are a JSON repair tool.\n"
+        "CRITICAL OUTPUT REQUIREMENT:\n"
+        "- Return ONLY a single valid JSON object (no markdown fences, no leading/trailing quotes, no commentary).\n"
+        "- JSON strings MUST be valid: do not include raw double quotes (\") inside string values.\n"
+        "  If you need to quote text, use \\\" ... \\\" or use Chinese quotes 「...」.\n"
+        "- Use \\n for newlines inside string values.\n"
+    )
+    repair_user_message = (
+        "Your previous output was invalid JSON and could not be parsed.\n"
+        f"Parser error: {error_hint}\n\n"
+        "Fix the INVALID OUTPUT below so it becomes strict valid JSON.\n"
+        "Keep the same keys/structure and preserve content as much as possible.\n\n"
+        "INVALID OUTPUT:\n"
+        + str(bad_output or "")
+        + "\n\nNow output the corrected JSON object ONLY."
+    )
+    return await llm_client.send_message(message=repair_user_message, system_message=repair_system_message)
+
+
 def normalize_usage(u: Any) -> Dict[str, int]:
     if not isinstance(u, dict):
         return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}

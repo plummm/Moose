@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover
 from moose.framework.llm_core import LLMClient
 from moose.framework.llm_core.models import Message, MessageRole
 
-from .utils import extract_json
+from .utils import extract_json, json_decode_error, repair_json_once
 from .base import BaseNode
 
 
@@ -387,8 +387,18 @@ Task: Determine if the current analysis is a duplicate of any existing memory ba
             messages=messages
         )
         
-        # Parse response
-        result = extract_json(response.content) if hasattr(response, 'content') else {}
+        # Parse response (with one-shot JSON repair)
+        content = getattr(response, "content", "") if hasattr(response, "content") else ""
+        result = extract_json(content)
+        if result is None and self.dedup_client is not None:
+            try:
+                repaired = await repair_json_once(
+                    self.dedup_client, bad_output=str(content), error_hint=json_decode_error(content)
+                )
+                result = extract_json(getattr(repaired, "content", "") or "")
+            except Exception:
+                result = None
+        result = result or {}
         
         is_duplicate = result.get("is_duplicate", False)
         matching_title = result.get("matching_memory_title", "")
@@ -591,7 +601,16 @@ Mandatory rules:
 
                 # IMPORTANT: message must be a string for LLMClient.send_message
                 resp = await self.agent_client.send_message(message=final_request, messages=messages, system_message=system_message)
-                out = extract_json(getattr(resp, "content", "") or "")
+                content = getattr(resp, "content", "") or ""
+                out = extract_json(content)
+                if out is None:
+                    try:
+                        repaired = await repair_json_once(
+                            self.agent_client, bad_output=str(content), error_hint=json_decode_error(content)
+                        )
+                        out = extract_json(getattr(repaired, "content", "") or "")
+                    except Exception:
+                        out = None
                 if not isinstance(out, dict):
                     continue
 
@@ -616,7 +635,16 @@ Mandatory rules:
         last_err: Optional[str] = None
         for _ in range(3):
             resp = await self.agent_client.send_message(message=final_request, messages=messages, system_message=system_message)
-            out = extract_json(getattr(resp, "content", "") or "")
+            content = getattr(resp, "content", "") or ""
+            out = extract_json(content)
+            if out is None:
+                try:
+                    repaired = await repair_json_once(
+                        self.agent_client, bad_output=str(content), error_hint=json_decode_error(content)
+                    )
+                    out = extract_json(getattr(repaired, "content", "") or "")
+                except Exception:
+                    out = None
             if isinstance(out, dict):
                 ti = str(out.get("trading_insights") or "").strip()
                 if ti:
@@ -780,7 +808,14 @@ Return exactly this schema:
             latest_msg_idx = len(messages) - 1
 
             resp = await tool_client.send_message(message=final_request, messages=messages, system_message=system_message)
-            out = extract_json(getattr(resp, "content", "") or "")
+            content = getattr(resp, "content", "") or ""
+            out = extract_json(content)
+            if out is None:
+                try:
+                    repaired = await repair_json_once(tool_client, bad_output=str(content), error_hint=json_decode_error(content))
+                    out = extract_json(getattr(repaired, "content", "") or "")
+                except Exception:
+                    out = None
             if not isinstance(out, dict):
                 continue
 
@@ -805,7 +840,14 @@ Return exactly this schema:
         last_err: Optional[str] = None
         for _ in range(2):
             resp = await tool_client.send_message(message=final_request, messages=messages, system_message=system_message)
-            out = extract_json(getattr(resp, "content", "") or "")
+            content = getattr(resp, "content", "") or ""
+            out = extract_json(content)
+            if out is None:
+                try:
+                    repaired = await repair_json_once(tool_client, bad_output=str(content), error_hint=json_decode_error(content))
+                    out = extract_json(getattr(repaired, "content", "") or "")
+                except Exception:
+                    out = None
             if isinstance(out, dict):
                 ti = str(out.get("trading_insights") or "").strip()
                 params = out.get("parameters") if isinstance(out.get("parameters"), dict) else None
@@ -1022,7 +1064,14 @@ Return exactly this schema:
         last_err: Optional[str] = None
         for _ in range(2):
             resp = await tool_client.send_message(message=final_request, messages=messages, system_message=system_message)
-            out = extract_json(getattr(resp, "content", "") or "")
+            content = getattr(resp, "content", "") or ""
+            out = extract_json(content)
+            if out is None:
+                try:
+                    repaired = await repair_json_once(tool_client, bad_output=str(content), error_hint=json_decode_error(content))
+                    out = extract_json(getattr(repaired, "content", "") or "")
+                except Exception:
+                    out = None
             if isinstance(out, dict):
                 dropped_paths = out.get("dropped_memory_paths")
                 # Handle both single path (string) and multiple paths (list)

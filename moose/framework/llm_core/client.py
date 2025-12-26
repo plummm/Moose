@@ -406,7 +406,62 @@ class LLMClient:
         # Never allow a trivially small budget; compaction needs some room to work.
         return max(1024, int(budget))
 
-    def _compact_conversation_messages_for_budget(
+    def _is_compaction_summary_message(self, m: Message) -> bool:
+        try:
+            if getattr(m, "role", None) != MessageRole.USER:
+                return False
+            c = getattr(m, "content", "") or ""
+            if not isinstance(c, str):
+                c = str(c)
+            return c.lstrip().startswith("CONTEXT_PARTIAL_RESULT (internal):")
+        except Exception:
+            return False
+
+    def _compact_conversation_messages_for_budget_truncate(
+        self,
+        *,
+        conversation_messages: List[Message],
+        system_message: Optional[Union[str, Message]],
+        safe_budget: int,
+    ) -> List[Message]:
+        """
+        Deterministic last-resort compaction:
+        - Drop all assistant/tool messages (and prior internal partial-result messages).
+        - Keep user messages (objects), but if user messages alone exceed budget, truncate oldest-first.
+
+        This is intentionally lossy and exists only as a fallback when LLM-based partial-result compaction
+        cannot fit within the budget.
+        """
+        user_msgs: List[Message] = [
+            m
+            for m in (conversation_messages or [])
+            if getattr(m, "role", None) == MessageRole.USER and not self._is_compaction_summary_message(m)
+        ]
+        if not user_msgs:
+            return conversation_messages
+
+        new_msgs: List[Message] = list(user_msgs)
+        after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
+        if after_tokens <= safe_budget:
+            return new_msgs
+
+        # Truncate oldest-first; keep the last user message intact as long as possible.
+        for i in range(max(0, len(new_msgs) - 1)):
+            if after_tokens <= safe_budget:
+                break
+            m = new_msgs[i]
+            c = getattr(m, "content", "")
+            if not isinstance(c, str):
+                c = str(c)
+            c = c.strip()
+            if len(c) <= 200:
+                continue
+            new_msgs[i] = Message(role=MessageRole.USER, content=c[:200] + " …(truncated due to token budget)")
+            after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
+
+        return new_msgs
+
+    async def _compact_conversation_messages_for_budget_async(
         self,
         *,
         conversation_messages: List[Message],
@@ -414,125 +469,193 @@ class LLMClient:
         safe_budget: int,
         reserved_output_tokens: int,
         iteration: int,
+        request_id: str,
     ) -> List[Message]:
         """
-        Compact assistant/tool history when we exceed the model input context window.
+        LLM-powered compaction with incremental updates (partial-result mode):
+        - Keep original user messages (do not remove them).
+        - Replace assistant/tool history with a single synthetic USER message containing a partial result.
+        - If a previous partial result exists, update it using only new assistant/tool messages since then.
 
-        Strategy:
-        - Keep ALL user messages (do not remove them).
-        - Replace non-user history with a bounded, lossy summary message inserted BEFORE the last user message.
-        - If user messages alone exceed budget, truncate older user message contents (while preserving message objects).
+        Safety:
+        - Uses a separate direct `langchain_llm.ainvoke` call with a tiny, bounded prompt (no recursion).
+        - Falls back to deterministic truncation if compaction fails or still cannot fit within the budget.
         """
-        # Count before
-        before_tokens = self._count_message_tokens(message="", system_message=system_message, messages=conversation_messages)
+        try:
+            # Preserve only real user messages; treat prior partial results as internal and replaceable.
+            user_msgs: List[Message] = [
+                m
+                for m in conversation_messages
+                if getattr(m, "role", None) == MessageRole.USER and not self._is_compaction_summary_message(m)
+            ]
+            if not user_msgs:
+                return conversation_messages
+            last_user = user_msgs[-1]
+            prefix_users = user_msgs[:-1]
 
-        # Split messages
-        user_msgs: List[Message] = [m for m in conversation_messages if getattr(m, "role", None) == MessageRole.USER]
-        other_msgs: List[Message] = [m for m in conversation_messages if getattr(m, "role", None) != MessageRole.USER]
-
-        # If there's no user message, we can't preserve "latest user is last" semantics; fall back to original list.
-        if not user_msgs:
-            return conversation_messages
-
-        last_user = user_msgs[-1]
-        prefix_users = user_msgs[:-1]
-
-        # Build a bounded summary of recent assistant/tool messages.
-        # Aim for ~35% of safe budget (or at least 512 tokens).
-        max_summary_tokens = max(512, int(safe_budget * 0.35))
-        remaining = max_summary_tokens
-        summary_lines: List[str] = []
-        kept_items = 0
-
-        def _push(label: str, text: str) -> None:
-            nonlocal remaining, kept_items
-            if remaining <= 0:
-                return
-            s = (text or "").strip()
-            if not s:
-                return
-            # Hard cap per item for sanity
-            s = s[:4000]
-            line = f"{label}: {s}"
-            t = self._count_tokens(line)
-            if t <= 0:
-                t = max(1, len(line) // 4)
-            if t > remaining:
-                # Truncate further to fit remaining budget
-                approx_chars = max(80, remaining * 4)
-                line = line[:approx_chars] + " …(truncated)"
-                t = self._count_tokens(line)
-            if t <= 0 or t > remaining:
-                return
-            summary_lines.append(line)
-            remaining -= t
-            kept_items += 1
-
-        # Prioritize tool messages first (usually largest + most valuable), newest-first.
-        for m in reversed(other_msgs):
-            if remaining <= 0:
-                break
-            role = getattr(m, "role", None)
-            if role == MessageRole.TOOL:
-                nm = getattr(m, "name", None) or "tool"
-                _push(f"TOOL[{nm}]", str(getattr(m, "content", "") or ""))
-
-        # Then include a small tail of assistant messages (newest-first).
-        for m in reversed(other_msgs):
-            if remaining <= 0:
-                break
-            role = getattr(m, "role", None)
-            if role == MessageRole.ASSISTANT:
-                _push("ASSISTANT", str(getattr(m, "content", "") or ""))
-
-        header = (
-            "CONTEXT COMPACTION NOTICE (internal):\n"
-            f"- reason: input context exceeded model limit; compacting assistant/tool history at iteration={iteration}\n"
-            f"- before_tokens_estimate: {before_tokens}\n"
-            f"- safe_input_budget: {safe_budget} (reserved_output_tokens={reserved_output_tokens})\n"
-            "- policy: user messages preserved; assistant/tool history summarized and truncated.\n"
-            "\n"
-            "PARTIAL SUMMARY OF PRIOR ASSISTANT/TOOL RESULTS (lossy):\n"
-        )
-        summary_text = header + ("\n".join(summary_lines) if summary_lines else "(no prior assistant/tool messages to summarize)")
-        summary_text += (
-            "\n\n"
-            "IMPORTANT:\n"
-            "- The summary above may omit details due to token limits.\n"
-            "- Proceed using the user messages + this summary.\n"
-            "- If you need more information, you may call tools again.\n"
-        )
-        if self.enable_multi_stage_reasoning:
-            summary_text += (
-                f"- When finished, start your final response with {self.multi_stage_marker}.\n"
+            # Extract system text (keep original system prompt) and append compaction instructions.
+            sys_text = ""
+            if system_message:
+                sys_text = system_message if isinstance(system_message, str) else str(getattr(system_message, "content", "") or "")
+            compaction_instructions = (
+                "\n\n"
+                "COMPaction Mode (internal):\n"
+                "Objective: generate/maintain a PARTIAL RESULT based on the information available so far, to avoid exceeding token limits.\n"
+                "This partial result will be used later to produce a more complete final result; missing information is acceptable.\n"
+                "Rules:\n"
+                "- Do NOT call tools.\n"
+                "- Do NOT invent facts or numbers.\n"
+                "- Preserve key finance figures, dates, units, and source/tool hints when present.\n"
+                "- Focus on producing results (not summarizing logs). If something is unknown, mark it as unknown.\n"
+                "- Output plain text only (no markdown fences).\n"
             )
+            compaction_system = (sys_text or "") + compaction_instructions
 
-        compact_msg = Message(role=MessageRole.USER, content=summary_text)
-
-        # New conversation order: keep older user msgs, then compaction summary, then last user.
-        new_msgs: List[Message] = [*prefix_users, compact_msg, last_user]
-
-        # If still over budget (user messages too large), truncate older user messages (keep last user intact).
-        after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
-        if after_tokens > safe_budget:
-            # Reserve room for last user + compaction msg; truncate prefix users as needed.
-            # We'll truncate oldest-first.
-            for i in range(len(prefix_users)):
-                if after_tokens <= safe_budget:
+            # Find the most recent partial result (if any) and only summarize new assistant/tool messages after it.
+            last_summary_idx = -1
+            last_partial_text = ""
+            for i in range(len(conversation_messages) - 1, -1, -1):
+                if self._is_compaction_summary_message(conversation_messages[i]):
+                    last_summary_idx = i
+                    c = getattr(conversation_messages[i], "content", "") or ""
+                    last_partial_text = c if isinstance(c, str) else str(c)
                     break
-                m = prefix_users[i]
-                c = getattr(m, "content", "")
-                if not isinstance(c, str):
-                    c = str(c)
-                if len(c) <= 200:
-                    continue
-                # Truncate aggressively.
-                new_c = c[:200] + " …(truncated due to token budget)"
-                prefix_users[i] = Message(role=MessageRole.USER, content=new_c)
-                new_msgs = [*prefix_users, compact_msg, last_user]
-                after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
 
-        return new_msgs
+            if last_summary_idx >= 0:
+                delta_msgs = [
+                    m
+                    for m in conversation_messages[last_summary_idx + 1 :]
+                    if getattr(m, "role", None) != MessageRole.USER
+                ]
+            else:
+                delta_msgs = [m for m in conversation_messages if getattr(m, "role", None) != MessageRole.USER]
+
+            # Build a bounded "new events" digest from delta messages (newest-first, tool first).
+            max_delta_tokens = max(256, int(safe_budget * 0.20))
+            remaining = max_delta_tokens
+            delta_lines: List[str] = []
+
+            def _push(label: str, text: str) -> None:
+                nonlocal remaining
+                if remaining <= 0:
+                    return
+                s = (text or "").strip()
+                if not s:
+                    return
+                s = s[:2500]  # cap per item
+                line = f"{label}: {s}"
+                t = self._count_tokens(line)
+                if t <= 0:
+                    t = max(1, len(line) // 4)
+                if t > remaining:
+                    approx_chars = max(80, remaining * 4)
+                    line = line[:approx_chars] + " …(truncated)"
+                    t = self._count_tokens(line)
+                if t <= 0 or t > remaining:
+                    return
+                delta_lines.append(line)
+                remaining -= t
+
+            for m in reversed(delta_msgs):
+                if remaining <= 0:
+                    break
+                if getattr(m, "role", None) == MessageRole.TOOL:
+                    nm = getattr(m, "name", None) or "tool"
+                    _push(f"TOOL[{nm}]", str(getattr(m, "content", "") or ""))
+            for m in reversed(delta_msgs):
+                if remaining <= 0:
+                    break
+                if getattr(m, "role", None) == MessageRole.ASSISTANT:
+                    _push("ASSISTANT", str(getattr(m, "content", "") or ""))
+
+            new_events = "\n".join(delta_lines) if delta_lines else "(no new assistant/tool messages)"
+
+            # Provide user context to the compaction model (newest-first, bounded).
+            user_context_budget = max(256, int(safe_budget * 0.20))
+            remaining_uc = user_context_budget
+            user_context_lines: List[str] = []
+            for m in reversed(user_msgs):
+                if remaining_uc <= 0:
+                    break
+                c = getattr(m, "content", "") or ""
+                c = c if isinstance(c, str) else str(c)
+                c = c.strip()
+                if not c:
+                    continue
+                c = c[:3000]
+                line = f"USER: {c}"
+                t = self._count_tokens(line)
+                if t <= 0:
+                    t = max(1, len(line) // 4)
+                if t > remaining_uc:
+                    approx_chars = max(80, remaining_uc * 4)
+                    line = line[:approx_chars] + " …(truncated)"
+                    t = self._count_tokens(line)
+                if t <= 0 or t > remaining_uc:
+                    continue
+                user_context_lines.append(line)
+                remaining_uc -= t
+            user_context = "\n".join(reversed(user_context_lines)) if user_context_lines else "(no user context)"
+
+            # Two attempts with shrinking output caps.
+            max_out_1 = max(512, int(safe_budget * 0.30))
+            max_out_2 = max(256, int(max_out_1 * 0.6))
+            for attempt, max_out in enumerate([max_out_1, max_out_2], start=1):
+                partial_user = (
+                    "Generate/Update PARTIAL RESULT.\n\n"
+                    "USER_CONTEXT:\n"
+                    f"{user_context}\n\n"
+                    "PREVIOUS_PARTIAL_RESULT (may be empty):\n"
+                    f"{(last_partial_text or '').strip()}\n\n"
+                    "NEW_EVENTS (assistant/tool messages since previous partial result):\n"
+                    f"{new_events}\n\n"
+                    "Return an UPDATED PARTIAL RESULT that is directly usable later.\n"
+                    "Prefer a structured format aligned with the task (headings + bullet points are OK).\n"
+                    "Do not apologize for missing data.\n"
+                )
+                resp = await self.langchain_llm.ainvoke(
+                    message=partial_user,
+                    messages=None,
+                    system_message=compaction_system,
+                    request_id=f"{request_id}_partial_{iteration}_a{attempt}",
+                    agent_name=self.agent_name,
+                    temperature=0,
+                    max_output_tokens=int(max_out),
+                    tool_choice="none",
+                )
+                partial = self._normalize_content_to_text(getattr(resp, "content", "") or "").strip()
+                if not partial:
+                    continue
+
+                header = (
+                    "CONTEXT_PARTIAL_RESULT (internal):\n"
+                    f"- reason: input context exceeded model limit; compacting history at iteration={iteration}\n"
+                    f"- safe_input_budget: {safe_budget} (reserved_output_tokens={reserved_output_tokens})\n"
+                    "\n"
+                )
+                partial = header + partial
+
+                # Build new conversation order: keep older user msgs, then partial result, then last user.
+                compact_msg = Message(role=MessageRole.USER, content=partial)
+                new_msgs: List[Message] = [*prefix_users, compact_msg, last_user]
+
+                after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
+                if after_tokens > safe_budget:
+                    continue
+                return new_msgs
+
+            # Fallback: truncate user messages (drop assistant/tool history entirely)
+            return self._compact_conversation_messages_for_budget_truncate(
+                conversation_messages=conversation_messages,
+                system_message=system_message,
+                safe_budget=safe_budget,
+            )
+        except Exception:
+            return self._compact_conversation_messages_for_budget_truncate(
+                conversation_messages=conversation_messages,
+                system_message=system_message,
+                safe_budget=safe_budget,
+            )
     
     def _chunk_content(self, content: str, chunk_size_tokens: int) -> List[str]:
         """
@@ -1187,7 +1310,7 @@ Provide your final combined response:"""
                 )
             except Exception:
                 reserved_output_tokens = 2048
-            safe_budget = self._safe_input_budget(safety_margin=256)
+            safe_budget = self._safe_input_budget(safety_margin=2048)
             current_tokens = self._count_message_tokens(
                 message="",
                 system_message=system_message,
@@ -1198,12 +1321,13 @@ Provide your final combined response:"""
                     f"Context budget exceeded before LLM call (iter={iteration}): "
                     f"tokens_estimate={current_tokens} > safe_budget={safe_budget}. Compacting history."
                 )
-                conversation_messages = self._compact_conversation_messages_for_budget(
+                conversation_messages = await self._compact_conversation_messages_for_budget_async(
                     conversation_messages=conversation_messages,
                     system_message=system_message,
                     safe_budget=safe_budget,
                     reserved_output_tokens=reserved_output_tokens,
                     iteration=iteration,
+                    request_id=str(request_id),
                 )
 
             # Use LangChain LLM wrapper asynchronously

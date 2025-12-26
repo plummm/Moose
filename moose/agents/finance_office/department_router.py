@@ -16,6 +16,8 @@ class DepartmentDecision:
     playbook: str
     rationale: str
     selected_teams: List[str]
+    llm_usage_total: Optional[Dict[str, int]] = None
+    llm_cost_total: Optional[float] = None
 
 
 def load_department_playbooks(path: Path) -> Dict[str, Any]:
@@ -118,7 +120,43 @@ Context (optional):
 """
 
     resp = await llm_client.send_message(message=user_message, system_message=system_message)
-    data = _extract_json(getattr(resp, "content", "") or "") or {}
+    content = getattr(resp, "content", "") or ""
+    data = _extract_json(content)
+    usage_total: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    cost_total: float = 0.0
+    try:
+        u = getattr(resp, "usage", None) or {}
+        usage_total["input_tokens"] += int(u.get("input_tokens", 0) or 0)
+        usage_total["output_tokens"] += int(u.get("output_tokens", 0) or 0)
+        usage_total["total_tokens"] += int(u.get("total_tokens", 0) or 0)
+    except Exception:
+        pass
+    try:
+        cost_total += float(getattr(resp, "cost", 0.0) or 0.0)
+    except Exception:
+        pass
+    if data is None:
+        # One-shot JSON repair retry
+        try:
+            from moose.agents.finance_office.investment_research_team.workflow.nodes.utils import json_decode_error, repair_json_once
+
+            repaired = await repair_json_once(llm_client, bad_output=str(content), error_hint=json_decode_error(content))
+            repaired_content = getattr(repaired, "content", "") or ""
+            data = _extract_json(repaired_content)
+            try:
+                u2 = getattr(repaired, "usage", None) or {}
+                usage_total["input_tokens"] += int(u2.get("input_tokens", 0) or 0)
+                usage_total["output_tokens"] += int(u2.get("output_tokens", 0) or 0)
+                usage_total["total_tokens"] += int(u2.get("total_tokens", 0) or 0)
+            except Exception:
+                pass
+            try:
+                cost_total += float(getattr(repaired, "cost", 0.0) or 0.0)
+            except Exception:
+                pass
+        except Exception:
+            data = None
+    data = data or {}
     if not isinstance(data, dict):
         data = {}
 
@@ -142,6 +180,8 @@ Context (optional):
         playbook=playbook,
         rationale=rationale,
         selected_teams=selected_teams,
+        llm_usage_total=usage_total,
+        llm_cost_total=cost_total,
     )
 
 
