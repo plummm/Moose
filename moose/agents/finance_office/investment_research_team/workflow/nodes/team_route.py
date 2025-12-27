@@ -97,7 +97,7 @@ class TeamRouteNode(BaseNode):
                 base_temperature=float(sp_cfg.get("temperature", 0.7)),
                 llm_extra_params=sp_cfg.get("kwargs") or {},
                 tools_provider=tools_provider,
-                max_tool_iterations=state.get("max_tool_iterations", 20),
+                max_tool_iterations=state.get("max_tool_iterations", 4),
                 agent_name=self.main_agent_name,
             )
 

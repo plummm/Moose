@@ -8,6 +8,10 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import httpx
+
+from moose.framework.agent_core.agent_endpoints import resolve_agent_base_url
+
 
 @dataclass
 class FinanceOfficeAssistant:
@@ -58,7 +62,139 @@ class FinanceOfficeAssistant:
             except Exception as save_error:
                 if self.logger:
                     self.logger.warning(f"Failed to save analysis result: {save_error}")
+            # Best-effort: push analyzed news to telegram_stock_bot breaking news endpoint.
+            try:
+                await self.push_breaking_news_to_telegram(result)
+            except Exception as push_error:
+                if self.logger:
+                    self.logger.warning(f"Failed to push breaking news to telegram_stock_bot: {push_error}")
         return result
+
+    # ---------------------------------------------------------------------
+    # Telegram breaking news push (Option A payload)
+    # ---------------------------------------------------------------------
+    def _telegram_push_cfg(self) -> Dict[str, Any]:
+        cfg = self.custom_config if isinstance(self.custom_config, dict) else {}
+        news_cfg = cfg.get("news_analysis") if isinstance(cfg.get("news_analysis"), dict) else {}
+        tg = news_cfg.get("telegram_push") if isinstance(news_cfg.get("telegram_push"), dict) else {}
+        return tg if isinstance(tg, dict) else {}
+
+    def _telegram_push_enabled(self) -> bool:
+        tg = self._telegram_push_cfg()
+        if "enabled" in tg:
+            try:
+                return bool(tg.get("enabled"))
+            except Exception:
+                return False
+        # Default: disabled unless explicitly enabled in config.
+        return False
+
+    def _telegram_base_url(self) -> str:
+        tg = self._telegram_push_cfg()
+        base = str(tg.get("base_url") or "").strip()
+        if base:
+            return base.rstrip("/")
+        try:
+            port = int(tg.get("port", 3502) or 3502)
+        except Exception:
+            port = 3502
+        return resolve_agent_base_url(agent_name="telegram_stock_bot", project_id="telegram_stock_bot", port=port).rstrip("/")
+
+    def _telegram_timeout_s(self) -> float:
+        tg = self._telegram_push_cfg()
+        try:
+            return float(tg.get("timeout_s", 5.0) or 5.0)
+        except Exception:
+            return 5.0
+
+    def _build_telegram_items(self, analyses_by_ticker: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """
+        Convert analyses_by_ticker -> Option A payload items.
+        Group identical content across tickers into a single item with tickers=[...].
+        """
+        groups: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
+
+        for ticker, payload in (analyses_by_ticker or {}).items():
+            t = str(ticker or "").strip()
+            if not t:
+                continue
+            p = payload if isinstance(payload, dict) else {}
+            title = str(p.get("title") or "").strip()
+            summary = str(p.get("high_level_idea") or "").strip()
+            insights = str(p.get("trading_insights") or "").strip()
+            conf = p.get("confidence")
+            conf_s = str(conf).strip() if conf is not None else ""
+
+            key = (title, summary, insights, conf_s)
+            g = groups.get(key)
+            if not g:
+                g = {
+                    "tickers": set(),
+                    "title": title,
+                    "summary": summary,
+                    "trading_insights": insights,
+                    "confidence": conf,
+                }
+                groups[key] = g
+            try:
+                g["tickers"].add(t)
+            except Exception:
+                pass
+
+        items: list[Dict[str, Any]] = []
+        for g in groups.values():
+            tickers = sorted({str(x).strip() for x in (g.get("tickers") or set()) if str(x).strip()})
+            if not tickers:
+                continue
+            items.append(
+                {
+                    "tickers": tickers,
+                    "title": g.get("title") or "",
+                    "summary": g.get("summary") or "",
+                    "trading_insights": g.get("trading_insights") or "",
+                    "confidence": g.get("confidence"),
+                }
+            )
+        return items
+
+    async def push_breaking_news_to_telegram(self, analysis_result: Dict[str, Any]) -> None:
+        """
+        Best-effort push to telegram_stock_bot /push_breaking_news using Option A payload.
+        """
+        if not self._telegram_push_enabled():
+            return
+
+        analyses_by_ticker = (
+            analysis_result.get("analyses_by_ticker")
+            if isinstance(analysis_result.get("analyses_by_ticker"), dict)
+            else {}
+        )
+        items = self._build_telegram_items(analyses_by_ticker)
+        if not items:
+            return
+
+        base = self._telegram_base_url()
+        url = f"{base}/push_breaking_news"
+        timeout_s = self._telegram_timeout_s()
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
+            try:
+                r = await client.post(url, json={"items": items})
+            except httpx.TransportError as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to reach telegram_stock_bot: {url}:{e}")
+                # If local scheme is https but the server is plain HTTP, retry once.
+                if url.startswith("https://localhost:"):
+                    url2 = "http://" + url[len("https://") :]
+                    r = await client.post(url2, json={"items": items})
+                else:
+                    return
+            try:
+                r.raise_for_status()
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"telegram_stock_bot push failed: {url}: {e}")
+                return
         
     async def analyze_news(
         self,
@@ -237,22 +373,25 @@ Provide a comprehensive financial analysis in JSON format"""
             # Use summary as context text to save tokens
             content = summary
             max_tool_iterations = 2
+            granularity = "minimal"
         elif quality_score >= 4 and quality_score < 7:
             instruction += "\n\n" + standard_guidance
             max_tool_iterations = 4
+            granularity = "standard"
         elif quality_score >= 7 and quality_score <= 10:
             instruction += "\n\n" + maximum_guidance
             max_tool_iterations = 10
-            
+            granularity = "maximum"
         try:
             if self.logger:
                 self.logger.debug(f"Analyzing news: {url} [quality_score: {quality_score}]")
 
-            state = {"max_tool_iterations": max_tool_iterations}
+            state = {"max_tool_iterations": max_tool_iterations, "granularity": granularity}
             # News/article inputs contain new external knowledge → opt into memory updates downstream.
             run_metadata = dict(metadata or {})
             run_metadata["url"] = url
             run_metadata["update_memory"] = True
+            run_metadata["granularity"] = granularity
             team_resp = await self.team_manager.run_task(
                 task_instruction=instruction,
                 context_text=content,

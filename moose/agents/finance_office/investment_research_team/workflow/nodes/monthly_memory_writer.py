@@ -377,14 +377,10 @@ Existing Memory List (each with summary for comparison):
 {json.dumps(existing_memories, indent=2)}
 
 Task: Determine if the current analysis is a duplicate of any existing memory based on summary comparison."""
-
-        messages = [
-            Message(role=MessageRole.SYSTEM, content=system_prompt),
-            Message(role=MessageRole.USER, content=user_message)
-        ]
         
         response = await self.dedup_client.send_message(
-            messages=messages
+            message=user_message,
+            system_message=system_prompt
         )
         
         # Parse response (with one-shot JSON repair)

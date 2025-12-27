@@ -166,6 +166,31 @@ class ContainerManager:
         except DockerException as e:
             self.logger.error(f"Failed to create network: {e}")
             raise
+
+    def ensure_network(self, network_name: str) -> str:
+        """
+        Ensure a Docker network exists by explicit name.
+
+        This is used when an agent specifies `docker.network` to override the default
+        project network naming (`{network_prefix}{project_id}`).
+        """
+        network_name = str(network_name or "").strip()
+        if not network_name:
+            raise ValueError("network_name must be non-empty")
+        try:
+            self.docker_client.networks.get(network_name)
+            self.logger.debug(f"Network {network_name} already exists")
+            return network_name
+        except NotFound:
+            pass
+        try:
+            self.logger.info(f"Creating Docker network: {network_name}")
+            network = self.docker_client.networks.create(network_name, driver="bridge")
+            self.logger.info(f"Created network: {network.name}")
+            return network.name
+        except DockerException as e:
+            self.logger.error(f"Failed to create network {network_name}: {e}")
+            raise
     
     def start_agent_container(
         self,
@@ -212,11 +237,17 @@ class ContainerManager:
         # Generate entry.py file
         self.registry.generate_entry_py(agent_path, config.get("entry_point", "agent.py"), config.get("entry_class", None))
  
-        # Ensure network exists
-        network_name = self.ensure_project_network(project_id)
-        
         # Prepare container configuration
         docker_config = config.get("docker", {})
+        # Network selection:
+        # - default: per-project network name (moose-project-<project_id> by default prefix)
+        # - override: docker.network from agent_config.json
+        network_override = docker_config.get("network")
+        if isinstance(network_override, str) and network_override.strip():
+            network_name = self.ensure_network(network_override.strip())
+        else:
+            network_name = self.ensure_project_network(project_id)
+
         container_name = f"{self.image_prefix}{agent_name}-{project_id}"
         container_suffix_name = docker_config.get("container_suffix_name", "")
         if container_suffix_name != "":

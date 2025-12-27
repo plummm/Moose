@@ -70,6 +70,7 @@ class SpecialistsRunnerNode(BaseNode):
         task: Dict[str, Any],
         prior_reports: Optional[Dict[str, Any]] = None,
         tool_summary: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SpecialistResult:
         """
         Execute a specialist sub-agent run (with scoped tools already bound to llm_client).
@@ -148,6 +149,9 @@ The final report will be produced by a different agent with combination of evide
 
 Task (from Research Lead):
 {json.dumps(task or {}, ensure_ascii=False, indent=2)}
+
+Metadata (may be empty): 
+{json.dumps(metadata or {}, ensure_ascii=False, indent=2)}
 
 {ticker_info}
 
@@ -248,6 +252,7 @@ Return STRICT JSON only."""
         prior_reports: Dict[str, Any],
         current_ticker: str,
         ticker_list: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]], Dict[str, int], float]:
         async with sem:
             task = dict((agent_tasks or {}).get(agent_name, {}) or {})
@@ -272,6 +277,7 @@ Return STRICT JSON only."""
                 task=task,
                 prior_reports=prior_reports,
                 tool_summary=tool_summary,
+                metadata=metadata,
             )
 
             normalized: List[Dict[str, Any]] = []
@@ -322,6 +328,7 @@ Return STRICT JSON only."""
         clients = state.get("specialist_clients", {}) or {}
         prior_reports = state.get("subagent_reports", {}) or {}
         per_ticker_merge_mode = bool(state.get("per_ticker_merge_mode", False))
+        metadata = state.get("metadata", {}) or {}
         
         # Determine ticker info based on mode
         current_ticker = ""
@@ -357,6 +364,7 @@ Return STRICT JSON only."""
                                 prior_reports=prior_reports,
                                 current_ticker=current_ticker,
                                 ticker_list=ticker_list,
+                                metadata=metadata,
                             )
                         )
                     except Exception as e:
@@ -374,6 +382,7 @@ Return STRICT JSON only."""
                             prior_reports=prior_reports,
                             current_ticker=current_ticker,
                             ticker_list=ticker_list,
+                            metadata=metadata,
                         )
                         for a in selected_agents
                     ],

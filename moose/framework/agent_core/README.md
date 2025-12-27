@@ -113,6 +113,7 @@ moose/agents/
 
 All Docker-related settings:
 
+- **network** (optional): Docker network name to attach the agent container to. If set, this overrides the default per-project network name (`moose-project-<project_id>` by default). This is useful for sharing a network across multiple Moose projects.
 - **container_suffix_name** (optional): Suffix to append to container name
 - **container_override** (optional, default: false): Whether to override existing containers
 - **ports** (optional): Array of port mappings

@@ -84,6 +84,7 @@ class FinancingMCPTools(EdgarMCPTools):
 
         Use case
         - After spotting a prospectus filing in the index, you want to quickly find key “ATM” / “gross proceeds” financing language.
+        - Do not call this tool if `granularity` in metadata is "minimal".
 
         Parameters
         - accession_no: SEC accession number from `list_financing_documents_index`.

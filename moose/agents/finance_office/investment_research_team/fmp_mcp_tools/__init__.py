@@ -19,6 +19,8 @@ from .company import CompanyMCPTools
 from .economics import EconomicsMCPTools
 from .finance import FinanceMCPTools
 from .indicator import IndicatorMCPTools
+from .index import IndexMCPTools
+from .insider import InsiderMCPTools
 from .market import MarketMCPTools
 from .news import NewsMCPTools
 from .quote import QuoteMCPTools
@@ -40,6 +42,8 @@ __all__ = [
     "EconomicsMCPTools",
     "FinanceMCPTools",
     "IndicatorMCPTools",
+    "IndexMCPTools",
+    "InsiderMCPTools",
     "MarketMCPTools",
     "NewsMCPTools",
     "QuoteMCPTools",
@@ -55,6 +59,8 @@ class FMPAllMCPTools(
     EconomicsMCPTools,
     FinanceMCPTools,
     IndicatorMCPTools,
+    IndexMCPTools,
+    InsiderMCPTools,
     MarketMCPTools,
     NewsMCPTools,
     QuoteMCPTools,

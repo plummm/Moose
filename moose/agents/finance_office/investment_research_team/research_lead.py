@@ -32,7 +32,7 @@ class ResearchLead:
         logger=None,
         sec_data_tools=None,
         enable_multi_stage_reasoning: bool = False,
-        max_tool_iterations: int = 20,
+        max_tool_iterations: int = 4,
         agent_name: Optional[str] = None,
         custom_config: Optional[Dict[str, Any]] = None,
         **llm_kwargs
@@ -188,6 +188,8 @@ class ResearchLead:
             EconomicsMCPTools,
             FinanceMCPTools,
             IndicatorMCPTools,
+            IndexMCPTools,
+            InsiderMCPTools,
             MarketMCPTools,
             NewsMCPTools,
             QuoteMCPTools,
@@ -201,6 +203,7 @@ class ResearchLead:
             | _tool_names_from_specs(CompanyMCPTools.list_mcp_tools())
             | _tool_names_from_specs(AnalystMCPTools.list_mcp_tools())
             | _tool_names_from_specs(CalendarMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(InsiderMCPTools.list_mcp_tools())
         )
         scopes["fmp_macro"] = _tool_names_from_specs(EconomicsMCPTools.list_mcp_tools()) | _tool_names_from_specs(
             MarketMCPTools.list_mcp_tools()
@@ -209,6 +212,7 @@ class ResearchLead:
             _tool_names_from_specs(QuoteMCPTools.list_mcp_tools())
             | _tool_names_from_specs(ChartMCPTools.list_mcp_tools())
             | _tool_names_from_specs(IndicatorMCPTools.list_mcp_tools())
+            | _tool_names_from_specs(IndexMCPTools.list_mcp_tools())
         )
         return scopes
 

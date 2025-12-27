@@ -106,7 +106,7 @@ class FinanceOffice(BaseAgent):
                     raise ValueError("Missing required config: custom.llm_config.model")
                 temperature = llm_config.get("temperature", 0.7)
                 enable_multi_stage_reasoning = llm_config.get("enable_multi_stage_reasoning", True)
-                max_tool_iterations = llm_config.get("max_tool_iterations", 20)
+                max_tool_iterations = llm_config.get("max_tool_iterations", 4)
 
                 analyzer = ResearchLead(
                     model=model,
@@ -1282,15 +1282,18 @@ Return plain text instruction only."""
                 **state,
                 "final_response": {"status": "error", "error": "Missing per-team task_instruction for investment_research_team", "result": None},
             }
+        granularity_context = state.get("granularity_context") if isinstance(state.get("granularity_context"), dict) else {}
 
         team_resp = await analyzer.run_task(
             task_instruction=task_instruction,
             context_text=context_text,
             metadata={
                 "decision": team_decision,
+                "granularity": granularity_context.get("granularity"),
             },
             merge_system_message=merge_system_message,
             merge_user_message=merge_user_message,
+            additional_states=granularity_context,
         )
         if not isinstance(team_resp, dict):
             return {**state, "final_response": {"status": "error", "error": "Invalid team response", "result": {}}}
@@ -1358,8 +1361,8 @@ Return plain text instruction only."""
         """
         HTTP endpoint handler for running a natural-language finance research task.
 
-        Expected input (no backward compatibility):
-        {"instruction": "", "context": "", "analyzer_data": {"user_message":"", "system_message":""}}
+        Expected input:
+        {"instruction": "", "context": "", "analyzer_data": {"user_message":"", "system_message":""}, "granularity": "standard"}
         """
         try:
             instruction = str(data.get("instruction") or "").strip()
@@ -1367,11 +1370,17 @@ Return plain text instruction only."""
             analyzer_data = data.get("analyzer_data") if isinstance(data.get("analyzer_data"), dict) else {}
 
             app = self._get_department_workflow_app()
+            # Prefer request-body granularity (telegram_stock_bot sends it in JSON body).
+            requested_granularity = str(data.get("granularity") or "standard").strip()
+            if requested_granularity not in ("minimal", "standard", "maximum"):
+                requested_granularity = "standard"
+            granularity_context = self._prepare_granularity_context(requested_granularity)
             state_in = {
                 "raw_request": data,
                 "instruction": instruction,
                 "context": context_text,
                 "analyzer_data": analyzer_data,
+                "granularity_context": granularity_context,
             }
             state_out = await app.ainvoke(state_in)
             final_response = state_out.get("final_response") if isinstance(state_out, dict) else None
@@ -1408,3 +1417,18 @@ Return plain text instruction only."""
             "stats": {"queue_enabled": False, "queue_size": 0}
         }
 
+    def _prepare_granularity_context(self, granularity: str) -> Dict[str, Any]:
+        """
+        Prepare the context for the granularity.
+        """
+        if granularity == "minimal":
+            max_tool_iterations = 2   
+        if granularity == "standard":
+            max_tool_iterations = 4
+        if granularity == "maximum":
+            max_tool_iterations = 10
+        granularity_context = {
+            "max_tool_iterations": max_tool_iterations,
+            "granularity": granularity,
+        }
+        return granularity_context

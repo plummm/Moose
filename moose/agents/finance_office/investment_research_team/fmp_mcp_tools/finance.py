@@ -709,6 +709,363 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
+    def get_income_statement(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+        """
+        Fetches income statement line items across periods (reported financials).
+
+        Use case
+        - You want the raw income statement (revenue, gross profit, operating income, net income, EPS, etc.) for
+          modeling, trend analysis, or building a company snapshot.
+
+        Parameters
+        - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
+
+        Return value
+        - MCP JSON envelope:
+          - ok: bool
+          - data: raw JSON list/dict from the endpoint
+          - meta: tool inputs (and optional error context)
+          - text_fallback: short human-readable summary derived from the first record
+
+        Concrete example (code)
+
+        ```python
+        get_income_statement(symbol="AAPL", period="annual", limit=5)
+        ```
+
+        Data source: FMP Stable Income Statement API
+        - GET `https://financialmodelingprep.com/stable/income-statement?symbol=...&limit=...&period=...`
+        """
+        meta = {"tool": "get_income_statement", "symbol": symbol, "period": period, "limit": limit}
+        if not symbol:
+            return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
+
+        params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
+
+        raw = self._request_json("income-statement", params=params)
+        if isinstance(raw, dict) and "error" in raw:
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else None
+            return mcp_envelope_err(
+                str(raw.get("error") or "Failed to fetch data from FinancialModelingPrep."),
+                meta={**meta, **({"fmp_error_details": details} if details else {})},
+                text_fallback=str(raw.get("error") or "FMP request failed."),
+            )
+
+        rec = self._coerce_first_record(raw)
+        summary: dict = {"symbol": str(symbol).upper(), "period": period}
+        if isinstance(rec, dict) and "error" not in rec:
+            for k in (
+                "date",
+                "filingDate",
+                "acceptedDate",
+                "reportedCurrency",
+                "cik",
+                "fiscalYear",
+                "period",
+                "revenue",
+                "costOfRevenue",
+                "grossProfit",
+                "operatingExpenses",
+                "operatingIncome",
+                "incomeBeforeTax",
+                "incomeTaxExpense",
+                "netIncome",
+                "ebitda",
+                "ebit",
+                "eps",
+                "epsDiluted",
+                "weightedAverageShsOut",
+                "weightedAverageShsOutDil",
+            ):
+                if k in rec:
+                    summary[k] = rec.get(k)
+
+        tf = f"{summary.get('symbol')}: income statement"
+        if period:
+            tf += f" (period={period})"
+        if "date" in summary:
+            tf += f" as of {summary.get('date')}"
+        if "revenue" in summary:
+            tf += f"; revenue={summary.get('revenue')}"
+        if "netIncome" in summary:
+            tf += f"; netIncome={summary.get('netIncome')}"
+        if "eps" in summary:
+            tf += f"; eps={summary.get('eps')}"
+
+        return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
+
+    @mcp_tool()
+    def get_balance_sheet_statement(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+        """
+        Fetches balance sheet statement line items across periods (assets, liabilities, and equity).
+
+        Use case
+        - You want detailed balance sheet items (cash, debt, working capital components, total assets/liabilities/equity)
+          for financial health analysis and modeling.
+
+        Parameters
+        - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
+
+        Return value
+        - MCP JSON envelope:
+          - ok: bool
+          - data: raw JSON list/dict from the endpoint
+          - meta: tool inputs (and optional error context)
+          - text_fallback: short human-readable summary derived from the first record
+
+        Concrete example (code)
+
+        ```python
+        get_balance_sheet_statement(symbol="AAPL", period="annual", limit=5)
+        ```
+
+        Data source: FMP Stable Balance Sheet Statement API
+        - GET `https://financialmodelingprep.com/stable/balance-sheet-statement?symbol=...&limit=...&period=...`
+        """
+        meta = {"tool": "get_balance_sheet_statement", "symbol": symbol, "period": period, "limit": limit}
+        if not symbol:
+            return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
+
+        params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
+
+        raw = self._request_json("balance-sheet-statement", params=params)
+        if isinstance(raw, dict) and "error" in raw:
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else None
+            return mcp_envelope_err(
+                str(raw.get("error") or "Failed to fetch data from FinancialModelingPrep."),
+                meta={**meta, **({"fmp_error_details": details} if details else {})},
+                text_fallback=str(raw.get("error") or "FMP request failed."),
+            )
+
+        rec = self._coerce_first_record(raw)
+        summary: dict = {"symbol": str(symbol).upper(), "period": period}
+        if isinstance(rec, dict) and "error" not in rec:
+            for k in (
+                "date",
+                "filingDate",
+                "acceptedDate",
+                "reportedCurrency",
+                "cik",
+                "fiscalYear",
+                "period",
+                # headline balance sheet items
+                "cashAndCashEquivalents",
+                "cashAndShortTermInvestments",
+                "totalCurrentAssets",
+                "totalNonCurrentAssets",
+                "totalAssets",
+                "totalCurrentLiabilities",
+                "totalNonCurrentLiabilities",
+                "totalLiabilities",
+                "totalStockholdersEquity",
+                "totalEquity",
+                "totalLiabilitiesAndTotalEquity",
+                # debt highlights
+                "shortTermDebt",
+                "longTermDebt",
+                "totalDebt",
+                "netDebt",
+            ):
+                if k in rec:
+                    summary[k] = rec.get(k)
+
+        tf = f"{summary.get('symbol')}: balance sheet statement"
+        if period:
+            tf += f" (period={period})"
+        if "date" in summary:
+            tf += f" as of {summary.get('date')}"
+        if "totalAssets" in summary:
+            tf += f"; totalAssets={summary.get('totalAssets')}"
+        if "totalLiabilities" in summary:
+            tf += f"; totalLiabilities={summary.get('totalLiabilities')}"
+        if "totalStockholdersEquity" in summary:
+            tf += f"; totalStockholdersEquity={summary.get('totalStockholdersEquity')}"
+
+        return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
+
+    @mcp_tool()
+    def get_cash_flow_statement(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+        """
+        Fetches cash flow statement line items across periods (operating, investing, and financing cash flows).
+
+        Use case
+        - You want detailed cash flow items (CFO, capex, free cash flow, financing flows) for sustainability and
+          valuation analysis.
+
+        Parameters
+        - symbol: Stock ticker (e.g., `"AAPL"`).
+        - period: Optional period filter: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+        - limit: Optional maximum number of records to return (positive integer).
+
+        Return value
+        - MCP JSON envelope:
+          - ok: bool
+          - data: raw JSON list/dict from the endpoint
+          - meta: tool inputs (and optional error context)
+          - text_fallback: short human-readable summary derived from the first record
+
+        Concrete example (code)
+
+        ```python
+        get_cash_flow_statement(symbol="AAPL", period="annual", limit=5)
+        ```
+
+        Data source: FMP Stable Cash Flow Statement API
+        - GET `https://financialmodelingprep.com/stable/cash-flow-statement?symbol=...&limit=...&period=...`
+        """
+        meta = {"tool": "get_cash_flow_statement", "symbol": symbol, "period": period, "limit": limit}
+        if not symbol:
+            return mcp_envelope_err("symbol is required", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            return mcp_envelope_err("limit must be a positive integer", meta=meta)
+
+        params = {"symbol": str(symbol).upper()}
+        if period is not None:
+            params["period"] = str(period).strip()
+        if limit is not None:
+            params["limit"] = limit
+
+        raw = self._request_json("cash-flow-statement", params=params)
+        if isinstance(raw, dict) and "error" in raw:
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else None
+            return mcp_envelope_err(
+                str(raw.get("error") or "Failed to fetch data from FinancialModelingPrep."),
+                meta={**meta, **({"fmp_error_details": details} if details else {})},
+                text_fallback=str(raw.get("error") or "FMP request failed."),
+            )
+
+        rec = self._coerce_first_record(raw)
+        summary: dict = {"symbol": str(symbol).upper(), "period": period}
+        if isinstance(rec, dict) and "error" not in rec:
+            for k in (
+                "date",
+                "filingDate",
+                "acceptedDate",
+                "reportedCurrency",
+                "cik",
+                "fiscalYear",
+                "period",
+                # headline cash flow items
+                "netIncome",
+                "netCashProvidedByOperatingActivities",
+                "netCashProvidedByInvestingActivities",
+                "netCashProvidedByFinancingActivities",
+                "netChangeInCash",
+                "cashAtBeginningOfPeriod",
+                "cashAtEndOfPeriod",
+                "operatingCashFlow",
+                "capitalExpenditure",
+                "freeCashFlow",
+                "incomeTaxesPaid",
+                "interestPaid",
+            ):
+                if k in rec:
+                    summary[k] = rec.get(k)
+
+        tf = f"{summary.get('symbol')}: cash flow statement"
+        if period:
+            tf += f" (period={period})"
+        if "date" in summary:
+            tf += f" as of {summary.get('date')}"
+        if "operatingCashFlow" in summary:
+            tf += f"; operatingCashFlow={summary.get('operatingCashFlow')}"
+        if "capitalExpenditure" in summary:
+            tf += f"; capex={summary.get('capitalExpenditure')}"
+        if "freeCashFlow" in summary:
+            tf += f"; freeCashFlow={summary.get('freeCashFlow')}"
+
+        return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
+
+    @mcp_tool()
+    def get_financial_reports_json(self, symbol: str, year: int, period: str = "FY") -> dict:
+        """
+        Fetches comprehensive annual report financials in JSON form (Form 10-K style tables/sections).
+
+        Use case
+        - You want a structured JSON representation of annual report tables/sections (useful for extracting detailed
+          disclosures and statement tables).
+
+        Parameters
+        - symbol: Stock ticker (e.g., `"AAPL"`).
+        - year: Fiscal year (e.g., `2022`).
+        - period: Reporting period (typically `FY`). Allowed: `Q1`, `Q2`, `Q3`, `Q4`, `FY`, `annual`, `quarter`.
+
+        Return value
+        - MCP JSON envelope:
+          - ok: bool
+          - data: raw JSON list/dict from the endpoint
+          - meta: tool inputs (and optional error context)
+          - text_fallback: short human-readable summary (symbol/year/period and a section count when possible)
+
+        Concrete example (code)
+
+        ```python
+        get_financial_reports_json(symbol="AAPL", year=2022, period="FY")
+        ```
+
+        Data source: FMP Stable Financial Reports JSON API
+        - GET `https://financialmodelingprep.com/stable/financial-reports-json?symbol=...&year=...&period=...`
+        """
+        meta = {"tool": "get_financial_reports_json", "symbol": symbol, "year": year, "period": period}
+        if not symbol:
+            return mcp_envelope_err("symbol is required", meta=meta)
+        if not isinstance(year, int) or year < 1900:
+            return mcp_envelope_err("year must be a valid integer (e.g., 2022)", meta=meta)
+        perr = self._validate_growth_period(period)
+        if perr:
+            return perr
+
+        params = {"symbol": str(symbol).upper(), "year": year, "period": str(period).strip()}
+        raw = self._request_json("financial-reports-json", params=params)
+        if isinstance(raw, dict) and "error" in raw:
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else None
+            return mcp_envelope_err(
+                str(raw.get("error") or "Failed to fetch data from FinancialModelingPrep."),
+                meta={**meta, **({"fmp_error_details": details} if details else {})},
+                text_fallback=str(raw.get("error") or "FMP request failed."),
+            )
+
+        rec = self._coerce_first_record(raw)
+        # The record is typically a dict with top-level section keys (e.g., "Cover Page", "CONSOLIDATED ...")
+        section_count = None
+        if isinstance(rec, dict):
+            try:
+                section_count = len([k for k in rec.keys() if k not in ("symbol", "period", "year")])
+            except Exception:
+                section_count = None
+
+        tf = f"{str(symbol).upper()}: financial reports json {year} (period={str(period).strip()})"
+        if section_count is not None:
+            tf += f"; sections={section_count}"
+
+        return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
+
+    @mcp_tool()
     def get_income_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
         """
         Fetches growth rates for income statement line items (e.g., revenue growth, net income growth) across periods.
@@ -949,6 +1306,72 @@ class FinanceMCPTools(FMPMCPTools):
             tf += f" as of {rec.get('date')}"
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
+    @mcp_tool()
+    def get_revenue_product_segmentation(self, symbol: str) -> dict:
+        """
+        Fetches annual revenue breakdown by product line (product segmentation).
+
+        Use case
+        - You want to understand what product categories drive a company's revenue and how the mix changes over time.
+
+        Parameters
+        - symbol: Stock ticker (e.g., `"AAPL"`).
+
+        Return value
+        - MCP JSON envelope:
+          - ok: bool
+          - data: raw JSON list/dict from the endpoint
+          - meta: tool inputs (and optional error context)
+          - text_fallback: short human-readable summary derived from the first record
+
+        Concrete example (code)
+
+        ```python
+        get_revenue_product_segmentation(symbol="AAPL")
+        ```
+
+        Data source: FMP Stable Revenue Product Segmentation API
+        - GET `https://financialmodelingprep.com/stable/revenue-product-segmentation?symbol=...`
+        """
+        meta = {"tool": "get_revenue_product_segmentation", "symbol": symbol}
+        if not symbol:
+            return mcp_envelope_err("symbol is required", meta=meta)
+
+        params = {"symbol": str(symbol).upper()}
+        raw = self._request_json("revenue-product-segmentation", params=params)
+        if isinstance(raw, dict) and "error" in raw:
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else None
+            return mcp_envelope_err(
+                str(raw.get("error") or "Failed to fetch data from FinancialModelingPrep."),
+                meta={**meta, **({"fmp_error_details": details} if details else {})},
+                text_fallback=str(raw.get("error") or "FMP request failed."),
+            )
+
+        rec = self._coerce_first_record(raw)
+        summary: dict = {"symbol": str(symbol).upper()}
+        seg_keys: list[str] = []
+        if isinstance(rec, dict) and "error" not in rec:
+            for k in ("date", "fiscalYear", "period", "reportedCurrency"):
+                if k in rec:
+                    summary[k] = rec.get(k)
+            data = rec.get("data") if isinstance(rec.get("data"), dict) else None
+            if isinstance(data, dict):
+                try:
+                    seg_keys = [str(k) for k in data.keys()]
+                except Exception:
+                    seg_keys = []
+
+        tf = f"{summary.get('symbol')}: revenue product segmentation"
+        if "fiscalYear" in summary:
+            tf += f" FY{summary.get('fiscalYear')}"
+        if "date" in summary:
+            tf += f" as of {summary.get('date')}"
+        if seg_keys:
+            tf += f"; segments={len(seg_keys)}"
+            tf += f" ({', '.join(seg_keys[:5])}{'...' if len(seg_keys) > 5 else ''})"
+
+        return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
+
 if __name__ == "__main__":
     # Debug-purpose examples.
     # Prefer using environment variable FMP_API_KEY:
@@ -963,6 +1386,10 @@ if __name__ == "__main__":
     print(tools.get_financial_scores(symbol="AAPL"))
     print(tools.get_owner_earnings(symbol="AAPL", limit=5))
     print(tools.get_enterprise_values(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_income_statement(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_balance_sheet_statement(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_cash_flow_statement(symbol="AAPL", period="annual", limit=5))
+    print(tools.get_financial_reports_json(symbol="AAPL", year=2022, period="FY"))
     print(tools.get_income_statement_growth(symbol="AAPL", period="annual", limit=5))
     print(tools.get_balance_sheet_statement_growth(symbol="AAPL", period="annual", limit=5))
     print(tools.get_cash_flow_statement_growth(symbol="AAPL", period="annual", limit=5))

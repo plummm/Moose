@@ -74,7 +74,7 @@ class LLMClient:
         tools: Optional[List[Any]] = None,
         enable_multi_stage_reasoning: bool = False,
         multi_stage_marker: str = "<FINAL_ANSWER>",
-        max_tool_iterations: int = 20,
+        max_tool_iterations: int = 4,
         agent_name: Optional[str] = None,
         **kwargs
     ):
@@ -93,7 +93,7 @@ class LLMClient:
             tools: Optional list of LangChain tools to bind to the LLM
             enable_multi_stage_reasoning: Enable planner/executor loop for iterative tool calling
             multi_stage_marker: Marker text that signals completion in multi-stage mode
-            max_tool_iterations: Maximum number of tool call iterations (default: 20)
+            max_tool_iterations: Maximum number of tool call iterations (default: 4)
             **kwargs: Additional provider-specific parameters
         """
         self.logger = get_core_logger()

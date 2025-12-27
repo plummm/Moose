@@ -131,20 +131,9 @@ class PlaywrightFetcher:
 
 
 def _extract_json(text: str) -> Optional[dict]:
-    """
-    Best-effort JSON object extraction from an LLM response.
-
-    Many models occasionally wrap JSON with prose or code fences. This extracts the first
-    top-level `{...}` span and attempts `json.loads()` on it.
-    """
     s = (text or "").strip()
     if not s:
         return None
-
-    # Strip common code fences
-    if s.startswith("```"):
-        s = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", s).strip()
-        s = re.sub(r"\s*```$", "", s).strip()
 
     start = s.find("{")
     end = s.rfind("}")

@@ -98,7 +98,8 @@ class AgentCommand:
         # Set up default project for logging
         # All logs will go to projects/default/logs/
         projects_base_dir = Path(os.getenv("MOOSE_PROJECTS_DIR") or (Path.cwd() / "projects"))
-        set_project("default", projects_base_dir)
+        project_id = "default"
+        set_project(project_id, projects_base_dir)
         
         # Reinitialize LLM logger to use project log directory
         reinit_llm_logger()
@@ -279,6 +280,8 @@ class AgentCommand:
             
             # Use default project_id for standalone deployment
             project_id = "default"
+            projects_base_dir = Path(os.getenv("MOOSE_PROJECTS_DIR") or (Path.cwd() / "projects"))
+
             
             # Check if container already running
             try:
@@ -313,6 +316,8 @@ class AgentCommand:
             # Prepare environment variables
             docker_config = config.get("docker", {})
             environment = docker_config.get("environment", {}).copy()
+            environment["MOOSE_PROJECT_ID"] = project_id
+            environment["MOOSE_PROJECTS_DIR"] = str(projects_base_dir)
             if debug:
                 environment["MOOSE_AGENT_DEBUG"] = "true"
             

@@ -8,30 +8,30 @@ agents:
   edgar:
     description: SEC/EDGAR filings verification and extraction specialist.
     best_for: verifying claims via filings; extracting numbers/snippets from 10-K/10-Q/8-K/6-K; insider trades (Forms 3/4/5); institutional holdings (13F); major holders (13D/13G); governance/proxy; financing/dilution documents.
-    use_when: you need primary-source verification, official financials, ownership signals, dilution/financing risk, disclosure changes.
+    use_when: you need maximum granularity in analysis - primary-source verification, official financials, ownership signals, dilution/financing risk, disclosure changes. Only use edgar agent if `granularity` in metadata is "maximum".
   fmp_news:
     description: FMP news timeline and catalyst context specialist.
     best_for: pulling related news and building a timeline of catalyst context from FMP news search.
     use_when: the request needs broader context, confirmation via multiple sources, or identifying tickers/entities in a messy prompt.
   fmp_fundamentals:
     description: FMP fundamentals/ratios/valuation snapshot specialist.
-    best_for: fundamentals snapshot (TTM ratios/metrics), growth/quality/health scores, estimates/ratings, earnings calendar/report endpoints, company profile/market cap/float.
-    use_when: you need valuation + fundamentals context, “is this material?”, baseline expectations, quality/leverage/liquidity.
+    best_for: fundamentals snapshot (TTM ratios/metrics), financial statements (income statement / balance sheet / cash flow), financial-reports JSON (10-K style tables), growth/quality/health scores, estimates/ratings, earnings calendar/report endpoints, revenue product segmentation, insider/beneficial ownership signals.
+    use_when: you need valuation + fundamentals context, “is this material?”, baseline expectations, quality/leverage/liquidity, or ownership/insider activity context from FMP.
   fmp_macro:
     description: FMP macro + sector/industry regime context specialist.
     best_for: treasury rates, macro indicators, market risk premium, sector/industry performance and valuation regime.
     use_when: the request is macro-driven, sector rotation/regime, or you need to explain context beyond company specifics.
   fmp_price:
     description: FMP price action + technical indicators specialist.
-    best_for: quotes, price-change snapshots, historical charts/time series, technical indicators (trend/momentum/volatility).
-    use_when: you need price reaction, technical context, event window moves, volatility confirmation.
+    best_for: quotes, price-change snapshots, index quotes (e.g., ^GSPC / ^VIX), historical charts/time series (including index EOD), technical indicators (trend/momentum/volatility).
+    use_when: you need price reaction, index/market context, technical context, event window moves, volatility confirmation.
 
 playbooks:
   EarningsReport:
     description: Produce a report of a company's latest earnings and key implications (best-effort).
     phases:
       - agent: fmp_fundamentals
-        goal: Pull latest earnings report/calendar items and fundamentals snapshot; summarize key metrics and expectations.
+        goal: Pull latest earnings report/calendar items and fundamentals snapshot; include key financial statements (income statement, balance sheet, cash flow) when helpful; summarize key metrics and expectations.
         max_tool_calls: 6
       - agent: fmp_news
         goal: Pull recent news around earnings to capture guidance and market narrative (optional).
@@ -79,7 +79,7 @@ playbooks:
         goal: Summarize insider activity and (if needed) parse specific filings; optionally add 13F context.
         max_tool_calls: 7
       - agent: fmp_fundamentals
-        goal: Provide fundamentals context to interpret ownership signals.
+        goal: Provide fundamentals context to interpret ownership signals; optionally supplement with FMP insider trading (latest/search/statistics) and acquisition-of-beneficial-ownership endpoints.
         max_tool_calls: 4
 
   FilingChangeDetection:
@@ -99,7 +99,7 @@ playbooks:
         goal: Pull macro indicators / treasury rates / sector/industry regime context for the event window.
         max_tool_calls: 5
       - agent: fmp_price
-        goal: Summarize price reaction; relate to macro/sector regime where possible.
+        goal: Summarize price reaction; include relevant index context (e.g., ^GSPC / ^VIX) and relate to macro/sector regime where possible.
         max_tool_calls: 5
 
 
