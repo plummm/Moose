@@ -112,24 +112,29 @@ class FinanceOfficeAssistant:
         Convert analyses_by_ticker -> Option A payload items.
         Group identical content across tickers into a single item with tickers=[...].
         """
-        groups: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
+        # Include sentiment_rating in the grouping key because telegram_stock_bot filters per-chat by it.
+        groups: Dict[tuple[str, str, str, str, str], Dict[str, Any]] = {}
 
         for ticker, payload in (analyses_by_ticker or {}).items():
             t = str(ticker or "").strip()
             if not t:
                 continue
             p = payload if isinstance(payload, dict) else {}
+            url = str(p.get("url") or "").strip()
+            sentiment_rating = str(p.get("sentiment_rating") or "").strip().upper()
             title = str(p.get("title") or "").strip()
             summary = str(p.get("high_level_idea") or "").strip()
             insights = str(p.get("trading_insights") or "").strip()
             conf = p.get("confidence")
             conf_s = str(conf).strip() if conf is not None else ""
 
-            key = (title, summary, insights, conf_s)
+            key = (title, summary, insights, conf_s, sentiment_rating)
             g = groups.get(key)
             if not g:
                 g = {
                     "tickers": set(),
+                    "url": url,
+                    "sentiment_rating": sentiment_rating,
                     "title": title,
                     "summary": summary,
                     "trading_insights": insights,
@@ -149,6 +154,8 @@ class FinanceOfficeAssistant:
             items.append(
                 {
                     "tickers": tickers,
+                    "url": g.get("url") or "",
+                    "sentiment_rating": g.get("sentiment_rating") or "",
                     "title": g.get("title") or "",
                     "summary": g.get("summary") or "",
                     "trading_insights": g.get("trading_insights") or "",
@@ -177,6 +184,7 @@ class FinanceOfficeAssistant:
         url = f"{base}/push_breaking_news"
         timeout_s = self._telegram_timeout_s()
 
+        self.logger.debug(f"Pushing {len(items)} breaking news to telegram_stock_bot: {url}")
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
             try:
                 r = await client.post(url, json={"items": items})

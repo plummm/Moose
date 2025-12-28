@@ -9,9 +9,10 @@ import asyncio
 import html
 import hashlib
 import json
+import sqlite3
 import threading
 import queue
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 from urllib.parse import quote
@@ -561,6 +562,12 @@ class FinanceOffice(BaseAgent):
         except Exception:
             tickers = []
         tickers = sorted(set(tickers), key=lambda s: str(s).upper())
+        tickers_select_html = "".join(
+            [
+                f'<option value="{html.escape(str(t))}" {"selected" if i == 0 else ""}>{html.escape(str(t))}</option>'
+                for i, t in enumerate(tickers)
+            ]
+        )
 
         rows_html: List[str] = []
         for t in tickers:
@@ -591,29 +598,80 @@ class FinanceOffice(BaseAgent):
                 f"</tr>"
             )
 
-        html_doc = f"""<!doctype html>
+        rows_section = (
+            "".join(rows_html)
+            if rows_html
+            else '<tr><td colspan="4" class="muted">No tickers found under NEWS_RESULT_DIR.</td></tr>'
+        )
+
+        html_doc = """<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <title>finance_office — Market Impression</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
-      body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }}
-      .row {{ display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }}
-      .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 12px 14px; }}
-      table {{ border-collapse: collapse; width: 100%; }}
-      th, td {{ border-bottom: 1px solid #eee; padding: 8px 6px; text-align: left; vertical-align: top; }}
-      th {{ font-weight: 600; }}
-      code {{ background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }}
-      .muted {{ color: #666; }}
-      a {{ color: inherit; }}
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+      .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px 14px; }
+      .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+      label { font-size: 12px; color: #444; display: block; margin-bottom: 4px; }
+      select, button { font: inherit; }
+      select { min-width: 220px; }
+      .chartWrap { width: 100%; height: 340px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align: left; vertical-align: top; }
+      th { font-weight: 600; }
+      code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+      .muted { color: #666; }
+      a { color: inherit; }
     </style>
   </head>
   <body>
     <h2>finance_office — Market Impression</h2>
+
+    <div class="card" style="margin-top: 12px;">
+      <h3 style="margin: 0 0 10px 0;">Trend chart (from SQLite snapshots)</h3>
+      <div class="controls">
+        <div>
+          <label for="tickersSel">Tickers (multi-select)</label>
+          <select id="tickersSel" multiple size="6">
+            __TICKERS_SELECT__
+          </select>
+          <div class="muted" style="margin-top: 6px;">Tip: Ctrl/Cmd-click to select multiple.</div>
+        </div>
+        <div>
+          <label for="metricSel">Metric</label>
+          <select id="metricSel">
+            <option value="sentiment_number" selected>sentiment_number</option>
+            <option value="memory_weight">memory_weight</option>
+            <option value="memory_weight_ratio">memory_weight_ratio</option>
+          </select>
+        </div>
+        <div>
+          <label for="spanSel">Time span</label>
+          <select id="spanSel">
+            <option value="1w">1 week</option>
+            <option value="1m" selected>1 month</option>
+            <option value="6m">6 months</option>
+            <option value="1y">1 year</option>
+            <option value="5y">5 years</option>
+          </select>
+        </div>
+        <div>
+          <button id="loadBtn" type="button">Load</button>
+        </div>
+        <div class="muted" id="chartStatus" style="align-self: center;"></div>
+      </div>
+      <div class="chartWrap" style="margin-top: 10px;">
+        <canvas id="trendChart"></canvas>
+      </div>
+    </div>
+
     <div class="row card">
-      <div><b>Base dir</b>: <code>{html.escape(str(base))}</code></div>
-      <div><b>UTC bucket</b>: <code>{html.escape(year)}/{html.escape(month)}</code></div>
+      <div><b>Base dir</b>: <code>__BASE__</code></div>
+      <div><b>UTC bucket</b>: <code>__YEAR__/__MONTH__</code></div>
       <div class="muted">Showing values from each ticker’s <code>memory.json</code> for the current UTC month.</div>
     </div>
 
@@ -629,14 +687,193 @@ class FinanceOffice(BaseAgent):
           </tr>
         </thead>
         <tbody>
-          {''.join(rows_html) if rows_html else '<tr><td colspan="4" class="muted">No tickers found under NEWS_RESULT_DIR.</td></tr>'}
+          __ROWS__
         </tbody>
       </table>
     </div>
+    <script>
+      function getSelectedTickers() {
+        const sel = document.getElementById('tickersSel');
+        const out = [];
+        for (const opt of sel.options) {
+          if (opt.selected && opt.value) out.push(opt.value);
+        }
+        return out;
+      }
+      function colorForTicker(t) {
+        let h = 0;
+        for (let i = 0; i < (t || '').length; i++) h = ((h << 5) - h) + t.charCodeAt(i);
+        const hue = Math.abs(h) % 360;
+        return `hsl(${hue}, 65%, 45%)`;
+      }
+
+      let chart = null;
+      async function loadChart() {
+        const status = document.getElementById('chartStatus');
+        const tickers = getSelectedTickers();
+        const metric = document.getElementById('metricSel').value || 'sentiment_number';
+        const span = document.getElementById('spanSel').value || '1m';
+        if (!tickers.length) {
+          status.textContent = 'Select at least 1 ticker.';
+          return;
+        }
+        status.textContent = 'Loading…';
+        try {
+          const qs = new URLSearchParams();
+          qs.set('tickers', tickers.join(','));
+          qs.set('metric', metric);
+          qs.set('span', span);
+          const resp = await fetch('/market-impression/timeseries?' + qs.toString());
+          const payload = await resp.json();
+          if (!payload || payload.status !== 'success') {
+            status.textContent = 'Failed: ' + JSON.stringify(payload);
+            return;
+          }
+          const data = payload.data || {};
+          const series = data.series || {};
+
+          // Build global day labels across all tickers
+          const daySet = new Set();
+          for (const t of Object.keys(series)) {
+            for (const p of (series[t] || [])) {
+              if (p && p.day) daySet.add(p.day);
+            }
+          }
+          const labels = Array.from(daySet).sort();
+
+          const datasets = [];
+          for (const t of Object.keys(series)) {
+            const points = series[t] || [];
+            const map = new Map(points.map(p => [p.day, p.value]));
+            const arr = labels.map(d => (map.has(d) ? map.get(d) : null));
+            datasets.push({
+              label: t,
+              data: arr,
+              borderColor: colorForTicker(t),
+              backgroundColor: 'transparent',
+              tension: 0.25,
+              spanGaps: true,
+            });
+          }
+
+          const ctx = document.getElementById('trendChart').getContext('2d');
+          if (chart) chart.destroy();
+          chart = new Chart(ctx, {
+            type: 'line',
+            data: { labels, datasets },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              interaction: { mode: 'nearest', intersect: false },
+              plugins: {
+                legend: { display: true },
+                title: { display: true, text: metric + ' (daily)' }
+              },
+              scales: {
+                x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+                y: { beginAtZero: false }
+              }
+            }
+          });
+          status.textContent = 'Loaded ' + labels.length + ' day(s) for ' + Object.keys(series).length + ' ticker(s).';
+        } catch (e) {
+          status.textContent = 'Error: ' + String(e);
+        }
+      }
+
+      document.getElementById('loadBtn').addEventListener('click', loadChart);
+      document.getElementById('metricSel').addEventListener('change', loadChart);
+      document.getElementById('spanSel').addEventListener('change', loadChart);
+      // Auto-load once if there is a default selection
+      loadChart();
+    </script>
   </body>
 </html>
 """
+        html_doc = (
+            html_doc.replace("__BASE__", html.escape(str(base)))
+            .replace("__YEAR__", html.escape(year))
+            .replace("__MONTH__", html.escape(month))
+            .replace("__TICKERS_SELECT__", tickers_select_html if tickers_select_html else "")
+            .replace("__ROWS__", rows_section)
+        )
         return Response(html_doc, mimetype="text/html")
+
+    def market_impression_timeseries(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        GET /market-impression/timeseries?tickers=AAPL,MSFT&metric=sentiment_number&span=1m
+
+        Reads from sqlite db at {NEWS_RESULT_DIR}/db.sqlite, table memory_snapshot.
+        Returns daily points per ticker (last snapshot per day).
+        """
+        raw_tickers = (data or {}).get("tickers")
+        if isinstance(raw_tickers, list):
+            tickers = [str(x).strip().upper() for x in raw_tickers if str(x).strip()]
+        else:
+            tickers = [s.strip().upper() for s in str(raw_tickers or "").split(",") if s.strip()]
+        tickers = sorted(set(tickers))
+
+        metric = str((data or {}).get("metric") or "sentiment_number").strip()
+        allowed_metrics = {
+            "sentiment_number": "sentiment_number",
+            "memory_weight": "memory_weight",
+            "memory_weight_ratio": "memory_weight_ratio",
+        }
+        metric_col = allowed_metrics.get(metric) or "sentiment_number"
+
+        span = str((data or {}).get("span") or "1m").strip().lower()
+        span_days_map = {"1w": 7, "1m": 30, "6m": 183, "1y": 365, "5y": 1825}
+        days = int(span_days_map.get(span) or 30)
+
+        now = datetime.now(timezone.utc)
+        start_day = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+
+        base_news_dir = os.getenv("NEWS_RESULT_DIR", "/data/news") or "/data/news"
+        db_fp = Path(str(base_news_dir)) / "db.sqlite"
+        if not tickers:
+            return {"status": "success", "data": {"metric": metric_col, "span": span, "series": {}}}
+        if not db_fp.exists():
+            return {"status": "success", "data": {"metric": metric_col, "span": span, "series": {t: [] for t in tickers}}}
+
+        series: Dict[str, List[Dict[str, Any]]] = {t: [] for t in tickers}
+        try:
+            conn = sqlite3.connect(str(db_fp), timeout=10)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000;")
+                placeholders = ",".join(["?"] * len(tickers))
+                # last snapshot per ticker per day
+                q = f"""
+                SELECT s.ticker, latest.day, s.{metric_col} AS value
+                FROM (
+                    SELECT ticker, substr(updated_at, 1, 10) AS day, MAX(updated_at) AS max_updated_at
+                    FROM memory_snapshot
+                    WHERE substr(updated_at, 1, 10) >= ?
+                      AND ticker IN ({placeholders})
+                    GROUP BY ticker, day
+                ) latest
+                JOIN memory_snapshot s
+                  ON s.ticker = latest.ticker
+                 AND substr(s.updated_at, 1, 10) = latest.day
+                 AND s.updated_at = latest.max_updated_at
+                WHERE s.{metric_col} IS NOT NULL
+                ORDER BY latest.day ASC
+                """
+                rows = conn.execute(q, [start_day, *tickers]).fetchall()
+                for t, day, val in rows:
+                    tt = str(t).strip().upper()
+                    if tt not in series:
+                        continue
+                    try:
+                        fv = float(val)
+                    except Exception:
+                        continue
+                    series[tt].append({"day": str(day), "value": fv})
+            finally:
+                conn.close()
+        except Exception as e:
+            return {"status": "error", "error": f"db_error:{e}"}
+
+        return {"status": "success", "data": {"metric": metric_col, "span": span, "series": series}}
 
     def market_impression_ticker_page(self, data: Dict[str, Any]) -> Any:
         """
