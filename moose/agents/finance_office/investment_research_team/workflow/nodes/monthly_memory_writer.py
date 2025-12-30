@@ -70,7 +70,7 @@ class MonthlyMemoryWriterNode(BaseNode):
         existing_params: Optional[Dict[str, Any]],
         analyses: Union[Dict[str, Any], List[Dict[str, Any]], Any],
         operation: str = "add",
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """
         Compute updated monthly memory parameters from prior parameters and analysis records.
 
@@ -87,7 +87,11 @@ class MonthlyMemoryWriterNode(BaseNode):
             operation: "add" to add contributions (default), "subtract" to remove contributions.
 
         Returns:
-            Dict[str, float]: {"sentiment_number": float, "memory_weight": float}
+            Dict[str, Any]: {
+              "sentiment_number": float,
+              "memory_weight": float,
+              "sentiment_delta": { "<file_path>": float, ... }  # per-analysis delta keyed by computed file_path
+            }
         """
         allowed_sentiments = {"bullish", "bearish", "neutral"}
         existing_params = existing_params if isinstance(existing_params, dict) else {}
@@ -99,6 +103,12 @@ class MonthlyMemoryWriterNode(BaseNode):
             memory_weight = float(existing_params.get("memory_weight") or 0.0)
         except Exception:
             memory_weight = 0.0
+
+        # Track per-analysis sentiment delta keyed by file_path.
+        # NOTE: We compute file_path the same way as manage_memory_list:
+        # - Prefer analysis["file_path"] if present
+        # - Else compute from (ticker, url, current UTC year/month) using sha256(url)
+        sentiment_delta_by_file_path: Dict[str, float] = {}
 
         if isinstance(analyses, dict):
             items: List[Dict[str, Any]] = [analyses]
@@ -112,9 +122,24 @@ class MonthlyMemoryWriterNode(BaseNode):
         multiplier = -1.0 if is_subtract else 1.0
 
         for a in items:
+            # Capture starting sentiment_number so we can compute delta as:
+            # updated sentiment_number - old sentiment_number
+            before_sn = float(sentiment_number)
+
             sentiment = str(a.get("sentiment") or "").strip().lower()
             if sentiment not in allowed_sentiments:
                 sentiment = "neutral"
+            # Apply per-item scaling from sentiment_rating without mutating the loop-level multiplier.
+            sentiment_rating = str(a.get("sentiment_rating") or "").strip().upper()
+            rating_scale = 1.0
+            if sentiment_rating in ["BL0", "BR0"]:
+                rating_scale = 0.1
+            elif sentiment_rating in ["BL1", "BR1"]:
+                rating_scale = 0.5
+            elif sentiment_rating in ["BL2", "BR2"]:
+                rating_scale = 1.0
+            item_multiplier = float(multiplier) * float(rating_scale)
+            
             try:
                 confidence = float(a.get("confidence") or 0.0)
             except Exception:
@@ -137,13 +162,83 @@ class MonthlyMemoryWriterNode(BaseNode):
             memory_weight = max(0.0, memory_weight)
             
             if sentiment == "bullish":
-                sentiment_number = sentiment_number + multiplier * (confidence + bonus)
+                sentiment_number = sentiment_number + item_multiplier * (confidence + bonus)
             elif sentiment == "bearish":
-                sentiment_number = sentiment_number - multiplier * (confidence + bonus)
+                sentiment_number = sentiment_number - item_multiplier * (confidence + bonus)
             else:
-                sentiment_number = sentiment_number + multiplier * bonus
+                sentiment_number = sentiment_number + item_multiplier * bonus
 
-        return {"sentiment_number": float(sentiment_number), "memory_weight": float(memory_weight)}
+            # Compute delta and key it by file_path (only for new entries; caller decides whether to apply).
+            after_sn = float(sentiment_number)
+            delta = float(after_sn - before_sn)
+
+            fp: Optional[str] = None
+            try:
+                url = str(a.get("url") or "").strip()
+                ticker = str(a.get("ticker") or "").upper().strip()
+                if url and ticker:
+                    base_news_dir = os.getenv("NEWS_RESULT_DIR", "/data/news") or "/data/news"
+                    now = datetime.now(timezone.utc)
+                    year = now.strftime("%Y")
+                    month = now.strftime("%m")
+                    filename = f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
+                    fp = str(Path(base_news_dir) / ticker / year / month / filename)
+            except Exception:
+                fp = None
+
+            if fp:
+                sentiment_delta_by_file_path[fp] = float(sentiment_delta_by_file_path.get(fp, 0.0) + delta)
+
+        return {
+            "sentiment_number": float(sentiment_number),
+            "memory_weight": float(memory_weight),
+            "sentiment_delta": sentiment_delta_by_file_path,
+        }
+
+    @staticmethod
+    def _apply_sentiment_delta_to_memory_list(
+        *,
+        new_memory_list: Optional[List[Dict[str, Any]]],
+        params: Optional[Dict[str, Any]],
+    ) -> None:
+        """
+        Attach `sentiment_delta` to memory_list entries when file_path matches params["sentiment_delta"].
+        Uses params["sentiment_delta"] which is expected to be {file_path: delta}.
+        Mutates new_memory_list entries in place. Strips the transient map from params (if present)
+        so it won't be persisted into memory.json.
+        """
+        # Always strip transient sentiment_delta from parameters so it won't be persisted.
+        if isinstance(params, dict):
+            try:
+                sd_map = params.get("sentiment_delta")
+            except Exception:
+                sd_map = None
+            try:
+                params.pop("sentiment_delta", None)
+            except Exception:
+                pass
+        else:
+            sd_map = None
+
+        if not isinstance(new_memory_list, list) or not isinstance(sd_map, dict) or not sd_map:
+            return
+
+        for m in new_memory_list:
+            if not isinstance(m, dict):
+                continue
+            fp = m.get("file_path")
+            if not (isinstance(fp, str) and fp.strip()):
+                continue
+            # Do not overwrite if already present.
+            if "sentiment_delta" in m:
+                continue
+            if fp in sd_map:
+                try:
+                    m["sentiment_delta"] = float(sd_map.get(fp) or 0.0)
+                except Exception:
+                    m["sentiment_delta"] = 0.0
+
+        # (params already stripped above)
 
     async def manage_memory_list(
         self,
@@ -305,12 +400,23 @@ class MonthlyMemoryWriterNode(BaseNode):
                 "confidence": confidence,
                 "summary": current_summary  # Include for future dedup
             }
+            # New field for chronological display: use analysis analyzed_at (no backfill for existing entries).
+            analyzed_at = str(a.get("analyzed_at") or "").strip()
+            if analyzed_at:
+                memory_entry["update_at"] = analyzed_at
             result.append(memory_entry)
             seen_paths.add(analysis_file_path)
         
-        # Limit to max_memories (keep newest, which are at the end after appending new analyses)
+        # Sort memory_list newest -> oldest by update_at (string ISO sorts lexicographically).
+        # Entries missing update_at (legacy) will fall to the bottom.
+        try:
+            result.sort(key=lambda m: str(m.get("update_at") or ""), reverse=True)
+        except Exception:
+            pass
+
+        # Limit to max_memories after sorting (keep newest first).
         if len(result) > max_memories:
-            result = result[-max_memories:]
+            result = result[:max_memories]
         
         return {
             "memory_list": result,
@@ -678,7 +784,7 @@ Mandatory rules:
         compute_params_tool = StructuredTool.from_function(  # type: ignore[union-attr]
             func=MonthlyMemoryWriterNode.compute_memory_parameter,
             name="compute_memory_parameter",
-            description="Compute updated memory parameters from existing_params and a list of analyses. Returns {sentiment_number, memory_weight}.",
+            description="Compute updated memory parameters from existing_params and a list of analyses. Returns {sentiment_number, memory_weight, sentiment_delta}.",
         )
         # Direct reference to instance method - performs automatic deduplication
         manage_list_tool = StructuredTool.from_function(  # type: ignore[union-attr]
@@ -765,8 +871,8 @@ Return exactly this schema:
   "sentiment": "bullish|bearish|neutral",
   "trading_insights": "...",
   "memory_weight_ratio": 0.0,
-  "parameters": {"sentiment_number": 0.0, "memory_weight": 0.0},
-  "memory_list": [{"memory_title": "...", "file_path": "...", "confidence": 0.0}, ...],
+  "parameters": {"sentiment_number": 0.0, "memory_weight": 0.0, "sentiment_delta": { "<file_path>": float, ... } },
+  "memory_list": [{"memory_title": "...", "file_path": "...", "confidence": 0.0, "update_at": "ISO8601 analyzed_at"}, ...],
   "duplicate_detected": false,
   "duplicate_reason": "",
   "matching_memory_title": ""
@@ -821,6 +927,24 @@ Return exactly this schema:
                     out = None
             if not isinstance(out, dict):
                 continue
+
+            # Normalize memory_list to be the actual list (manage_memory_list may return dict-with-flags).
+            try:
+                mem_list_result = out.get("memory_list")
+                if isinstance(mem_list_result, dict):
+                    out["memory_list"] = mem_list_result.get("memory_list", [])
+                elif isinstance(mem_list_result, list):
+                    out["memory_list"] = mem_list_result
+            except Exception:
+                pass
+
+            # Attach sentiment_delta to newly added memory_list entries (no backfill), and strip transient map.
+            try:
+                params = out.get("parameters") if isinstance(out.get("parameters"), dict) else None
+                mem_list = out.get("memory_list") if isinstance(out.get("memory_list"), list) else None
+                MonthlyMemoryWriterNode._apply_sentiment_delta_to_memory_list(new_memory_list=mem_list, params=params)
+            except Exception:
+                pass
 
             # Pop old memory + latest_merge_result, keep only the new memory for next round
             if latest_msg_idx is not None and latest_msg_idx < len(messages):
@@ -886,6 +1010,19 @@ Return exactly this schema:
                 
                 # Ensure memory_list is the actual list for validation
                 out["memory_list"] = mem_list
+
+                # Attach sentiment_delta only to newly created entry(ies), and strip transient map from parameters.
+                try:
+                    MonthlyMemoryWriterNode._apply_sentiment_delta_to_memory_list(new_memory_list=mem_list, params=params)
+                except Exception:
+                    pass
+
+                # Safety: never persist intermediate sentiment_delta map in parameters.
+                try:
+                    if isinstance(params, dict):
+                        params.pop("sentiment_delta", None)
+                except Exception:
+                    pass
                 
                 if ti and params and mem_list is not None and sentiment in allowed_sentiments:
                     return out
@@ -971,7 +1108,7 @@ Return exactly this schema:
         compute_params_tool = StructuredTool.from_function(  # type: ignore[union-attr]
             func=MonthlyMemoryWriterNode.compute_memory_parameter,
             name="compute_memory_parameter",
-            description="Compute memory parameters. operation='add' adds analysis contributions, operation='subtract' removes them. Returns {sentiment_number, memory_weight}.",
+            description="Compute memory parameters. operation='add' adds analysis contributions, operation='subtract' removes them. Returns {sentiment_number, memory_weight, sentiment_delta}.",
         )
         remove_memories_tool = StructuredTool.from_function(  # type: ignore[union-attr]
             func=MonthlyMemoryWriterNode.remove_memories_from_list,
@@ -1124,8 +1261,31 @@ Return exactly this schema:
             return state
 
         final = state.get("final") if isinstance(state.get("final"), dict) else {}
-        latest_merge_result = final.get("result") if isinstance(final.get("result"), dict) else {}
-        latest_merge_result['url'] = state['metadata']['url']
+        final_result = final.get("result")
+        latest_merge_result: Dict[str, Any] = {}
+        if isinstance(final_result, dict):
+            # New schema from team_merge:
+            # {"by_ticker": {TICKER: <analysis dict>}, "tickers": [TICKER, ...]}
+            if isinstance(final_result.get("by_ticker"), dict):
+                by_ticker = final_result.get("by_ticker") or {}
+                picked = by_ticker.get(current_ticker)
+                if not (isinstance(picked, dict) and picked):
+                    # Fallback: take the first ticker listed if present
+                    tickers = final_result.get("tickers")
+                    if isinstance(tickers, list) and tickers:
+                        first_ticker = str(tickers[0] or "").upper().strip()
+                        picked = by_ticker.get(first_ticker)
+                if isinstance(picked, dict) and picked:
+                    latest_merge_result = dict(picked)
+            else:
+                # Legacy schema: final_result is already the analysis dict
+                latest_merge_result = dict(final_result)
+
+        # Add URL to merge result (best-effort)
+        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        url = metadata.get("url")
+        if url and isinstance(latest_merge_result, dict):
+            latest_merge_result["url"] = url
 
         base_news_dir = os.getenv("NEWS_RESULT_DIR", "/data/news") or "/data/news"
         now = datetime.now(timezone.utc)
@@ -1251,6 +1411,13 @@ Return exactly this schema:
                 params = MonthlyMemoryWriterNode.compute_memory_parameter(existing_params, analyses_for_tools)
                 mem_list_result = await self.manage_memory_list(existing_list, analyses_for_tools, ticker=t)
                 mem_list = mem_list_result.get("memory_list", []) if isinstance(mem_list_result, dict) else []
+                # Attach sentiment_delta and strip transient map from params.
+                try:
+                    MonthlyMemoryWriterNode._apply_sentiment_delta_to_memory_list(
+                        new_memory_list=mem_list, params=params if isinstance(params, dict) else None
+                    )
+                except Exception:
+                    pass
                 sentiment = MonthlyMemoryWriterNode.derive_sentiment_tool(
                     sentiment_number=float((params or {}).get("sentiment_number") or 0.0)
                 )
@@ -1493,6 +1660,13 @@ Return exactly this schema:
                         params = MonthlyMemoryWriterNode.compute_memory_parameter(existing_params, analyses_for_tools)
                         mem_list_result = await self.manage_memory_list(existing_list, analyses_for_tools, ticker=t)
                         mem_list = mem_list_result.get("memory_list", []) if isinstance(mem_list_result, dict) else []
+                        # Attach sentiment_delta and strip transient map from params.
+                        try:
+                            MonthlyMemoryWriterNode._apply_sentiment_delta_to_memory_list(
+                                new_memory_list=mem_list, params=params if isinstance(params, dict) else None
+                            )
+                        except Exception:
+                            pass
                         sentiment = MonthlyMemoryWriterNode.derive_sentiment_tool(
                             sentiment_number=float((params or {}).get("sentiment_number") or 0.0)
                         )

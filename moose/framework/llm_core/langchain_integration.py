@@ -7,7 +7,8 @@ This module provides a unified interface to LangChain using native provider clas
 """
 
 import asyncio
-from typing import List, Optional, Dict, Any, Union, Iterator
+import threading
+from typing import List, Optional, Dict, Any, Union, Iterator, Tuple
 try:
     from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
     from moose.framework.llm_core.providers import LLMProvider, get_provider
@@ -94,29 +95,64 @@ class LangChainLLM:
         self.provider = get_provider(model)
         self.config = config
         self.tools = tools or []
-        
-        # Initialize appropriate LangChain class based on provider
+
+        # IMPORTANT:
+        # Do NOT keep a single long-lived LangChain chat model instance here.
+        #
+        # Some providers (notably Gemini via langchain_google_genai) can create async objects/futures
+        # that are bound to the event loop they were created/first used on. If a cached model instance
+        # is later awaited on a different loop (common in multi-threaded async services), it can raise:
+        #   "got Future ... attached to a different loop"
+        #
+        # To prevent cross-loop reuse, we cache a separate underlying model per:
+        # - running asyncio event loop (for async ainvoke)
+        # - OS thread (for sync invoke/stream)
+        self._init_temperature = float(temperature)
+        self._init_max_tokens = max_tokens
+        self._init_timeout = timeout
+        self._init_kwargs: Dict[str, Any] = dict(kwargs)
+        self._llm_cache: Dict[Tuple[str, int], Any] = {}
+        self._llm_lock = threading.Lock()
+
+        self.logger.debug(f"Initialized LangChainLLM for {self.provider.value} model: {model}")
+
+    def _build_langchain_llm_instance(self) -> Any:
+        """Build a fresh underlying LangChain chat model (with tools bound if provided)."""
         base_llm = self._create_langchain_llm(
             provider=self.provider,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
-            **kwargs
+            model=self.model,
+            temperature=self._init_temperature,
+            max_tokens=self._init_max_tokens,
+            timeout=self._init_timeout,
+            **self._init_kwargs,
         )
-        
-        # Bind tools if provided
         if self.tools:
             try:
-                self.llm = base_llm.bind_tools(self.tools)
-                self.logger.debug(f"Bound {len(self.tools)} tools to LLM")
+                llm = base_llm.bind_tools(self.tools)
+                return llm
             except Exception as e:
                 self.logger.warning(f"Failed to bind tools to LLM: {e}. Continuing without tools.")
-                self.llm = base_llm
+                return base_llm
+        return base_llm
+
+    def _get_cached_llm(self, *, kind: str) -> Any:
+        """
+        Get a loop-/thread-scoped LLM instance.
+        - kind="async": cache per running event loop
+        - kind="sync": cache per current OS thread
+        """
+        if kind == "async":
+            loop = asyncio.get_running_loop()
+            key = ("async", id(loop))
         else:
-            self.llm = base_llm
-        
-        self.logger.debug(f"Initialized LangChainLLM for {self.provider.value} model: {model}")
+            key = ("sync", threading.get_ident())
+
+        with self._llm_lock:
+            llm = self._llm_cache.get(key)
+            if llm is None:
+                llm = self._build_langchain_llm_instance()
+                self._llm_cache[key] = llm
+        return llm
     
     def _create_langchain_llm(
         self,
@@ -356,15 +392,14 @@ class LangChainLLM:
             log_meta["agent_name"] = agent_name
         self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
-        # Invoke LangChain LLM asynchronously
+        # Invoke LangChain LLM asynchronously (loop-scoped instance)
         try:
-            # Check if LLM has ainvoke method (async)
-            if hasattr(self.llm, 'ainvoke'):
-                response = await self.llm.ainvoke(langchain_messages, **kwargs)
+            llm = self._get_cached_llm(kind="async")
+            if hasattr(llm, "ainvoke"):
+                response = await llm.ainvoke(langchain_messages, **kwargs)
             else:
-                # Fallback to sync invoke in async context (not ideal but works)
                 loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(None, lambda: self.llm.invoke(langchain_messages, **kwargs))
+                response = await loop.run_in_executor(None, lambda: llm.invoke(langchain_messages, **kwargs))
         except Exception as e:
             if hasattr(e, 'status_code') and e.status_code == 404:
                 self.logger.error(f"Model {self.model} not found")
@@ -470,9 +505,10 @@ class LangChainLLM:
         # Log LLM request with all messages
         self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
-        # Invoke LangChain LLM
+        # Invoke LangChain LLM (thread-scoped instance)
         try:
-            response = self.llm.invoke(langchain_messages, **kwargs)
+            llm = self._get_cached_llm(kind="sync")
+            response = llm.invoke(langchain_messages, **kwargs)
         except Exception as e:
             if hasattr(e, 'status_code') and e.status_code == 404:
                 self.logger.error(f"Model {self.model} not found")
@@ -580,8 +616,9 @@ class LangChainLLM:
         # Collect full response for logging
         full_response_content = []
         
-        # Stream from LangChain LLM
-        for chunk in self.llm.stream(langchain_messages, **kwargs):
+        # Stream from LangChain LLM (thread-scoped instance)
+        llm = self._get_cached_llm(kind="sync")
+        for chunk in llm.stream(langchain_messages, **kwargs):
             if hasattr(chunk, 'content'):
                 content = chunk.content
                 if content:
@@ -609,4 +646,8 @@ class LangChainLLM:
         Returns:
             LangChain LLM instance (ChatOpenAI, ChatAnthropic, or ChatGoogleGenerativeAI)
         """
-        return self.llm
+        # Best-effort: if we're in an event loop, return that loop's instance; else return thread instance.
+        try:
+            return self._get_cached_llm(kind="async")
+        except RuntimeError:
+            return self._get_cached_llm(kind="sync")
