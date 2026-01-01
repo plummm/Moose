@@ -17,7 +17,7 @@ A modular agent framework built on LangGraph for creating, deploying, and managi
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/plummm/Moose.git
 cd Moose
 
 # Install dependencies
