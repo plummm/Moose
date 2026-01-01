@@ -929,16 +929,32 @@ code {{ background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }}
 
         memory_list = mem.get("memory_list") if isinstance(mem.get("memory_list"), list) else []
         blocks: List[str] = []
-        for i, item in enumerate(memory_list):
+        # Display newest -> oldest by update_at (ISO string sort works lexicographically).
+        # We keep key name `update_at` but accept `updated_at` as a fallback for older/custom data.
+        memory_items: List[dict] = [x for x in memory_list if isinstance(x, dict)]
+        try:
+            memory_items.sort(key=lambda it: str(it.get("update_at") or it.get("updated_at") or ""), reverse=True)
+        except Exception:
+            pass
+
+        for i, item in enumerate(memory_items):
             if not isinstance(item, dict):
                 continue
             title = str(item.get("memory_title") or "").strip() or "(untitled)"
             fp = str(item.get("file_path") or "").strip()
+            update_at = str(item.get("update_at") or item.get("updated_at") or "").strip()
             try:
                 conf = float(item.get("confidence") or 0.0)
                 conf_str = f"{conf:.2f}"
             except Exception:
                 conf_str = "N/A"
+            # Optional per-entry delta written by memory summarizer; show next to confidence when present.
+            sd_str = ""
+            try:
+                if item.get("sentiment_delta") is not None:
+                    sd_str = f"{float(item.get('sentiment_delta') or 0.0):+.2f}"
+            except Exception:
+                sd_str = ""
             if not fp:
                 link = ""
             else:
@@ -948,10 +964,21 @@ code {{ background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }}
                 if link
                 else '<span class="muted">Missing file_path</span>'
             )
+
+            title_html = html.escape(title)
+            if update_at:
+                title_html = (
+                    f'{title_html} <span class="muted" style="font-weight:400;">'
+                    f'(update_at: <code>{html.escape(update_at)}</code>)</span>'
+                )
+
+            meta_bits = [f'confidence: <code>{html.escape(conf_str)}</code>']
+            if sd_str:
+                meta_bits.append(f'sentiment_delta: <code>{html.escape(sd_str)}</code>')
             blocks.append(
                 f"""<div class="mem">
-  <div class="memTitle">{html.escape(title)}</div>
-  <div class="memMeta"><span class="pill">confidence: <code>{html.escape(conf_str)}</code></span></div>
+  <div class="memTitle">{title_html}</div>
+  <div class="memMeta"><span class="pill">{' · '.join(meta_bits)}</span></div>
   <div class="memLink">{mem_link_html}</div>
 </div>"""
             )

@@ -7,6 +7,7 @@ This module provides a unified interface to LangChain using native provider clas
 """
 
 import asyncio
+import os
 import threading
 from typing import List, Optional, Dict, Any, Union, Iterator, Tuple
 try:
@@ -127,8 +128,29 @@ class LangChainLLM:
             **self._init_kwargs,
         )
         if self.tools:
+            # Some providers (notably Gemini function calling) reject duplicate tool/function names.
+            # Deduplicate by tool.name to keep the schema valid.
+            deduped_tools: List[Any] = []
+            seen_names: set[str] = set()
+            for t in self.tools:
+                name = getattr(t, "name", None)
+                name = str(name) if name is not None else ""
+                if name and name in seen_names:
+                    continue
+                if name:
+                    seen_names.add(name)
+                deduped_tools.append(t)
+            if len(deduped_tools) != len(self.tools):
+                try:
+                    self.logger.warning(
+                        "Deduplicated %d tool(s) by name before bind_tools for model=%s",
+                        (len(self.tools) - len(deduped_tools)),
+                        self.model,
+                    )
+                except Exception:
+                    pass
             try:
-                llm = base_llm.bind_tools(self.tools)
+                llm = base_llm.bind_tools(deduped_tools)
                 return llm
             except Exception as e:
                 self.logger.warning(f"Failed to bind tools to LLM: {e}. Continuing without tools.")
@@ -152,6 +174,19 @@ class LangChainLLM:
             if llm is None:
                 llm = self._build_langchain_llm_instance()
                 self._llm_cache[key] = llm
+                # Optional debug to confirm loop/thread scoping in production.
+                if str(os.getenv("MOOSE_DEBUG_LLM_LOOP_CACHE", "")).strip().lower() in {"1", "true", "yes"}:
+                    try:
+                        self.logger.info(
+                            "LangChainLLM cache miss: model=%s provider=%s kind=%s key=%s tools=%d",
+                            self.model,
+                            getattr(self.provider, "value", str(self.provider)),
+                            kind,
+                            key,
+                            len(self.tools or []),
+                        )
+                    except Exception:
+                        pass
         return llm
     
     def _create_langchain_llm(
