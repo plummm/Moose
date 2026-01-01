@@ -1,10 +1,19 @@
-# Meeting Room (`meet_room`)
+# Meeting Room
 
-This module provides a lightweight “meeting room” capability for Moose agents and LLM clients.
+Lightweight meeting room capability for Moose agents and LLM clients, enabling structured multi-agent collaboration.
 
-It supports two interaction styles:
-- **ACTIVE**: round-robin turn-taking with an optional host that opens/closes the meeting.
-- **PASSIVE**: help-style targeted messages (ask/answer), with an auto-start dispatch loop.
+## Overview
+
+Meeting Room supports two interaction styles:
+- **ACTIVE**: Round-robin turn-taking with an optional host that opens/closes the meeting
+- **PASSIVE**: Help-style targeted messages (ask/answer), with an auto-start dispatch loop
+
+Features:
+- Shared room transcripts (visible to all participants)
+- Private threads (visible only to thread participants)
+- Guardrails (max turns, time limits, per-participant limits)
+- Done signals for structured completion
+- Contextvar-based room access for tools
 
 ## Key concepts
 
@@ -60,52 +69,205 @@ Return shape:
 - `complete`: bool
 - `missing_targets`: list[str]
 
-## `ask_specialist` tool contract
+## Usage Example
 
-Both EDGAR and FMP MCP tool bases expose an async tool named `ask_specialist` with the same signature:
+```python
+from moose.framework.meet_room import MeetingRoom, MeetingMode, Guardrails
+from moose.framework.meet_room.participants import LLMClientParticipant
 
-- `target: str` — meeting room participant id to ask (e.g., `edgar`, `fmp_fundamentals`)\n
-- `instruction: str` — clear request to execute and return results\n
-- `thread_id: Optional[str]` — reuse a thread for correlation/follow-ups\n
+# Create meeting room
+room = MeetingRoom(
+    room_id="research_meeting",
+    mode=MeetingMode.PASSIVE,
+    guardrails=Guardrails(
+        max_turns=100,
+        max_time_s=3600,
+        help_timeout_s=30.0
+    )
+)
 
-It uses `MeetingRoom.current()` + `MeetingRoom.ask_private()` internally and returns an MCP envelope:\n
+# Add participants
+client1 = LLMClient(model="gpt-4")
+participant1 = LLMClientParticipant(
+    participant_id="analyst",
+    llm_client=client1,
+    system_message="You are a financial analyst."
+)
+await room.add_participant(participant1)
 
-- `ok: bool`\n
-- `data.target`, `data.thread_id`, `data.request`, `data.reply`\n
-- `error`: null or `{type,message}`\n
-- `meta`: tool inputs\n
+# Send message
+await room.send_room(
+    sender_id="user",
+    role=MeetingRole.HUMAN,
+    content="Analyze AAPL stock",
+    targets=["analyst"]
+)
 
-## Dataflow diagrams
-
-### PASSIVE targeted help (auto dispatch)
-
-```mermaid
-sequenceDiagram
-participant User
-participant MeetingRoom
-participant SpecialistA
-participant SpecialistB
-
-User->>MeetingRoom: publish message targets=["SpecialistA"]
-MeetingRoom->>SpecialistA: handle(message)
-SpecialistA-->>MeetingRoom: MeetingMessage(reply)
-MeetingRoom-->>User: transcript updated
+# Ask private question
+result = await room.ask_private(
+    sender_id="user",
+    role=MeetingRole.HUMAN,
+    content="What is the P/E ratio?",
+    targets=["analyst"]
+)
+print(result["replies"]["analyst"]["content"])
 ```
 
-### ACTIVE round-robin (host + turns)
+## `ask_specialist` Tool Contract
+
+MCP tool bases expose an async tool named `ask_specialist` with signature:
+
+- `target: str` — meeting room participant id (e.g., `edgar`, `fmp_fundamentals`)
+- `instruction: str` — clear request to execute and return results
+- `thread_id: Optional[str]` — reuse a thread for correlation/follow-ups
+
+It uses `MeetingRoom.current()` + `MeetingRoom.ask_private()` internally and returns:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "target": "participant_id",
+    "thread_id": "thread_id",
+    "request": {...},
+    "reply": {...}
+  },
+  "error": null,
+  "meta": {...}
+}
+```
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph "Meeting Room"
+        Room[MeetingRoom]
+        Mode[Mode: ACTIVE/PASSIVE]
+        Transcript[Room Transcript]
+        Threads[Private Threads]
+    end
+    
+    subgraph "Participants"
+        P1[Participant 1]
+        P2[Participant 2]
+        P3[Participant 3]
+    end
+    
+    subgraph "Messages"
+        RoomMsg[Room Messages]
+        PrivateMsg[Private Messages]
+        DoneSignal[Done Signals]
+    end
+    
+    Room --> Mode
+    Room --> Transcript
+    Room --> Threads
+    Room --> P1
+    Room --> P2
+    Room --> P3
+    P1 --> RoomMsg
+    P2 --> PrivateMsg
+    P3 --> DoneSignal
+    RoomMsg --> Transcript
+    PrivateMsg --> Threads
+```
+
+## Dataflow Diagrams
+
+### PASSIVE Targeted Help (Auto Dispatch)
 
 ```mermaid
 sequenceDiagram
-participant Host
-participant MeetingRoom
-participant SpecialistA
-participant SpecialistB
+    participant User
+    participant MeetingRoom
+    participant Queue
+    participant SpecialistA
+    participant SpecialistB
+    
+    User->>MeetingRoom: publish(message, targets=["SpecialistA"])
+    MeetingRoom->>MeetingRoom: add to room transcript
+    MeetingRoom->>Queue: enqueue(message)
+    
+    loop Dispatch Loop
+        Queue->>MeetingRoom: dispatch_message()
+        MeetingRoom->>MeetingRoom: find_targets()
+        
+        alt Targeted Message
+            MeetingRoom->>SpecialistA: handle(message)
+            SpecialistA-->>MeetingRoom: MeetingMessage(reply)
+            MeetingRoom->>MeetingRoom: publish(reply)
+            MeetingRoom->>Transcript: add to transcript
+        else Broadcast
+            MeetingRoom->>SpecialistA: handle(message)
+            MeetingRoom->>SpecialistB: handle(message)
+            SpecialistA-->>MeetingRoom: reply1
+            SpecialistB-->>MeetingRoom: reply2
+            MeetingRoom->>Transcript: add replies
+        end
+    end
+```
 
-Host->>MeetingRoom: run(active)
-MeetingRoom->>Host: take_turn(opening)
-MeetingRoom->>SpecialistA: take_turn
-MeetingRoom->>SpecialistB: take_turn
-MeetingRoom->>Host: take_turn(conclusion)
+### ACTIVE Round-Robin (Host + Turns)
+
+```mermaid
+sequenceDiagram
+    participant Host
+    participant MeetingRoom
+    participant SpecialistA
+    participant SpecialistB
+    
+    Host->>MeetingRoom: run(ACTIVE)
+    
+    alt Host Opening
+        MeetingRoom->>Host: take_turn()
+        Host-->>MeetingRoom: MeetingMessage(opening)
+        MeetingRoom->>Transcript: publish(opening)
+    end
+    
+    loop Round-Robin Turns
+        MeetingRoom->>MeetingRoom: next_participant()
+        MeetingRoom->>SpecialistA: take_turn()
+        SpecialistA-->>MeetingRoom: MeetingMessage(turn1)
+        MeetingRoom->>Transcript: publish(turn1)
+        
+        MeetingRoom->>SpecialistB: take_turn()
+        SpecialistB-->>MeetingRoom: MeetingMessage(turn2)
+        MeetingRoom->>Transcript: publish(turn2)
+        
+        alt No Activity Detected
+            MeetingRoom->>Host: take_turn()
+            Host-->>MeetingRoom: MeetingMessage(conclusion)
+            MeetingRoom->>Transcript: publish(conclusion)
+            MeetingRoom->>MeetingRoom: stop()
+        end
+    end
+```
+
+### Private Thread Communication
+
+```mermaid
+sequenceDiagram
+    participant Requester
+    participant MeetingRoom
+    participant SpecialistA
+    participant SpecialistB
+    
+    Requester->>MeetingRoom: ask_private(targets=["A", "B"], content="question")
+    MeetingRoom->>MeetingRoom: create_thread(thread_id="t1")
+    MeetingRoom->>Thread: send_private(thread_id="t1")
+    MeetingRoom->>Thread: add participants(["Requester", "A", "B"])
+    
+    par Wait for Replies
+        MeetingRoom->>SpecialistA: handle(thread_message)
+        SpecialistA-->>Thread: reply1
+    and
+        MeetingRoom->>SpecialistB: handle(thread_message)
+        SpecialistB-->>Thread: reply2
+    end
+    
+    MeetingRoom->>MeetingRoom: collect_replies(thread_id="t1")
+    MeetingRoom-->>Requester: {replies: {"A": reply1, "B": reply2}, complete: true}
 ```
 
 

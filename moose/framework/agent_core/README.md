@@ -1,15 +1,60 @@
-# Agent Core - Docker Container Management
+# Agent Core
 
-Docker-based container management system for running agents in isolated environments.
+Docker-based container management system for running agents in isolated environments with standardized communication protocols.
 
 ## Overview
 
-The Agent Core module provides:
+Agent Core provides:
 - **Container Lifecycle Management**: Build, start, stop agent containers
 - **Agent Discovery**: Automatically discover agents from `moose/agents/`
 - **Dockerfile Generation**: Auto-generate Dockerfiles from agent configuration
-- **Project Isolation**: Each project gets its own Docker network
+- **Project Isolation**: Each project gets its own Docker network (or custom network)
 - **Resource Management**: CPU and memory limits per agent
+- **BaseAgent**: Base class with HTTP/stdin/file communication modes
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph "Agent Discovery"
+        AgentDir[moose/agents/]
+        AgentLoader[AgentLoader]
+        Config[agent_config.json]
+    end
+    
+    subgraph "Container Management"
+        ContainerMgr[ContainerManager]
+        DockerfileGen[DockerfileGenerator]
+        Registry[AgentRegistry]
+    end
+    
+    subgraph "Agent Execution"
+        BaseAgent[BaseAgent]
+        HTTPMode[HTTP Server]
+        StdinMode[stdin/stdout]
+        FileMode[File Watch]
+    end
+    
+    subgraph "Docker"
+        DockerNetwork[Docker Network]
+        DockerContainer[Container]
+        DockerImage[Image]
+    end
+    
+    AgentDir --> AgentLoader
+    AgentLoader --> Config
+    AgentLoader --> ContainerMgr
+    ContainerMgr --> DockerfileGen
+    ContainerMgr --> Registry
+    ContainerMgr --> DockerNetwork
+    ContainerMgr --> DockerContainer
+    DockerfileGen --> DockerImage
+    DockerImage --> DockerContainer
+    DockerContainer --> BaseAgent
+    BaseAgent --> HTTPMode
+    BaseAgent --> StdinMode
+    BaseAgent --> FileMode
+```
 
 ## Agent Structure
 
@@ -28,7 +73,7 @@ moose/agents/
 
 ### Required Files
 
-- **agent.py**: Agent implementation code
+- **agent.py**: Agent implementation code extending `BaseAgent`
 - **agent_config.json**: Agent metadata and configuration
 
 ### Optional Files
@@ -40,7 +85,7 @@ moose/agents/
 
 ## Agent Configuration
 
-`agent_config.json` follows a structured format with four main sections:
+`agent_config.json` follows a structured format:
 
 ### Configuration Structure
 
@@ -53,6 +98,7 @@ moose/agents/
   "entry_point": "agent.py",
   "entry_class": "MyAgent",
   "docker": {
+    "network": "custom-network",
     "container_suffix_name": "",
     "container_override": true,
     "ports": [
@@ -100,7 +146,7 @@ moose/agents/
 
 ### Configuration Sections
 
-#### Top-Level Fields (Basic Agent Info)
+#### Top-Level Fields
 
 - **name** (required): Agent name (should match directory name)
 - **description** (required): Human-readable description
@@ -109,147 +155,185 @@ moose/agents/
 - **entry_point** (required): Python file to run (default: "agent.py")
 - **entry_class** (optional): Class name to instantiate (auto-detected if not specified)
 
-#### `docker` Object (Container Configuration)
+#### `docker` Object
 
 All Docker-related settings:
 
-- **network** (optional): Docker network name to attach the agent container to. If set, this overrides the default per-project network name (`moose-project-<project_id>` by default). This is useful for sharing a network across multiple Moose projects.
+- **network** (optional): Docker network name. Overrides default `moose-project-<project_id>`. Useful for sharing networks across projects.
 - **container_suffix_name** (optional): Suffix to append to container name
 - **container_override** (optional, default: false): Whether to override existing containers
-- **ports** (optional): Array of port mappings
-  ```json
-  [{"container": 8000, "host": 8000}]
-  ```
-- **environment** (optional): Environment variables for container
-  ```json
-  {"VAR_NAME": "value"}
-  ```
-- **volumes** (optional): Additional volume mounts
-  ```json
-  [{"host": "/host/path", "container": "/container/path", "mode": "ro"}]
-  ```
-- **resources** (optional): CPU and memory limits
-  ```json
-  {"memory": "512m", "cpus": "1.0"}
-  ```
+- **ports** (optional): Array of port mappings `[{"container": 8000, "host": 8000}]`
+- **environment** (optional): Environment variables `{"VAR_NAME": "value"}`
+- **volumes** (optional): Additional volume mounts `[{"host": "/host/path", "container": "/container/path", "mode": "ro"}]`
+- **resources** (optional): CPU and memory limits `{"memory": "512m", "cpus": "1.0"}`
 
-#### `interactive_mode` Object (Communication Mode)
+#### `interactive_mode` Object
 
-Configuration for how the agent communicates:
+Configuration for communication mode:
 
-- **mode** (required): Communication mode - `"http"`, `"stdin"`, or `"file"`
-- **http_server** (required if mode is "http"): HTTP server configuration
+- **mode** (required): `"http"`, `"stdin"`, or `"file"`
+- **http_server** (required if mode is "http"):
   - **port** (required): Port to listen on
-  - **auth_password** (optional): Password for HTTP authentication
+  - **auth_password** (optional): Password for HTTP authentication (X-auth-password header)
   - **endpoints** (optional): Array of custom HTTP endpoints
-    ```json
-    [{
-      "path": "/endpoint",
-      "method": "POST",
-      "handler": "method_name",
-      "description": "Endpoint description",
-      "auth_required": false
-    }]
-    ```
-- **file** (required if mode is "file"): File watch configuration
+- **file** (required if mode is "file"):
   - **watch_dir** (required): Directory to watch for input files
 
-#### `custom` Object (Agent-Specific Configuration)
+#### `custom` Object
 
-All agent-specific configuration goes here. This section is free-form and can contain any keys specific to your agent's needs.
-
-Examples:
+Agent-specific configuration (free-form). Examples:
 - `scraper_config` for scraping agents
 - `llm_config` for LLM-based agents
 - `finance_office` for inter-agent communication configs
-- Any other agent-specific settings
 
-### Example: News Scraper Agent
+## BaseAgent
 
+All agents extend `BaseAgent` which provides:
+
+### Communication Modes
+
+```mermaid
+graph LR
+    subgraph "Input Sources"
+        HTTP[HTTP POST]
+        Stdin[stdin]
+        File[File Watch]
+    end
+    
+    subgraph "BaseAgent"
+        Format[Format Input]
+        Process[process method]
+        FormatOut[Format Output]
+    end
+    
+    subgraph "Output"
+        HTTPOut[HTTP Response]
+        Stdout[stdout]
+        FileOut[Output File]
+    end
+    
+    HTTP --> Format
+    Stdin --> Format
+    File --> Format
+    Format --> Process
+    Process --> FormatOut
+    FormatOut --> HTTPOut
+    FormatOut --> Stdout
+    FormatOut --> FileOut
+```
+
+### Standard I/O Format
+
+**Input Format:**
 ```json
 {
-  "name": "news_scraper",
-  "description": "Generic news scraper",
-  "version": "1.0.0",
-  "python_version": "3.11",
-  "entry_point": "agent.py",
-  "entry_class": "NewsScraper",
-  "docker": {
-    "container_suffix_name": "",
-    "container_override": true,
-    "ports": [{"container": 3500, "host": 3500}],
-    "environment": {
-      "SCRAPER_DATA_DIR": "/data/scraper"
-    },
-    "volumes": [
-      {"host": "/data/scraper", "container": "/data/scraper"}
-    ],
-    "resources": {"memory": "512m", "cpus": "1.0"}
-  },
-  "interactive_mode": {
-    "mode": "http",
-    "http_server": {
-      "port": 3500,
-      "auth_password": "",
-      "endpoints": [
-        {
-          "path": "/start",
-          "method": "GET",
-          "handler": "scrape",
-          "description": "Start scraping",
-          "auth_required": false
-        }
-      ]
-    }
-  },
-  "custom": {
-    "scraper_config": {
-      "start_url": "https://example.com/news",
-      "rate_limit": 60
-    },
-    "finance_office": {
-      "endpoint": "http://localhost:3501/get_financial_news"
-    }
+  "request_id": "uuid",
+  "agent_name": "agent_name",
+  "input": <any>,
+  "metadata": {
+    "timestamp": "ISO8601",
+    "source": "http|stdin|file",
+    "user_id": "optional"
   }
 }
 ```
 
-## Usage
+**Output Format:**
+```json
+{
+  "request_id": "uuid",
+  "agent_name": "agent_name",
+  "status": "success|error",
+  "result": <any>,
+  "error": "error message (if status=error)",
+  "timestamp": "ISO8601",
+  "token_cost": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cost_usd": 0.0
+  },
+  "model_used": "model_name",
+  "processing_time_ms": 123.45
+}
+```
 
-### Basic Example
+### Usage Example
 
 ```python
-from framework.agent_core import ContainerManager
+from moose.framework import BaseAgent
 
-# Initialize container manager
-manager = ContainerManager()
+class MyAgent(BaseAgent):
+    def process(self, input_data):
+        # input_data is the raw input (already extracted from standard format)
+        # Your processing logic here
+        result = {"output": "processed", "data": input_data}
+        return result
 
-# Start agent container for a project
-container_id = manager.start_agent_container(
-    agent_name="my_agent",
-    project_id="my_project",
-    project_dir=Path("/path/to/project")
-)
-
-# Check container status
-status = manager.get_container_status("my_agent", "my_project")
-print(f"Status: {status}")
-
-# Get logs
-logs = manager.get_container_logs("my_agent", "my_project", tail=50)
-print(logs)
-
-# Stop container
-manager.stop_agent_container("my_agent", "my_project")
-
-# Cleanup all project containers
-manager.cleanup_project_containers("my_project")
+# Agent automatically handles:
+# - HTTP server on configured port
+# - stdin/stdout JSON processing
+# - File watch mode
+# - Standardized I/O formatting
+# - Token cost tracking
+# - Logging
 ```
+
+## Container Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant CLI
+    participant ContainerMgr
+    participant DockerfileGen
+    participant Docker
+    participant Agent
+    
+    CLI->>ContainerMgr: build_agent_image()
+    ContainerMgr->>DockerfileGen: generate_dockerfile()
+    DockerfileGen-->>ContainerMgr: Dockerfile
+    ContainerMgr->>Docker: docker build
+    Docker-->>ContainerMgr: Image
+    
+    CLI->>ContainerMgr: start_agent_container()
+    ContainerMgr->>Docker: create network
+    ContainerMgr->>Docker: create container
+    Docker-->>ContainerMgr: Container ID
+    ContainerMgr->>Agent: Start agent
+    Agent->>Agent: Run HTTP/stdin/file mode
+    
+    CLI->>ContainerMgr: stop_agent_container()
+    ContainerMgr->>Docker: stop container
+    Docker-->>ContainerMgr: Stopped
+    
+    CLI->>ContainerMgr: cleanup_project_containers()
+    ContainerMgr->>Docker: stop & remove all
+    ContainerMgr->>Docker: remove network
+```
+
+## Docker Network
+
+By default, each project gets its own Docker network:
+- Network name: `moose-project-<project_id>`
+- All project agents are on the same network
+- Enables inter-agent communication via container names
+
+You can override this with `docker.network` in `agent_config.json` to share networks across projects.
+
+## Volume Mounts
+
+Default mounts:
+- **Agent code**: Mounted at `/app` (read-write)
+- **Project directory**: Mounted at `/project` (read-only)
+
+Additional volumes can be specified in `agent_config.json` under `docker.volumes`.
+
+## Usage
 
 ### Agent Discovery
 
 ```python
-from framework.agent_core import AgentLoader
+from moose.framework.agent_core import AgentLoader
 
 loader = AgentLoader()
 
@@ -259,38 +343,83 @@ print(f"Available agents: {agents}")
 
 # Load agent configuration
 config = loader.load_agent_config("my_agent")
-print(f"Agent config: {config}")
 
-# Validate agent
+# Validate agent structure
 loader.validate_agent("my_agent")
 ```
 
-## Container Lifecycle
+### Container Management
 
-1. **Project Start**: When a project begins execution, required agent containers are started
-2. **During Execution**: Containers remain running and can be reused across multiple calls
-3. **Project End**: All project containers are stopped and cleaned up
+```python
+from moose.framework.agent_core import ContainerManager
+from pathlib import Path
 
-## Docker Network
+manager = ContainerManager()
 
-Each project gets its own Docker network:
-- Network name: `moose-project-<project_id>`
-- All project agents are on the same network
-- Enables inter-agent communication
+# Build image
+image_name = manager.build_agent_image("my_agent", force_rebuild=True)
 
-## Volume Mounts
+# Start container
+container_id = manager.start_agent_container(
+    agent_name="my_agent",
+    project_id="my_project",
+    project_dir=Path("/path/to/project")
+)
 
-By default, containers have:
-- **Agent code**: Mounted at `/app` (read-write)
-- **Project directory**: Mounted at `/project` (read-only)
+# Check status
+status = manager.get_container_status("my_agent", "my_project")
 
-Additional volumes can be specified in `agent_config.json`.
+# Get logs
+logs = manager.get_container_logs("my_agent", "my_project", tail=50)
+
+# Stop container
+manager.stop_agent_container("my_agent", "my_project")
+
+# Cleanup all project containers
+manager.cleanup_project_containers("my_project")
+```
+
+### Custom HTTP Endpoints
+
+Define custom endpoints in `agent_config.json`:
+
+```json
+{
+  "interactive_mode": {
+    "http_server": {
+      "endpoints": [
+        {
+          "path": "/custom",
+          "method": "POST",
+          "handler": "my_handler_method",
+          "auth_required": false
+        }
+      ]
+    }
+  }
+}
+```
+
+Implement the handler in your agent:
+
+```python
+class MyAgent(BaseAgent):
+    def my_handler_method(self, data):
+        # data is request.get_json() or request.args.to_dict()
+        return {"status": "success", "result": "custom response"}
+    
+    def process(self, input_data):
+        return {"result": "default processing"}
+```
 
 ## Environment Variables
 
 - `MOOSE_AGENTS_DIR`: Override agents directory (default: `moose/agents/`)
 - `MOOSE_DOCKER_NETWORK_PREFIX`: Network prefix (default: `moose-project-`)
 - `MOOSE_DOCKER_IMAGE_PREFIX`: Image prefix (default: `moose-agent-`)
+- `MOOSE_AGENT_DEBUG`: Enable debug logging for agents
+- `MOOSE_PROJECT_ID`: Current project identifier
+- `MOOSE_PROJECTS_DIR`: Base directory for projects
 
 ## Requirements
 
@@ -307,5 +436,4 @@ The system handles:
 - Missing agent files
 - Invalid configurations
 
-All errors are logged with appropriate error messages.
-
+All errors are logged with appropriate error messages and stack traces.

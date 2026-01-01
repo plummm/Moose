@@ -12,13 +12,54 @@ pip install langchain langchain-openai langchain-anthropic langchain-google-gena
 
 ## Architecture
 
+```mermaid
+graph TB
+    subgraph "LLM Client Layer"
+        LLMClient[LLMClient]
+        MessageFormat[Message Formatting]
+        TokenCounter[Token Counter]
+        Chunker[Chunker]
+        CostTracker[CostTracker]
+    end
+    
+    subgraph "LangChain Integration"
+        LangChainLLM[LangChainLLM]
+        ProviderAdapter[Provider Adapter]
+    end
+    
+    subgraph "Providers"
+        OpenAI[ChatOpenAI]
+        Anthropic[ChatAnthropic]
+        Google[ChatGoogleGenerativeAI]
+    end
+    
+    subgraph "Tool Runtime"
+        ToolRuntime[ToolRuntime]
+        ToolExecutor[Tool Executor]
+    end
+    
+    LLMClient --> MessageFormat
+    LLMClient --> TokenCounter
+    LLMClient --> Chunker
+    LLMClient --> CostTracker
+    LLMClient --> LangChainLLM
+    LLMClient --> ToolRuntime
+    LangChainLLM --> ProviderAdapter
+    ProviderAdapter --> OpenAI
+    ProviderAdapter --> Anthropic
+    ProviderAdapter --> Google
+    ToolRuntime --> ToolExecutor
+```
+
 The LLM Core uses **LangChain** with native provider classes to provide:
 - **Unified API**: Same interface regardless of provider
 - **Automatic Token Counting**: Uses `tiktoken` to accurately count tokens
 - **Intelligent Chunking**: Automatically splits large inputs (>90% of model limit) with 10% overlap
+- **Conversation Compaction**: LLM-powered compaction for long conversation history
 - **Cost Tracking**: Automatic cost calculation based on token usage and model rates
 - **Async Support**: Full async/await support for non-blocking operations
 - **Streaming**: Support for streaming responses
+- **Multi-stage Reasoning**: Iterative tool calling with completion markers
 
 The framework uses native LangChain provider classes:
 - **OpenAI** → `ChatOpenAI`
@@ -52,23 +93,29 @@ async def some_tool(symbol: str) -> dict:
 
 ```mermaid
 sequenceDiagram
-participant LLMClient
-participant LLM
-participant ToolRuntime
-participant ToolA
-participant ToolB
-
-LLMClient->>LLM: send_messages
-LLM-->>LLMClient: tool_call(ToolA)
-LLMClient->>ToolRuntime: execute_top_level(ToolA)
-ToolRuntime->>ToolA: invoke
-ToolA->>ToolRuntime: call_tool(ToolB)
-ToolRuntime->>ToolB: invoke
-ToolB-->>ToolRuntime: resultB
-ToolRuntime-->>ToolA: resultB
-ToolA-->>ToolRuntime: resultA
-ToolRuntime-->>LLMClient: resultA
-LLMClient-->>LLM: ToolMessage(resultA)
+    participant User
+    participant LLMClient
+    participant LLM
+    participant ToolRuntime
+    participant ToolA
+    participant ToolB
+    
+    User->>LLMClient: send_message()
+    LLMClient->>LLM: ainvoke(messages)
+    LLM-->>LLMClient: AIMessage(tool_calls=[ToolA])
+    LLMClient->>ToolRuntime: execute_tool_calls([ToolA])
+    ToolRuntime->>ToolA: invoke(args)
+    ToolA->>ToolRuntime: call_tool("ToolB", args)
+    ToolRuntime->>ToolB: invoke(args)
+    ToolB-->>ToolRuntime: resultB
+    ToolRuntime-->>ToolA: resultB
+    ToolA-->>ToolRuntime: resultA
+    ToolRuntime-->>LLMClient: ToolMessage(resultA)
+    LLMClient->>LLM: ainvoke([...messages, ToolMessage])
+    LLM-->>LLMClient: AIMessage(final_answer)
+    LLMClient-->>User: LLMResponse(content)
+    
+    Note over ToolRuntime: Nested tool calls are internal<br/>Only top-level results become ToolMessages
 ```
 
 ## Supported Providers
@@ -186,6 +233,74 @@ The LLM client automatically handles large inputs that exceed 90% of the model's
 3. **Overlap**: Each chunk has 10% overlap with the previous chunk for context
 4. **Parallel Processing**: All chunks are processed in parallel using `asyncio.gather`
 5. **Summarization**: Chunk responses are aggregated and sent to a final summarization step
+
+### Chunking Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant LLMClient
+    participant TokenCounter
+    participant Chunker
+    participant LLM
+    participant Summarizer
+    
+    User->>LLMClient: send_message(large_content)
+    LLMClient->>TokenCounter: count_tokens()
+    TokenCounter-->>LLMClient: token_count > 90% threshold
+    
+    LLMClient->>Chunker: chunk_content()
+    Chunker-->>LLMClient: [chunk1, chunk2, chunk3]
+    
+    par Parallel Processing
+        LLMClient->>LLM: process_chunk(chunk1)
+        LLM-->>LLMClient: response1
+    and
+        LLMClient->>LLM: process_chunk(chunk2)
+        LLM-->>LLMClient: response2
+    and
+        LLMClient->>LLM: process_chunk(chunk3)
+        LLM-->>LLMClient: response3
+    end
+    
+    LLMClient->>Summarizer: summarize_chunks([response1, response2, response3])
+    Summarizer->>LLM: summarize(combined_responses)
+    LLM-->>Summarizer: final_response
+    Summarizer-->>LLMClient: final_response
+    LLMClient-->>User: LLMResponse(final_response)
+```
+
+### Conversation Compaction
+
+For long conversations that exceed context limits, the client uses LLM-powered compaction:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant LLMClient
+    participant Compactor
+    participant LLM
+    
+    User->>LLMClient: send_message(conversation)
+    LLMClient->>LLMClient: count_tokens() > safe_budget
+    
+    LLMClient->>Compactor: compact_conversation()
+    Note over Compactor: Preserve user messages<br/>Replace assistant/tool history<br/>with partial result summary
+    
+    Compactor->>LLM: compact(conversation)
+    LLM-->>Compactor: partial_result
+    Compactor-->>LLMClient: compacted_messages
+    
+    LLMClient->>LLM: ainvoke(compacted_messages)
+    LLM-->>LLMClient: response
+    LLMClient-->>User: LLMResponse
+```
+
+The compaction:
+- Preserves all original user messages
+- Replaces assistant/tool history with a single synthetic USER message containing a partial result
+- Uses incremental updates if previous partial results exist
+- Falls back to deterministic truncation if compaction fails
 
 ### Chunking Example
 

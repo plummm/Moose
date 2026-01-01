@@ -1,6 +1,58 @@
 # Test Suite for Moose Framework
 
-Comprehensive test suite for framework components.
+Comprehensive test suite for framework components with coverage reporting and conditional test execution.
+
+## Test Architecture
+
+```mermaid
+graph TB
+    subgraph "Test Execution"
+        TestCmd[moose test command]
+        Pytest[pytest]
+    end
+    
+    subgraph "Test Modules"
+        LLMTests[test_llm_core.py]
+        AgentTests[test_agent_core.py]
+        MeetRoomTests[test_meet_room.py]
+        ToolRuntimeTests[test_tool_runtime.py]
+        OtherTests[Other tests]
+    end
+    
+    subgraph "External Dependencies"
+        LLMProviders[LLM Providers]
+        Docker[Docker Daemon]
+        LangChain[LangChain]
+    end
+    
+    subgraph "Test Markers"
+        LLMMarker[@pytest.mark.llm]
+        DockerMarker[@pytest.mark.docker]
+        SlowMarker[@pytest.mark.slow]
+    end
+    
+    subgraph "Coverage"
+        Coverage[pytest-cov]
+        HTMLReport[HTML Report]
+        TerminalReport[Terminal Report]
+    end
+    
+    TestCmd --> Pytest
+    Pytest --> LLMTests
+    Pytest --> AgentTests
+    Pytest --> MeetRoomTests
+    Pytest --> ToolRuntimeTests
+    Pytest --> OtherTests
+    
+    LLMTests --> LLMMarker
+    LLMTests --> LLMProviders
+    AgentTests --> DockerMarker
+    AgentTests --> Docker
+    
+    Pytest --> Coverage
+    Coverage --> HTMLReport
+    Coverage --> TerminalReport
+```
 
 ## Installation
 
