@@ -257,6 +257,11 @@ class ContainerManager:
         env_vars = docker_config.get("environment", {}).copy()
         if environment:
             env_vars.update(environment)
+        # Ensure agent attribution is available inside the container for LLM logging/cost rollups.
+        # LLMClient falls back to this when agent_name is not explicitly passed.
+        env_vars.setdefault("MOOSE_AGENT_NAME", str(agent_name))
+        # These are commonly expected by BaseAgent for log routing; set defaults if absent.
+        env_vars.setdefault("MOOSE_PROJECT_ID", str(project_id))
         
         # Volume mounts
         volumes = {}

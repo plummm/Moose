@@ -8,6 +8,7 @@ Singleton Flask server that handles multiple projects with:
 
 import json
 import threading
+import errno
 from typing import Dict, List, Optional, Set
 from pathlib import Path
 
@@ -129,7 +130,7 @@ class CoreWebServer:
         
         @self.app.route('/api/projects/<project_id>/chat/files')
         def list_chat_files(project_id: str):
-            """List available chat (llm.log) files for a project."""
+            """List available chat files for a project (agent log files containing LLM JSONL entries)."""
             chat_manager = get_chat_manager()
             files = chat_manager.list_chat_files(project_id)
             return jsonify(files)
@@ -139,7 +140,7 @@ class CoreWebServer:
             """Get chat messages for a project.
             
             Query params:
-                file: Optional historical llm.log file name
+                file: Optional historical agent log file name (e.g., agents/<agent>.log.<n>)
             """
             chat_manager = get_chat_manager()
             file = request.args.get('file')
@@ -174,7 +175,7 @@ class CoreWebServer:
         @self.app.route('/api/projects/<project_id>/llm/usage_summary')
         def get_llm_usage_summary(project_id: str):
             """
-            Aggregate cost + token usage across all llm.log* files for the project.
+            Aggregate cost + token usage across agent log files for the project.
 
             Groups by metadata.agent_name (main agent attribution) and by day.
             """
@@ -198,6 +199,7 @@ class CoreWebServer:
             log_dir = Path(log_dir)
 
             try:
+                # e.g. ["agents/finance_office.log.40", "agents/truthsocial_agent.log.40", ...]
                 files = chat_manager.list_chat_files(project_id)
             except Exception:
                 files = []
@@ -228,10 +230,14 @@ class CoreWebServer:
                             if not line:
                                 continue
                             try:
+                                if not line.startswith("{"):
+                                    continue
                                 entry = json.loads(line)
                             except Exception:
                                 continue
                             if not isinstance(entry, dict):
+                                continue
+                            if "direction" not in entry or "timestamp" not in entry:
                                 continue
                             if entry.get("direction") != "response":
                                 continue
@@ -450,6 +456,16 @@ class CoreWebServer:
                 use_reloader=False,
                 threaded=True
             )
+        except OSError as e:
+            # Handle "Address already in use" error gracefully
+            # This happens when another moose server is already running on the same port
+            error_msg = str(e).lower()
+            if "address already in use" in error_msg or "address is already in use" in error_msg or e.errno == errno.EADDRINUSE:
+                print(f"\n⚠️  Port {self.port} is already in use (moose server may already be running)")
+                print(f"   Skipping moose server launch. Existing server will auto-discover agents.\n")
+            else:
+                print(f"Failed to start web server: {e}")
+            self._running = False
         except Exception as e:
             print(f"Failed to start web server: {e}")
             self._running = False

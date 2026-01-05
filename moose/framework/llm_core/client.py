@@ -118,7 +118,11 @@ class LLMClient:
         self.timeout = timeout
         self.extra_params = kwargs
         # Main-agent attribution for cost tracking + UI rollups
-        self.agent_name = agent_name or _infer_agent_name_from_stack()
+        # Order of precedence:
+        # 1) explicit arg (best)
+        # 2) stack inference (best-effort)
+        # 3) environment variable (works reliably in Docker when set by ContainerManager)
+        self.agent_name = agent_name or _infer_agent_name_from_stack() or os.getenv("MOOSE_AGENT_NAME")
         
         # Initialize token encoder for counting
         self._token_encoder = None

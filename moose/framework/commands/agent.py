@@ -170,6 +170,20 @@ class AgentCommand:
             # Load agent module
             spec = importlib.util.spec_from_file_location("agent_module", agent_file)
             agent_module = importlib.util.module_from_spec(spec)
+            # IMPORTANT:
+            # Register the module in sys.modules before exec_module().
+            #
+            # Some libraries (notably `dataclasses`) look up `sys.modules[__module__]` while
+            # defining classes. If the module isn't registered, import-time class definitions
+            # can fail with errors like:
+            #   AttributeError: 'NoneType' object has no attribute '__dict__'
+            #
+            # This also matches Python's normal import machinery behavior.
+            try:
+                if spec is not None and getattr(spec, "name", None):
+                    sys.modules[str(spec.name)] = agent_module
+            except Exception:
+                pass
             # Ensure imports work in local debug mode.
             # - `project_root` allows `import moose`
             # - `agent_dir` allows sibling imports like `import department_router`
@@ -316,7 +330,6 @@ class AgentCommand:
             # Prepare environment variables
             docker_config = config.get("docker", {})
             environment = docker_config.get("environment", {}).copy()
-            environment["MOOSE_PROJECT_ID"] = project_id
             environment["MOOSE_PROJECTS_DIR"] = str(projects_base_dir)
             if debug:
                 environment["MOOSE_AGENT_DEBUG"] = "true"

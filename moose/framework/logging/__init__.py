@@ -9,7 +9,6 @@ Provides hierarchical logging with proper caller file path tracking:
 All logs are written to:
 - Console (streamed)
 - projects/<project_id>/logs/moose.log (all execution logs)
-- projects/<project_id>/logs/llm.log (LLM invocation logs only)
 - projects/<project_id>/logs/agents/<agent_name>.log (agent-specific logs)
 
 Environment Variables:
@@ -269,7 +268,7 @@ class LLMLogger:
     """Specialized logger for LLM invocations.
     
     Logs complete message objects (SystemMessage, AIMessage, HumanMessage, ToolMessage)
-    to both moose.log and a dedicated llm.log file.
+    to moose.log and (optionally) additional sinks.
     """
     
     def __init__(self, project_id: Optional[str] = None, debug: bool = False):
@@ -291,15 +290,11 @@ class LLMLogger:
             format='%(message)s',
             propagate=True  # Propagate to parent (moose) for moose.log
         )
-        
-        # Add dedicated LLM log file if project is set (using unique file name)
-        if _project_log_dir:
-            llm_log_file = _get_unique_log_file(_project_log_dir, "llm.log")
-            self.logger.add_file_handler(llm_log_file)
-            # Store the log file path for _write_to_llm_log
-            self._llm_log_file = llm_log_file
-        else:
-            self._llm_log_file = None
+
+        # We no longer keep a unified project-level llm.log.
+        # Agent-attributed LLM entries are routed into each agent's own log file
+        # under projects/<project_id>/logs/agents/<agent_name>.log.
+        self._llm_log_file = None
     
     def _serialize_message(self, msg: Any) -> Dict[str, Any]:
         """Serialize a LangChain message object to a dictionary.
@@ -613,20 +608,25 @@ class LLMLogger:
         )
     
     def _write_to_llm_log(self, entry: Dict[str, Any]):
-        """Write a structured entry directly to the LLM log file."""
-        # Use stored log file path, or get unique one if not set
-        llm_log_file = self._llm_log_file
-        if llm_log_file is None and _project_log_dir:
-            llm_log_file = _get_unique_log_file(_project_log_dir, "llm.log")
-            self._llm_log_file = llm_log_file
-        
-        if llm_log_file:
-            try:
-                llm_log_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(llm_log_file, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(entry, default=str) + '\n')
-            except Exception as e:
-                self.logger.error(f"Failed to write to LLM log: {e}")
+        """Write a structured LLM entry to the owning agent's log file (JSONL)."""
+        if not _project_log_dir:
+            return
+
+        meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        agent_name = meta.get("agent_name")
+        agent_name = str(agent_name).strip() if agent_name is not None else ""
+        if not agent_name:
+            agent_name = "unknown"
+
+        try:
+            agents_dir = _project_log_dir / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            agent_log_file = _get_unique_log_file(agents_dir, f"{agent_name}.log")
+            with open(agent_log_file, "a", encoding="utf-8") as f:
+                # Write as JSON lines; these can be filtered downstream (lines starting with '{').
+                f.write(json.dumps(entry, default=str) + "\n")
+        except Exception as e:
+            self.logger.error(f"Failed to write LLM entry to agent log: {e}")
 
         # Note: Real-time streaming is handled by ChatManager's file tailing
         # No need to forward here - the log file is the single source of truth

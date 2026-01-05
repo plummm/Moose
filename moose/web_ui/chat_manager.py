@@ -1,7 +1,13 @@
 """Chat Manager for Moose Web UI.
 
-Handles chat message buffering, SSE streaming, and historical llm.log file management.
+Handles chat message buffering, SSE streaming, and historical chat log management.
 Uses file-based tailing to work across process boundaries.
+
+Note: Moose no longer writes a unified project-level `llm.log`. Instead, LLM JSONL entries
+are appended into each agent's own log file under:
+  projects/<project_id>/logs/agents/<agent_name>.log*
+These files are mixed-format (normal formatted log lines + JSONL LLM entries). ChatManager
+filters and parses only the JSONL lines that match the LLM logger schema.
 """
 
 import os
@@ -22,7 +28,7 @@ class ChatManager:
     Features:
     - Per-project message buffers
     - SSE streaming to subscribers via file tailing
-    - Historical llm.log file listing and parsing
+    - Historical agent log file listing and parsing (LLM JSONL entries)
     """
     
     def __init__(self, max_buffer_size: int = 500):
@@ -125,7 +131,7 @@ class ChatManager:
         
         Messages are now read from the log file instead.
         This method is kept for backward compatibility but does nothing
-        since messages are tailed from the llm.log file.
+        since messages are tailed from agent log files.
         """
         # No-op: messages are read from file via file tailing
         pass
@@ -178,40 +184,45 @@ class ChatManager:
                 return buffer[-limit:]
             return buffer
     
-    def _get_current_log_file(self, project_id: str) -> Optional[Path]:
-        """Get the current (active) llm.log file for a project.
-        
-        The current file is the one with the highest number (llm.log.N).
-        If no numbered files exist, falls back to llm.log.
-        
-        Args:
-            project_id: Project identifier
-            
-        Returns:
-            Path to current llm.log file or None
+    def _iter_current_agent_log_files(self, project_id: str) -> List[Path]:
+        """Return the best-effort 'current run' agent log file for each agent.
+
+        Agent logs are written as agents/<agent>.log or agents/<agent>.log.N (shared suffix per run).
+        We choose the most recently modified file per agent name.
         """
         log_dir = self._get_log_dir(project_id)
         if not log_dir or not log_dir.exists():
-            return None
-        
-        current_file = None
-        i = 0
-        while i < 1000:
-            if i == 0:
-                next_file = log_dir / "llm.log"
-            else:
-                next_file = log_dir / f"llm.log.{i}"
-            if not next_file.exists():
-                if current_file is None:
-                    raise FileNotFoundError(f"Log folder {log_dir} is empty")
-                return current_file
-            current_file = next_file
-            i += 1
-        
-        raise FileNotFoundError(f"Log file llm.log exceeds the maximum number of 1000 files")
+            return []
+        agents_dir = log_dir / "agents"
+        if not agents_dir.exists():
+            return []
+
+        # Match: <agent>.log or <agent>.log.<n>
+        pattern = re.compile(r"^(?P<agent>.+?)\.log(?:\.(?P<n>\d+))?$")
+        newest_by_agent: Dict[str, Path] = {}
+        for f in agents_dir.iterdir():
+            if not f.is_file():
+                continue
+            m = pattern.match(f.name)
+            if not m:
+                continue
+            agent = m.group("agent") or ""
+            if not agent:
+                continue
+            prev = newest_by_agent.get(agent)
+            if prev is None:
+                newest_by_agent[agent] = f
+                continue
+            try:
+                if f.stat().st_mtime >= prev.stat().st_mtime:
+                    newest_by_agent[agent] = f
+            except Exception:
+                # If stat fails, keep existing
+                pass
+        return sorted(newest_by_agent.values(), key=lambda p: p.name)
     
     def _tail_file(self, project_id: str):
-        """Tail the llm.log file for new entries.
+        """Tail current agent log files for new LLM JSONL entries.
         
         This method reads new lines from the log file and processes them.
         Called periodically by the SSE stream generator.
@@ -219,73 +230,64 @@ class ChatManager:
         Args:
             project_id: Project identifier
         """
-        try:
-            log_file = self._get_current_log_file(project_id)
-            if not log_file:
-                return
-        except FileNotFoundError:
-            # Log file doesn't exist yet, wait for it to be created
+        files = self._iter_current_agent_log_files(project_id)
+        if not files:
             return
-        
-        try:
-            stat = log_file.stat()
-            current_inode = stat.st_ino
-            current_size = stat.st_size
-            
-            # Initialize position if not set (start from beginning - new file for this run)
-            if project_id not in self._file_positions:
-                self._file_positions[project_id] = 0
-                self._file_inodes[project_id] = current_inode
-            
-            # Check for file rotation (inode changed - new file created)
-            if project_id in self._file_inodes:
-                if self._file_inodes[project_id] != current_inode:
-                    # File was rotated/new file created, start from beginning
-                    self._file_positions[project_id] = 0
-                    self._file_inodes[project_id] = current_inode
-            
-            # Get last read position
-            last_pos = self._file_positions.get(project_id, 0)
-            
-            # If file is smaller than last position, it was truncated
+
+        for log_file in files:
+            try:
+                stat = log_file.stat()
+                current_inode = stat.st_ino
+                current_size = stat.st_size
+            except Exception:
+                continue
+
+            key = f"{project_id}:{str(log_file)}"
+
+            if key not in self._file_positions:
+                self._file_positions[key] = 0
+                self._file_inodes[key] = current_inode
+
+            # Rotation detection (inode changed)
+            if self._file_inodes.get(key) != current_inode:
+                self._file_positions[key] = 0
+                self._file_inodes[key] = current_inode
+
+            last_pos = int(self._file_positions.get(key, 0) or 0)
             if current_size < last_pos:
                 last_pos = 0
-            
-            # No new data
+
             if current_size == last_pos:
-                return
-            
-            # Read new lines
-            with open(log_file, 'r', encoding='utf-8') as f:
-                f.seek(last_pos)
-                new_content = f.read()
-                new_pos = f.tell()
-            
-            self._file_positions[project_id] = new_pos
-            
-            # Process new lines
-            for line in new_content.strip().split('\n'):
-                if not line.strip():
+                continue
+
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    f.seek(last_pos)
+                    new_content = f.read()
+                    new_pos = f.tell()
+                self._file_positions[key] = new_pos
+            except Exception:
+                continue
+
+            for line in new_content.split("\n"):
+                line = (line or "").strip()
+                if not line:
                     continue
-                
+                # Only treat JSONL entries as chat events; agent logs contain many non-JSON lines.
+                if not line.startswith("{"):
+                    continue
                 try:
                     entry = json.loads(line)
-                    parsed_messages = self._parse_llm_entry(entry)
-                    for msg in parsed_messages:
-                        self._add_message_internal(project_id, msg)
-                except json.JSONDecodeError:
-                    # Try to extract JSON from log line
-                    json_match = re.search(r'(?:LLM (?:Request|Response): )?(\{.*\})$', line)
-                    if json_match:
-                        try:
-                            entry = json.loads(json_match.group(1))
-                            parsed_messages = self._parse_llm_entry(entry)
-                            for msg in parsed_messages:
-                                self._add_message_internal(project_id, msg)
-                        except json.JSONDecodeError:
-                            pass
-        except Exception:
-            pass
+                except Exception:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                # Guard: only parse entries matching the Moose LLM logger schema
+                if "direction" not in entry or "message" not in entry:
+                    continue
+                parsed_messages = self._parse_llm_entry(entry)
+                for msg in parsed_messages:
+                    self._add_message_internal(project_id, msg)
     
     def _start_watching(self, project_id: str):
         """Start background file watcher for a project if not already watching.
@@ -338,35 +340,39 @@ class ChatManager:
                 del self._watchers[project_id]
     
     def list_chat_files(self, project_id: str, base_dir: Optional[Path] = None) -> List[str]:
-        """List available llm.log files for a project.
+        """List available agent log files that may contain LLM JSONL entries.
         
         Args:
             project_id: Project identifier
             base_dir: Base directory for projects
             
         Returns:
-            List of llm.log file names sorted by suffix (llm.log, llm.log.1, llm.log.2, ...)
+            List of agent log file names relative to the project logs directory,
+            e.g. "agents/finance_office.log.40".
         """
         log_dir = self._get_log_dir(project_id, base_dir)
         if not log_dir or not log_dir.exists():
             return []
-        
-        files = []
-        pattern = re.compile(r'^llm\.log(\.\d+)?$')
-        
-        for f in log_dir.iterdir():
+
+        agents_dir = log_dir / "agents"
+        if not agents_dir.exists():
+            return []
+
+        files: List[str] = []
+        pattern = re.compile(r"^.+?\.log(\.\d+)?$")
+        for f in agents_dir.iterdir():
             if f.is_file() and pattern.match(f.name):
-                files.append(f.name)
-        
-        # Sort: llm.log first, then llm.log.1, llm.log.2, etc.
-        def sort_key(name):
-            if name == 'llm.log':
-                return (0, 0)
-            match = re.search(r'\.(\d+)$', name)
-            if match:
-                return (1, int(match.group(1)))
-            return (2, 0)
-        
+                files.append(f"agents/{f.name}")
+
+        # Sort by name then suffix number (stable + easy)
+        def sort_key(rel: str):
+            name = rel.split("/", 1)[-1]
+            m = re.search(r"\.(\d+)$", name)
+            n = int(m.group(1)) if m else -1
+            # base agent name before ".log"
+            base = name.split(".log", 1)[0]
+            return (base, n, name)
+
         return sorted(files, key=sort_key)
     
     def read_chat_file(
@@ -375,11 +381,11 @@ class ChatManager:
         filename: str, 
         base_dir: Optional[Path] = None
     ) -> List[dict]:
-        """Read and parse a historical llm.log file.
+        """Read and parse a historical agent log file, extracting LLM JSONL entries.
         
         Args:
             project_id: Project identifier
-            filename: Log file name (e.g., 'llm.log.1')
+            filename: Relative log file name (e.g., 'agents/finance_office.log.40')
             base_dir: Base directory for projects
             
         Returns:
@@ -388,8 +394,15 @@ class ChatManager:
         log_dir = self._get_log_dir(project_id, base_dir)
         if not log_dir:
             return []
-        
-        log_file = log_dir / filename
+
+        # Only allow reading within the project logs directory
+        log_file = (log_dir / filename).resolve()
+        try:
+            if log_dir.resolve() not in log_file.parents and log_file != log_dir.resolve():
+                return []
+        except Exception:
+            return []
+
         if not log_file.exists():
             return []
         
@@ -400,22 +413,19 @@ class ChatManager:
                     line = line.strip()
                     if not line:
                         continue
-                    
+
+                    # Only parse JSONL entries; agent logs contain many formatted lines.
+                    if not line.startswith("{"):
+                        continue
                     try:
                         entry = json.loads(line)
-                        parsed_messages = self._parse_llm_entry(entry)
-                        messages.extend(parsed_messages)
-                    except json.JSONDecodeError:
-                        # Try to extract JSON from log line
-                        # Format might be: LLM Request: {...} or LLM Response: {...}
-                        json_match = re.search(r'(?:LLM (?:Request|Response): )?(\{.*\})$', line)
-                        if json_match:
-                            try:
-                                entry = json.loads(json_match.group(1))
-                                parsed_messages = self._parse_llm_entry(entry)
-                                messages.extend(parsed_messages)
-                            except json.JSONDecodeError:
-                                pass
+                    except Exception:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if "direction" not in entry or "message" not in entry:
+                        continue
+                    messages.extend(self._parse_llm_entry(entry))
         except Exception:
             pass
         
