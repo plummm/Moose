@@ -40,7 +40,7 @@ class CompanyMCPTools(FMPMCPTools):
         return None
 
     @mcp_tool()
-    def get_company_employee_count(self, symbol: str, limit: int = 100) -> dict:
+    def get_company_employee_count(self, symbol: Optional[str] = None, limit: int = 100, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieve employee count filings/records for a company (FMP Stable).
 
@@ -72,13 +72,13 @@ class CompanyMCPTools(FMPMCPTools):
         Data source: FMP Stable Company Employee Count API
         - GET `https://financialmodelingprep.com/stable/employee-count?symbol=...`
         """
-        meta = {"tool": "get_company_employee_count", "symbol": symbol, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_company_employee_count", "symbol": sym, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if not isinstance(limit, int) or limit < 1:
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {"symbol": sym, "limit": limit}
         raw = self._request_json("employee-count", params=params)
         if isinstance(raw, dict) and "error" in raw:
@@ -103,7 +103,7 @@ class CompanyMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_company_market_cap(self, symbol: str) -> dict:
+    def get_company_market_cap(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieve a company’s market capitalization (FMP Stable).
 
@@ -133,11 +133,10 @@ class CompanyMCPTools(FMPMCPTools):
         Data source: FMP Stable Company Market Cap API
         - GET `https://financialmodelingprep.com/stable/market-capitalization?symbol=...`
         """
-        meta = {"tool": "get_company_market_cap", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_company_market_cap", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         params: Dict[str, Any] = {"symbol": sym}
 
         raw = self._request_json("market-capitalization", params=params)
@@ -161,7 +160,7 @@ class CompanyMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_batch_market_cap(self, symbols: Union[str, List[str]]) -> dict:
+    def get_batch_market_cap(self, symbols: str) -> dict:
         """
         Retrieve market capitalization data for multiple companies in one request (FMP Stable).
 
@@ -172,9 +171,7 @@ class CompanyMCPTools(FMPMCPTools):
         - You want market caps for a watchlist or peer group in a single API call.
 
         Parameters
-        - symbols: Either:
-          - a comma-separated string (e.g., `"AAPL,MSFT,GOOGL"`), or
-          - a list of tickers (e.g., `["AAPL", "MSFT", "GOOGL"]`)
+        - symbols: Comma-separated string (e.g., `"AAPL,MSFT,GOOGL"`).
 
         Return value
         - Dict with:
@@ -185,12 +182,22 @@ class CompanyMCPTools(FMPMCPTools):
         Concrete example (code)
 
         ```python
-        get_batch_market_cap(symbols=["AAPL", "MSFT", "GOOGL"])
+        get_batch_market_cap(symbols="AAPL,MSFT,GOOGL")
         ```
 
         Data source: FMP Stable Batch Market Cap API
         - GET `https://financialmodelingprep.com/stable/market-capitalization-batch?symbols=AAPL,MSFT,...`
         """
+        # NOTE:
+        # Keep the signature `symbols: str` so LangChain/Gemini tool schema generation is stable.
+        # Some Gemini tool calling adapters reject JSON schema where an array parameter's `items`
+        # is missing required fields; using a plain string avoids that failure mode.
+        #
+        # Best-effort backwards compat: if any internal caller passes a list/tuple/set anyway,
+        # normalize it to a comma-separated string.
+        if isinstance(symbols, (list, tuple, set)):
+            symbols = ",".join(str(s) for s in symbols)
+
         meta = {"tool": "get_batch_market_cap", "symbols": symbols}
         if symbols is None:
             return mcp_envelope_err("symbols is required", meta=meta)
@@ -225,10 +232,12 @@ class CompanyMCPTools(FMPMCPTools):
     @mcp_tool()
     def get_historical_market_cap(
         self,
-        symbol: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         limit: Optional[int] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve historical market capitalization series for a company (FMP Stable).
@@ -261,9 +270,10 @@ class CompanyMCPTools(FMPMCPTools):
         Data source: FMP Stable Historical Market Cap API
         - GET `https://financialmodelingprep.com/stable/historical-market-capitalization?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD&limit=...`
         """
-        meta = {"tool": "get_historical_market_cap", "symbol": symbol, "from_date": from_date, "to_date": to_date, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_historical_market_cap", "symbol": sym, "from_date": from_date, "to_date": to_date, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if from_date:
             err = self._validate_iso_date(from_date, "from_date")
             if err:
@@ -275,7 +285,6 @@ class CompanyMCPTools(FMPMCPTools):
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer when provided", meta=meta)
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {"symbol": sym}
         if from_date:
             params["from"] = str(from_date).strip()
@@ -306,7 +315,7 @@ class CompanyMCPTools(FMPMCPTools):
         )
 
     @mcp_tool()
-    def get_company_share_float_liquidity(self, symbol: str) -> dict:
+    def get_company_share_float_liquidity(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieve a company’s share float and related liquidity/float fields (FMP Stable).
 
@@ -335,11 +344,10 @@ class CompanyMCPTools(FMPMCPTools):
         Data source: FMP Stable Company Share Float & Liquidity API
         - GET `https://financialmodelingprep.com/stable/shares-float?symbol=...`
         """
-        meta = {"tool": "get_company_share_float_liquidity", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_company_share_float_liquidity", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         raw = self._request_json("shares-float", params={"symbol": sym})
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -359,7 +367,7 @@ class CompanyMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_company_executives(self, symbol: str) -> dict:
+    def get_company_executives(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieve executives for a company (FMP Stable).
 
@@ -387,11 +395,10 @@ class CompanyMCPTools(FMPMCPTools):
         Data source: FMP Stable Company Executives API
         - GET `https://financialmodelingprep.com/stable/key-executives?symbol=...`
         """
-        meta = {"tool": "get_company_executives", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_company_executives", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         raw = self._request_json("key-executives", params={"symbol": sym})
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -407,7 +414,7 @@ class CompanyMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_executive_compensation(self, symbol: str) -> dict:
+    def get_executive_compensation(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieve executive compensation details for a company (FMP Stable).
 
@@ -435,11 +442,10 @@ class CompanyMCPTools(FMPMCPTools):
         Data source: FMP Stable Executive Compensation API
         - GET `https://financialmodelingprep.com/stable/governance-executive-compensation?symbol=...`
         """
-        meta = {"tool": "get_executive_compensation", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_executive_compensation", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         raw = self._request_json("governance-executive-compensation", params={"symbol": sym})
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None

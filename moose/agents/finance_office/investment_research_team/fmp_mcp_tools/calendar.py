@@ -28,7 +28,7 @@ class CalendarMCPTools(FMPMCPTools):
         return None
 
     @mcp_tool()
-    def get_earnings_report(self, symbol: str, limit: int = 10) -> dict:
+    def get_earnings_report(self, symbol: Optional[str] = None, limit: int = 10, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieves earnings reports for a company.
 
@@ -55,13 +55,13 @@ class CalendarMCPTools(FMPMCPTools):
         Data source: FMP Stable Earnings Report API
         - GET `https://financialmodelingprep.com/stable/earnings?symbol=...&limit=...`
         """
-        meta = {"tool": "get_earnings_report", "symbol": symbol, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_earnings_report", "symbol": sym, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if not isinstance(limit, int) or limit < 1:
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {"symbol": sym, "limit": limit}
         raw = self._request_json("earnings", params=params)
         if isinstance(raw, dict) and "error" in raw:
@@ -193,7 +193,7 @@ class CalendarMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_stock_split_details(self, symbol: str, limit: int = 100) -> dict:
+    def get_stock_split_details(self, symbol: Optional[str] = None, limit: int = 100, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieves stock split details for a company.
 
@@ -220,13 +220,13 @@ class CalendarMCPTools(FMPMCPTools):
         Data source: FMP Stable Stock Split Details API
         - GET `https://financialmodelingprep.com/stable/splits?symbol=...&limit=...`
         """
-        meta = {"tool": "get_stock_split_details", "symbol": symbol, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_stock_split_details", "symbol": sym, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if not isinstance(limit, int) or limit < 1:
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {"symbol": sym, "limit": limit}
         raw = self._request_json("splits", params=params)
         if isinstance(raw, dict) and "error" in raw:

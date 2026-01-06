@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +18,7 @@ class TickerMemoryLoaderNode:
 
     Writes:
     - state.ticker_memory (dict[ticker -> memory dict]) loaded from:
-      `/data/news/<ticker>/<year>/<month>/memory.json` (UTC bucket)
+      sqlite `memory_current` (via `load_current_memories`)
     """
 
     def __init__(self, *, analyzer: Any, logger: Any):
@@ -39,11 +38,10 @@ class TickerMemoryLoaderNode:
         if per_ticker_merge_mode:
             # New mode: Load memory for all tickers in ticker_list
             ticker_list = state.get("ticker_list", []) if isinstance(state.get("ticker_list"), list) else []
-            # DB-first bulk load, fallback to per-ticker memory.json
-            try:
-                db_mem = load_current_memories(db_path=db_path, tickers=ticker_list, logger=self.logger)
-            except Exception:
-                db_mem = {}
+            # DB-only bulk load. Fail-closed on sqlite errors; do not fall back to memory.json.
+            db_mem = load_current_memories(
+                db_path=db_path, tickers=ticker_list, logger=self.logger, fail_closed=True
+            )
             for ticker in ticker_list:
                 ticker = str(ticker).upper().strip()
                 if not ticker:
@@ -51,37 +49,19 @@ class TickerMemoryLoaderNode:
 
                 if isinstance(db_mem, dict) and isinstance(db_mem.get(ticker), dict):
                     mem_out[ticker] = shrink_for_state(db_mem.get(ticker))
-                    continue
-
-                fp = Path(base_news_dir) / ticker / year / month / "memory.json"
-                if fp.exists() and fp.is_file():
-                    try:
-                        raw = json.loads(fp.read_text(encoding="utf-8"))
-                        mem_out[ticker] = shrink_for_state(raw)
-                    except Exception:
-                        pass
         else:
             # Old mode: Load memory for single current_ticker
             current_ticker = str(state.get("current_ticker") or "").upper().strip()
             if not current_ticker:
                 return state
 
-            # DB-first, fallback to memory.json
-            try:
-                db_mem = load_current_memories(db_path=db_path, tickers=[current_ticker], logger=self.logger)
-            except Exception:
-                db_mem = {}
+            # DB-only load. Fail-closed on sqlite errors; do not fall back to memory.json.
+            db_mem = load_current_memories(
+                db_path=db_path, tickers=[current_ticker], logger=self.logger, fail_closed=True
+            )
             if isinstance(db_mem, dict) and isinstance(db_mem.get(current_ticker), dict):
                 mem_out[current_ticker] = shrink_for_state(db_mem.get(current_ticker))
                 return {**state, "ticker_memory": mem_out}
-
-            fp = Path(base_news_dir) / current_ticker / year / month / "memory.json"
-            if fp.exists() and fp.is_file():
-                try:
-                    raw = json.loads(fp.read_text(encoding="utf-8"))
-                    mem_out[current_ticker] = shrink_for_state(raw)
-                except Exception:
-                    pass
         
         return {**state, "ticker_memory": mem_out}
 

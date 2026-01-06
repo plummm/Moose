@@ -18,7 +18,7 @@ class QuoteMCPTools(FMPMCPTools):
         return str(symbol).strip().upper()
 
     @mcp_tool()
-    def get_stock_quote(self, symbol: str) -> dict:
+    def get_stock_quote(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieves the latest quote payload for a single symbol.
 
@@ -44,11 +44,10 @@ class QuoteMCPTools(FMPMCPTools):
         Data source: FMP Stable Stock Quote API
         - GET `https://financialmodelingprep.com/stable/quote?symbol=...`
         """
-        meta = {"tool": "get_stock_quote", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_stock_quote", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         params: Dict[str, Any] = {"symbol": sym}
         raw = self._request_json("quote", params=params)
         if isinstance(raw, dict) and "error" in raw:
@@ -71,7 +70,7 @@ class QuoteMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_stock_price_change(self, symbol: str) -> dict:
+    def get_stock_price_change(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Retrieves price-change information (multiple horizons) for a single symbol.
 
@@ -97,11 +96,10 @@ class QuoteMCPTools(FMPMCPTools):
         Data source: FMP Stable Stock Price Change API
         - GET `https://financialmodelingprep.com/stable/stock-price-change?symbol=...`
         """
-        meta = {"tool": "get_stock_price_change", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
-
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_stock_price_change", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         params: Dict[str, Any] = {"symbol": sym}
         raw = self._request_json("stock-price-change", params=params)
         if isinstance(raw, dict) and "error" in raw:

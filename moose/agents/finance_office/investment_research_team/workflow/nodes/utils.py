@@ -248,6 +248,7 @@ def append_snapshot(
     mem_path: Path,
     memory_obj: dict,
     logger: Any = None,
+    fail_closed: bool = False,
 ) -> None:
     """
     Append one snapshot row to sqlite. Best-effort; callers should treat failures as non-fatal.
@@ -290,6 +291,8 @@ def append_snapshot(
         )
         conn.commit()
     except Exception as e:
+        if fail_closed:
+            raise
         try:
             if logger:
                 logger.warning(f"SQLite snapshot append failed for {ticker}: {e}")
@@ -311,6 +314,7 @@ def upsert_current_memory(
     mem_path: Path,
     memory_obj: dict,
     logger: Any = None,
+    fail_closed: bool = False,
 ) -> None:
     """
     Upsert the latest (current) memory for ticker (global carry-over across months).
@@ -360,6 +364,8 @@ def upsert_current_memory(
         )
         conn.commit()
     except Exception as e:
+        if fail_closed:
+            raise
         try:
             if logger:
                 logger.warning(f"SQLite current-memory upsert failed for {ticker}: {e}")
@@ -378,6 +384,7 @@ def load_current_memory(
     db_path: Path,
     ticker: str,
     logger: Any = None,
+    fail_closed: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Load the current memory for ticker from sqlite.
@@ -403,6 +410,8 @@ def load_current_memory(
         except Exception:
             return None
     except Exception as e:
+        if fail_closed:
+            raise
         try:
             if logger:
                 logger.warning(f"SQLite current-memory load failed for {ticker}: {e}")
@@ -422,6 +431,7 @@ def load_current_memories(
     db_path: Path,
     tickers: list[str],
     logger: Any = None,
+    fail_closed: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Bulk load current memories for many tickers.
@@ -458,6 +468,8 @@ def load_current_memories(
                     continue
         return out
     except Exception as e:
+        if fail_closed:
+            raise
         try:
             if logger:
                 logger.warning(f"SQLite current-memory bulk load failed: {e}")

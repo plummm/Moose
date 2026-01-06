@@ -131,7 +131,7 @@ class MonthlyMemoryWriterNode(BaseNode):
                 sentiment = "neutral"
             # Apply per-item scaling from sentiment_rating without mutating the loop-level multiplier.
             sentiment_rating = str(a.get("sentiment_rating") or "").strip().upper()
-            rating_scale = 1.0
+            rating_scale = 0.2
             if sentiment_rating in ["BL0", "BR0"]:
                 rating_scale = 0.1
             elif sentiment_rating in ["BL1", "BR1"]:
@@ -1304,19 +1304,11 @@ Return exactly this schema:
         mem_path = dir_path / "memory.json"
 
         existing_memory: Optional[Dict[str, Any]] = None
-        # DB-first load, fallback to memory.json
-        try:
-            db_path = get_db_path(base_news_dir=base_news_dir)
-            existing_memory = load_current_memory(db_path=db_path, ticker=t, logger=self.logger)
-        except Exception:
-            existing_memory = None
-
-        if existing_memory is None and mem_path.exists() and mem_path.is_file():
-            try:
-                ex = json.loads(mem_path.read_text(encoding="utf-8"))
-                existing_memory = ex if isinstance(ex, dict) else None
-            except Exception:
-                existing_memory = None
+        # DB-only load. Fail-closed on sqlite errors; do not fall back to memory.json for computation.
+        db_path = get_db_path(base_news_dir=base_news_dir)
+        existing_memory = load_current_memory(
+            db_path=db_path, ticker=t, logger=self.logger, fail_closed=True
+        )
 
         monthly_articles: Optional[List[Dict[str, Any]]] = None
         if existing_memory is None:
@@ -1471,43 +1463,32 @@ Return exactly this schema:
         summary_to_write["updated_at"] = updated_at
 
         # DB-first write (current + snapshot). Keep file as a mirror for manual checks.
-        try:
-            db_path = get_db_path(base_news_dir=base_news_dir)
-            upsert_current_memory(
-                db_path=db_path,
-                ticker=t,
-                updated_at=updated_at,
-                mem_path=mem_path,
-                memory_obj=summary_to_write,
-                logger=self.logger,
-            )
-            append_snapshot(
-                db_path=db_path,
-                ticker=t,
-                year=year,
-                month=month,
-                updated_at=updated_at,
-                mem_path=mem_path,
-                memory_obj=summary_to_write,
-                logger=self.logger,
-            )
-        except Exception as e:
-            try:
-                if self.logger:
-                    self.logger.warning(f"Failed to write memory to sqlite for {t}: {e}")
-            except Exception:
-                pass
+        db_path = get_db_path(base_news_dir=base_news_dir)
+        # Fail-closed on sqlite errors; never write memory.json if DB write fails.
+        upsert_current_memory(
+            db_path=db_path,
+            ticker=t,
+            updated_at=updated_at,
+            mem_path=mem_path,
+            memory_obj=summary_to_write,
+            logger=self.logger,
+            fail_closed=True,
+        )
+        append_snapshot(
+            db_path=db_path,
+            ticker=t,
+            year=year,
+            month=month,
+            updated_at=updated_at,
+            mem_path=mem_path,
+            memory_obj=summary_to_write,
+            logger=self.logger,
+            fail_closed=True,
+        )
 
         tmp_path = dir_path / "memory.json.tmp"
-        try:
-            tmp_path.write_text(json.dumps(summary_to_write, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp_path.replace(mem_path)
-        except Exception as e:
-            try:
-                if self.logger:
-                    self.logger.error(f"Failed to write memory.json for {t}: {e}")
-            except Exception:
-                pass
+        tmp_path.write_text(json.dumps(summary_to_write, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(mem_path)
 
         written[t] = summary_to_write
 
@@ -1558,21 +1539,11 @@ Return exactly this schema:
                 
                 # Load existing memory
                 existing_memory: Optional[Dict[str, Any]] = None
-                # DB-first load, fallback to memory.json
-                try:
-                    db_path = get_db_path(base_news_dir=base_news_dir)
-                    existing_memory = load_current_memory(
-                        db_path=db_path, ticker=t, logger=self.logger
-                    )
-                except Exception:
-                    existing_memory = None
-
-                if existing_memory is None and mem_path.exists() and mem_path.is_file():
-                    try:
-                        ex = json.loads(mem_path.read_text(encoding="utf-8"))
-                        existing_memory = ex if isinstance(ex, dict) else None
-                    except Exception:
-                        existing_memory = None
+                # DB-only load. Fail-closed on sqlite errors; do not fall back to memory.json for computation.
+                db_path = get_db_path(base_news_dir=base_news_dir)
+                existing_memory = load_current_memory(
+                    db_path=db_path, ticker=t, logger=self.logger, fail_closed=True
+                )
                 
                 # Bootstrap monthly articles if no existing memory
                 monthly_articles: Optional[List[Dict[str, Any]]] = None
@@ -1722,43 +1693,32 @@ Return exactly this schema:
 
                 # DB-first write (current + snapshot). Keep file as a mirror for manual checks.
                 tmp_path = dir_path / "memory.json.tmp"
-                try:
-                    try:
-                        db_path = get_db_path(base_news_dir=base_news_dir)
-                        upsert_current_memory(
-                            db_path=db_path,
-                            ticker=t,
-                            updated_at=updated_at,
-                            mem_path=mem_path,
-                            memory_obj=summary_to_write,
-                            logger=self.logger,
-                        )
-                        append_snapshot(
-                            db_path=db_path,
-                            ticker=t,
-                            year=year,
-                            month=month,
-                            updated_at=updated_at,
-                            mem_path=mem_path,
-                            memory_obj=summary_to_write,
-                            logger=self.logger,
-                        )
-                    except Exception as e:
-                        try:
-                            if self.logger:
-                                self.logger.warning(f"Failed to write memory to sqlite for {t}: {e}")
-                        except Exception:
-                            pass
+                # Fail-closed on sqlite errors; never write memory.json if DB write fails.
+                db_path = get_db_path(base_news_dir=base_news_dir)
+                upsert_current_memory(
+                    db_path=db_path,
+                    ticker=t,
+                    updated_at=updated_at,
+                    mem_path=mem_path,
+                    memory_obj=summary_to_write,
+                    logger=self.logger,
+                    fail_closed=True,
+                )
+                append_snapshot(
+                    db_path=db_path,
+                    ticker=t,
+                    year=year,
+                    month=month,
+                    updated_at=updated_at,
+                    mem_path=mem_path,
+                    memory_obj=summary_to_write,
+                    logger=self.logger,
+                    fail_closed=True,
+                )
 
-                    tmp_path.write_text(json.dumps(summary_to_write, ensure_ascii=False, indent=2), encoding="utf-8")
-                    tmp_path.replace(mem_path)
-                    written[t] = summary_to_write
-                except Exception as e:
-                    try:
-                        if self.logger:
-                            self.logger.error(f"Failed to write memory.json for {t}: {e}")
-                    except Exception:
-                        pass
+                tmp_path.write_text(json.dumps(summary_to_write, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp_path.replace(mem_path)
+                written[t] = summary_to_write
             
             except Exception as e:
                 try:

@@ -7,6 +7,7 @@ import time
 import random
 import threading
 import asyncio
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
@@ -1266,13 +1267,29 @@ class NewsScraperService:
         if self.logger:
             self.logger.info(f"Analyzer queue started: workers={worker_count}, maxsize={maxsize}")
 
-    async def _enqueue_analyzer_send(self, *, file_path: str, url: str, quality_score: int):
+    async def _enqueue_analyzer_send(
+        self,
+        *,
+        file_path: str,
+        url: str,
+        quality_score: int,
+        request_id: str,
+        parent_span_id: str,
+    ):
         """
         Enqueue a {file_path, url} item for background analyzer posting.
         """
         await self._ensure_analyzer_workers_started()
         assert self._analyzer_queue is not None
-        await self._analyzer_queue.put({"file_path": str(file_path), "url": str(url), "quality_score": quality_score})
+        await self._analyzer_queue.put(
+            {
+                "file_path": str(file_path),
+                "url": str(url),
+                "quality_score": int(quality_score or 0),
+                "request_id": str(request_id or ""),
+                "parent_span_id": str(parent_span_id or ""),
+            }
+        )
         self.analyzer_enqueued += 1
 
     async def _analyzer_worker_loop(self, worker_id: int):
@@ -1297,10 +1314,43 @@ class NewsScraperService:
 
         while True:
             item = await q.get()
+            prev_ctx = None
+            _restore_ctx = False
             try:
                 file_path = str((item or {}).get("file_path") or "")
                 url = str((item or {}).get("url") or "")
                 quality_score = int((item or {}).get("quality_score") or 0)
+                request_id = str((item or {}).get("request_id") or "")
+                parent_span_id = str((item or {}).get("parent_span_id") or "")
+
+                # Link this background HTTP send into the originating per-article trace.
+                # This matters because the worker runs outside the scrape loop task.
+                try:
+                    from moose.framework.logging import get_project_id
+                    from moose.framework.logging.tracing import TraceContext, get_current, set_current
+
+                    prev_ctx = get_current()
+                    _restore_ctx = True
+                    pid = None
+                    try:
+                        pid = get_project_id()
+                    except Exception:
+                        pid = None
+
+                    if request_id:
+                        set_current(
+                            TraceContext(
+                                request_id=request_id,
+                                current_span_id=(parent_span_id or None),
+                                project_id=pid,
+                                agent_name="news_scraper",
+                            )
+                        )
+                except Exception:
+                    # Never break the worker due to tracing issues.
+                    prev_ctx = None
+                    _restore_ctx = False
+
                 self.logger.debug(f"Dequeued item to analyzer: {file_path}, {url}, {quality_score}")
                 ok = False
                 for attempt in range(retry_count + 1):
@@ -1319,6 +1369,13 @@ class NewsScraperService:
                 if self.logger:
                     self.logger.warning(f"Analyzer worker {worker_id} failed to send: {e}")
             finally:
+                if _restore_ctx:
+                    try:
+                        from moose.framework.logging.tracing import set_current
+
+                        set_current(prev_ctx)
+                    except Exception:
+                        pass
                 try:
                     q.task_done()
                 except Exception:
@@ -1439,7 +1496,7 @@ class NewsScraperService:
             return False
         
         try:
-            import requests
+            from moose.framework.logging.http_client import traced_requests_post
             
             payload = {
                 "file_path": str(file_path),
@@ -1447,7 +1504,7 @@ class NewsScraperService:
                 "metadata": {"quality_score": quality_score}
             }
             
-            response = requests.post(
+            response = traced_requests_post(
                 self.analyzer_endpoint,
                 json=payload,
                 timeout=10
@@ -1522,29 +1579,79 @@ class NewsScraperService:
                 continue
 
             processed_new += 1
-            
-            # Extract text
-            raw_text = await self.scraper_core.extract_text_from_url(url)
 
-            if raw_text:
-                # Normalize using LLM and save JSON-only
-                normalized = await self.normalizer.normalize_article(url=url, extracted_text=raw_text)
-                saved_path = self.scraper_core.save_article_json(url, normalized)
-                quality_score = normalized.get("quality_score", 0)
-                if saved_path:
-                    articles_scraped += 1
-                    saved_files.append(str(saved_path))
-                    
-                    # Enqueue analyzer send (handled by background workers)
-                    if quality_score > 0 and quality_score <= 2:
-                        self.logger.info(f"Low quality article [{str(saved_path)}] will be skipped from analyzer")
-                        continue
-                    await self._enqueue_analyzer_send(file_path=str(saved_path), url=url, quality_score=quality_score)
-                    analyzer_enqueued_this_cycle += 1
-                else:
-                    articles_failed += 1
-            else:
-                articles_failed += 1
+            # Each article URL gets its own trace so it shows up as an independent request in Traces UI.
+            # We still run inside the same scrape() call, but we reset trace context per article.
+            _restore_ctx = False
+            try:
+                from moose.framework.logging import get_project_id
+                from moose.framework.logging.tracing import TraceContext, get_current, set_current, span as trace_span
+
+                prev_ctx = get_current()
+                _restore_ctx = True
+                pid = None
+                try:
+                    pid = get_project_id()
+                except Exception:
+                    pid = None
+
+                article_rid = str(uuid.uuid4())
+                set_current(
+                    TraceContext(
+                        request_id=article_rid,
+                        current_span_id=None,
+                        project_id=pid,
+                        agent_name="news_scraper",
+                    )
+                )
+            except Exception:
+                prev_ctx = None
+                article_rid = str(uuid.uuid4())
+
+            try:
+                # Root span for this article
+                with trace_span(  # type: ignore[name-defined]
+                    kind="workflow.article",
+                    name="news_scraper.article",
+                    attrs={"news.url": str(url or "")},
+                    request_id=article_rid,
+                ) as article_sp:
+                    # Extract text
+                    raw_text = await self.scraper_core.extract_text_from_url(url)
+
+                    if raw_text:
+                        # Normalize using LLM and save JSON-only
+                        normalized = await self.normalizer.normalize_article(url=url, extracted_text=raw_text)
+                        saved_path = self.scraper_core.save_article_json(url, normalized)
+                        quality_score = normalized.get("quality_score", 0)
+                        if saved_path:
+                            articles_scraped += 1
+                            saved_files.append(str(saved_path))
+
+                            # Enqueue analyzer send (handled by background workers)
+                            if quality_score > 0 and quality_score <= 2:
+                                self.logger.info(f"Low quality article [{str(saved_path)}] will be skipped from analyzer")
+                            else:
+                                await self._enqueue_analyzer_send(
+                                    file_path=str(saved_path),
+                                    url=url,
+                                    quality_score=quality_score,
+                                    request_id=article_rid,
+                                    parent_span_id=str(getattr(article_sp, "span_id", "") or ""),
+                                )
+                                analyzer_enqueued_this_cycle += 1
+                        else:
+                            articles_failed += 1
+                    else:
+                        articles_failed += 1
+            finally:
+                if _restore_ctx:
+                    try:
+                        from moose.framework.logging.tracing import set_current
+
+                        set_current(prev_ctx)
+                    except Exception:
+                        pass
         
         # Save index after scraping session
         self.scraper_core.save_index()

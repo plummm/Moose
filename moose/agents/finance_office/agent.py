@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 from moose.framework import BaseAgent
 from moose.framework.llm_core import LLMClient
+from moose.framework.logging.tracing import get_current as get_current_trace
 
 # LangGraph (assumed available in this environment)
 from langgraph.graph import END, StateGraph
@@ -181,6 +182,40 @@ class FinanceOffice(BaseAgent):
                 f"News analysis worker pool: workers={self._news_max_workers}, queue_max={self._news_max_queue_size}"
             )
 
+        # Bounded queue + fixed worker pool for Truth Social post analysis (fileless)
+        tweet_cfg = (
+            custom_config.get("trump_tweet_analysis")
+            if isinstance(custom_config.get("trump_tweet_analysis"), dict)
+            else {}
+        )
+
+        tweet_workers = tweet_cfg.get("max_concurrent", 2)
+        try:
+            self._tweet_max_workers = max(1, int(tweet_workers or 0))
+        except Exception:
+            self._tweet_max_workers = 2
+
+        tweet_queue = tweet_cfg.get("max_queue_size", 200)
+        try:
+            self._tweet_max_queue_size = max(1, int(tweet_queue or 0))
+        except Exception:
+            self._tweet_max_queue_size = 200
+
+        self._tweet_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=self._tweet_max_queue_size)
+        self._tweet_worker_stop = threading.Event()
+        self._tweet_workers: list[threading.Thread] = []
+        self._tweet_total_received = 0
+        self._tweet_total_queued = 0
+        self._tweet_total_dropped = 0
+        self._tweet_total_processed = 0
+        self._tweet_total_failed = 0
+
+        if self.assistant:
+            self._start_tweet_workers()
+            self.logger.info(
+                f"Trump tweet analysis worker pool: workers={self._tweet_max_workers}, queue_max={self._tweet_max_queue_size}"
+            )
+
     def _start_news_workers(self) -> None:
         if self._news_workers:
             return
@@ -226,8 +261,55 @@ class FinanceOffice(BaseAgent):
             t.start()
             self._news_workers.append(t)
 
+    def _start_tweet_workers(self) -> None:
+        if self._tweet_workers:
+            return
+
+        def worker_main(worker_idx: int) -> None:
+            import asyncio as _asyncio
+
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                while not self._tweet_worker_stop.is_set() and not self.shutdown_requested:
+                    try:
+                        job = self._tweet_queue.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                    try:
+                        if not self.assistant:
+                            continue
+                        post = job.get("post") if isinstance(job.get("post"), dict) else {}
+                        meta = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+                        loop.run_until_complete(
+                            self.assistant.process_trump_tweet(
+                                post=post,
+                                metadata=meta,
+                                news_data_dir=self.news_data_dir,
+                            )
+                        )
+                        self._tweet_total_processed += 1
+                    except Exception as e:
+                        self._tweet_total_failed += 1
+                        self.logger.error(f"Tweet worker {worker_idx} failed: {e}", exc_info=True)
+                    finally:
+                        try:
+                            self._tweet_queue.task_done()
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        for i in range(self._tweet_max_workers):
+            t = threading.Thread(target=worker_main, args=(i,), name=f"tweet_worker_{i}", daemon=True)
+            t.start()
+            self._tweet_workers.append(t)
+
     # -------------------------------------------------------------------------
-    # Cost tracking UI (reads existing llm.log* JSONL; finance_office-only view)
+    # Cost tracking UI (reads JSONL LLM entries appended to this agent's log)
     # -------------------------------------------------------------------------
     def _get_project_logs_dir(self) -> Path:
         """
@@ -249,25 +331,27 @@ class FinanceOffice(BaseAgent):
         except Exception:
             return datetime.now().strftime("%Y-%m-%d")
 
-    def _iter_llm_log_files(self, logs_dir: Path) -> List[Path]:
-        """
-        Return llm log files to scan (llm.log, llm.log.1, llm.log.<n> ...).
-        """
+    def _iter_agent_log_files(self, logs_dir: Path) -> List[Path]:
+        """Return this agent's log files to scan (agents/<agent>.log*)."""
         try:
-            files = sorted(logs_dir.glob("llm.log*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            agents_dir = logs_dir / "agents"
+            if not agents_dir.exists():
+                return []
+            agent_name = str(getattr(self, "name", "finance_office") or "finance_office")
+            files = sorted(agents_dir.glob(f"{agent_name}.log*"), key=lambda p: p.stat().st_mtime, reverse=True)
             return [p for p in files if p.is_file()]
         except Exception:
             return []
 
-    def _aggregate_costs_from_llm_logs(self, *, date: str) -> Dict[str, Any]:
+    def _aggregate_costs_from_agent_logs(self, *, date: str) -> Dict[str, Any]:
         """
-        Aggregate costs/tokens from llm.log* JSON lines for this agent.
+        Aggregate costs/tokens from JSONL LLM entries appended to this agent's log file.
 
-        We use llm.log because cost logs (llm_costs_YYYY-MM-DD.log) currently don't carry agent_name,
-        and the user asked for finance_office-only stats.
+        Note: agent logs are mixed-format (normal formatted lines + JSONL LLM entries). We only
+        parse lines that are valid JSON dicts containing a Moose LLM log entry.
         """
         logs_dir = self._get_project_logs_dir()
-        files = self._iter_llm_log_files(logs_dir)
+        files = self._iter_agent_log_files(logs_dir)
 
         totals = {
             "calls": 0,
@@ -293,6 +377,9 @@ class FinanceOffice(BaseAgent):
                         except Exception:
                             continue
                         if not isinstance(entry, dict):
+                            continue
+                        # Guard: only treat JSONL lines matching the LLM logger schema as LLM entries
+                        if "direction" not in entry or "timestamp" not in entry:
                             continue
 
                         ts = str(entry.get("timestamp") or "")
@@ -341,7 +428,7 @@ class FinanceOffice(BaseAgent):
             except Exception as e:
                 # Don't fail the endpoint due to logging issues
                 try:
-                    self.logger.debug(f"Failed to read llm log file {fp}: {e}")
+                    self.logger.debug(f"Failed to read agent log file {fp}: {e}")
                 except Exception:
                     pass
 
@@ -366,7 +453,7 @@ class FinanceOffice(BaseAgent):
         GET /costs.json?date=YYYY-MM-DD
         """
         date = self._normalize_date(str(data.get("date") or "").strip() or None)
-        return {"status": "success", "data": self._aggregate_costs_from_llm_logs(date=date)}
+        return {"status": "success", "data": self._aggregate_costs_from_agent_logs(date=date)}
 
     def costs_page(self, data: Dict[str, Any]) -> Any:
         """
@@ -400,7 +487,7 @@ class FinanceOffice(BaseAgent):
         <label for="date">Date:</label>
         <input id="date" type="date" value="{today}"/>
       </div>
-      <div class="muted">Data source: <code>llm.log*</code> filtered by <code>metadata.agent_name=finance_office</code></div>
+      <div class="muted">Data source: <code>agents/finance_office.log*</code JSONL entries (metadata.agent_name=finance_office)</div>
     </div>
 
     <div id="status" class="muted" style="margin-top: 10px;"></div>
@@ -1186,6 +1273,75 @@ a {{ color: inherit; }}
                 "status": "error",
                 "error": str(e),
             }
+
+    def analyze_trump_tweets(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        POST /analyze_trump_tweets
+
+        Expected input (from truthsocial_agent):
+        {
+          "content": str,                      # required
+          "timestamp": str,                    # optional
+          "post_id": str,                      # optional
+          "post_url": str,                     # optional
+          "user_handle": str,                  # optional
+          "media_urls": [str],                 # optional
+          "market_impact": { ... }             # optional (pre-filter)
+        }
+
+        This endpoint is enqueue-only (async worker pool processes it).
+        """
+        try:
+            if not self.analyzers_by_team.get("investment_research_team"):
+                return {"status": "error", "error": "Analyzer is not initialized"}
+            if not self.assistant:
+                return {"status": "error", "error": "Assistant is not initialized"}
+
+            post = data if isinstance(data, dict) else {}
+            content = str(post.get("content") or "").strip()
+            if not content:
+                return {"status": "error", "error": "content is required"}
+
+            post_url = str(post.get("post_url") or "").strip()
+            post_id = str(post.get("post_id") or "").strip()
+
+            # Best-effort cache: if we have a URL and it's already analyzed & saved, return success.
+            if post_url:
+                try:
+                    digest = hashlib.sha256(post_url.encode("utf-8")).hexdigest()
+                    existing = list(self.news_data_dir.rglob(f"{digest}.json"))
+                    if existing:
+                        existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        with open(existing[0], "r", encoding="utf-8") as f:
+                            analysis = json.load(f)
+                        if isinstance(analysis, dict) and "error" not in analysis:
+                            return {"status": "success", "queued": False, "cached": True}
+                except Exception as e:
+                    self.logger.debug(f"Tweet cache lookup failed; continuing: {e}")
+
+            self._tweet_total_received += 1
+
+            metadata = {
+                "kind": "trump_post",
+                "source": "truthsocial",
+                "post_id": post_id,
+                "post_url": post_url,
+                "user_handle": str(post.get("user_handle") or "realDonaldTrump").lstrip("@"),
+            }
+
+            # Enqueue bounded job for worker pool
+            try:
+                self._tweet_queue.put_nowait({"post": post, "metadata": metadata})
+                self._tweet_total_queued += 1
+            except queue.Full:
+                self._tweet_total_dropped += 1
+                return {"status": "error", "error": "busy (tweet analysis queue full)"}, 429
+
+            return {"status": "success", "queued": True}
+
+        except Exception as e:
+            self.logger.error(f"Error in analyze_trump_tweets endpoint: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
     
     async def get_queue_stats(self, data: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -1232,9 +1388,28 @@ a {{ color: inherit; }}
             return self._department_workflow_app
 
         workflow = StateGraph(dict)  # state is a plain dict
-        workflow.add_node("start", self._node_start)
-        workflow.add_node("prompt_engineer", self._node_prompt_engineer)
-        workflow.add_node("investment_research_team", self._node_investment_research_team)
+
+        def _wrap_node(node_name: str, fn: Any) -> Any:
+            """
+            Wrap a node function with a workflow.node tracing span.
+            This avoids invasive edits inside each node implementation.
+            """
+
+            async def _wrapped(state: Dict[str, Any]) -> Dict[str, Any]:
+                from moose.framework.logging.tracing import span as trace_span
+
+                with trace_span(
+                    kind="workflow.node",
+                    name=f"finance_office.{node_name}",
+                    attrs={"workflow": "finance_office", "node": node_name, "agent": self.name},
+                ):
+                    return await fn(state)
+
+            return _wrapped
+
+        workflow.add_node("start", _wrap_node("start", self._node_start))
+        workflow.add_node("prompt_engineer", _wrap_node("prompt_engineer", self._node_prompt_engineer))
+        workflow.add_node("investment_research_team", _wrap_node("investment_research_team", self._node_investment_research_team))
 
         def _route_after_start(state: Dict[str, Any]) -> str:
             # If a node already produced a final response, end early.
@@ -1662,6 +1837,31 @@ Return plain text instruction only."""
                             final_response["llm_cost_total"] = cost_total
                 except Exception:
                     pass
+
+                # Log right before returning (helps debug timeouts / downstream delivery issues).
+                try:
+                    ctx = get_current_trace()
+                    rid = str(getattr(ctx, "request_id", "") or "")
+                    status = str(final_response.get("status") or "").strip() or "unknown"
+                    err = str(final_response.get("error") or "").strip()
+                    res = final_response.get("result") if isinstance(final_response.get("result"), dict) else None
+                    has_by_ticker = False
+                    tickers_n = 0
+                    if isinstance(res, dict):
+                        has_by_ticker = isinstance(res.get("by_ticker"), dict)
+                        tickers_n = len(res.get("tickers") or []) if isinstance(res.get("tickers"), list) else 0
+                    if self.logger:
+                        self.logger.info(
+                            "finance_office.run_task returning"
+                            + (f" request_id={rid}" if rid else "")
+                            + f" status={status}"
+                            + (f" error={err[:160]}" if err else "")
+                            + f" tickers={tickers_n}"
+                            + f" has_by_ticker={has_by_ticker}"
+                        )
+                except Exception:
+                    pass
+
                 return final_response
             return {"status": "error", "error": "Invalid department workflow response", "result": None}
         except Exception as e:

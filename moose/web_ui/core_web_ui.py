@@ -73,6 +73,9 @@ def get_dashboard_html() -> str:
                     <select id="project-dropdown" onchange="onProjectChange()">
                         <option value="">Loading...</option>
                     </select>
+                    <button class="refresh-btn" onclick="refreshProjects(true)" title="Refresh projects list">
+                        &#x21bb;
+                    </button>
                 </div>
             </header>
 
@@ -80,6 +83,7 @@ def get_dashboard_html() -> str:
             <div class="tab-bar">
                 <button id="tab-btn-overview" class="tab-btn active" onclick="switchRightTab('overview')">Overview</button>
                 <button id="tab-btn-costs" class="tab-btn" onclick="switchRightTab('costs')">Costs</button>
+                <button id="tab-btn-traces" class="tab-btn" onclick="switchRightTab('traces')">Traces</button>
             </div>
 
             <!-- Overview tab content -->
@@ -180,6 +184,40 @@ def get_dashboard_html() -> str:
                     </div>
                 </section>
             </div>
+
+            <!-- Traces tab content -->
+            <div id="tab-content-traces" class="tab-content">
+                <section class="traces-section">
+                    <div class="section-header">
+                        <h2>Tracing</h2>
+                        <div class="section-controls">
+                            <label class="muted">Since</label>
+                            <input id="trace-since" type="date" onchange="loadTracesDropdown()" />
+                            <label class="muted">Until</label>
+                            <input id="trace-until" type="date" onchange="loadTracesDropdown()" />
+                            <input id="trace-q" placeholder="Filter by request_id…" onkeydown="if(event.key==='Enter') loadTracesDropdown();" />
+                            <select id="trace-dropdown" onchange="onTraceDropdownChange()">
+                                <option value="">Select a request_id…</option>
+                            </select>
+                            <label class="chat-toggle" title="Show only HTTP ingress root traces">
+                                <input type="checkbox" id="trace-ingress-only" checked onchange="loadTracesDropdown()" />
+                                <span>Ingress only</span>
+                            </label>
+                            <label class="chat-toggle">
+                                <input type="checkbox" id="trace-advanced-toggle" onchange="onTraceAdvancedToggle()" />
+                                <span>Advanced</span>
+                            </label>
+                            <button class="refresh-btn" onclick="loadTracesDropdown()" title="Refresh traces">&#x21bb;</button>
+                        </div>
+                    </div>
+                    <div class="trace-main">
+                        <div id="trace-chat" class="trace-chat muted">Select a request_id to view the chain.</div>
+                        <div id="trace-advanced" class="trace-advanced" style="display:none;">
+                            <div id="trace-detail" class="trace-detail muted">Advanced: span tree</div>
+                        </div>
+                    </div>
+                </section>
+            </div>
         </div>
     </div>
     
@@ -235,6 +273,14 @@ body {
     display: flex;
     height: 100vh;
     width: 100%;
+}
+
+/* Full-width traces mode (hide chat panel + resize handle) */
+.page-layout.traces-full .chat-panel {
+    display: none;
+}
+.page-layout.traces-full .resize-handle {
+    display: none;
 }
 
 /* Left Panel - Chat */
@@ -313,6 +359,232 @@ body {
 
 .tab-content.active {
     display: block;
+}
+
+/* ------------------------------------------------------------------
+   Traces section (minimal styles)
+   ------------------------------------------------------------------ */
+.trace-main {
+    /* Avoid nested scroll containers; chat should be the primary scroller. */
+    height: calc(100vh - 180px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.trace-chat {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px;
+    background: var(--bg-primary);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    /* Ensure the last line isn't clipped under the bottom edge/scrollbar overlay */
+    padding-bottom: 22px;
+}
+
+.trace-advanced {
+    margin-top: 12px;
+    flex: 0 0 auto;
+    max-height: 45vh;
+    overflow: auto;
+}
+
+.trace-detail {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px;
+    background: var(--bg-primary);
+    overflow: auto;
+}
+
+/* Chat-bubble look for trace chain */
+.trace-bubble {
+    max-width: 900px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    margin: 8px 0;
+}
+.trace-bubble.user {
+    margin-left: auto;
+    background: rgba(74, 144, 217, 0.20);
+}
+.trace-bubble.assistant {
+    margin-right: auto;
+}
+.trace-bubble.tool {
+    margin-right: auto;
+    background: rgba(255, 152, 0, 0.14);
+}
+.trace-bubble-header {
+    font-size: 11px;
+    margin-bottom: 6px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.trace-bubble-subheader {
+    font-size: 11px;
+    margin-bottom: 6px;
+    color: var(--text-secondary);
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.trace-bubble-subheader .k {
+    opacity: 0.85;
+}
+.trace-bubble-subheader .v {
+    color: var(--text-primary);
+    opacity: 0.9;
+}
+.trace-bubble-subheader .mono {
+    font-family: 'Courier New', monospace;
+}
+.trace-bubble-body {
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* Divider between different agents in a trace chat stream */
+.trace-agent-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 14px 0;
+    opacity: 0.9;
+}
+.trace-agent-divider::before,
+.trace-agent-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border-color);
+}
+.trace-agent-divider .label {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: rgba(96, 125, 139, 0.12);
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.trace-expand {
+    margin-top: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--accent-blue);
+    user-select: none;
+}
+.traces-layout {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 12px;
+    align-items: start;
+}
+
+.trace-list {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 8px;
+    background: var(--bg-primary);
+    max-height: 70vh;
+    overflow: auto;
+}
+
+.trace-row {
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 8px;
+    cursor: pointer;
+}
+
+.trace-row:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--border-color);
+}
+
+.trace-selected {
+    border-color: var(--accent-blue);
+}
+
+.trace-row-top {
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.trace-row-sub {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11px;
+}
+
+.trace-detail {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 10px;
+    background: var(--bg-primary);
+    max-height: 70vh;
+    overflow: auto;
+}
+
+.trace-meta {
+    margin-bottom: 10px;
+}
+
+/* Timeline moved into per-message subheaders in the main chat view. */
+
+.trace-subtitle {
+    font-size: 12px;
+    font-weight: 600;
+    margin: 8px 0;
+}
+
+.span-tree {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 8px;
+}
+
+.span-line {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 2px 0;
+}
+
+.span-name {
+    flex: 1;
+}
+
+.mini-btn {
+    font: inherit;
+    padding: 2px 6px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+
+.llm-detail {
+    margin-top: 10px;
+}
+
+.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.pre-wrap {
+    white-space: pre-wrap;
 }
 
 /* Header */
@@ -449,6 +721,7 @@ body {
     display: flex;
     gap: 8px;
     align-items: center;
+    flex-wrap: wrap;
 }
 
 .chat-toggle {
@@ -459,6 +732,8 @@ body {
     color: var(--text-secondary);
     user-select: none;
     cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .chat-toggle input {
@@ -473,6 +748,12 @@ body {
     color: var(--text-primary);
     font-size: 12px;
     cursor: pointer;
+    flex: 1 1 420px;
+    min-width: 220px;
+    max-width: 900px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .refresh-btn {
@@ -969,21 +1250,55 @@ function switchRightTab(tabName) {
     rightTab = tabName;
     const btnOverview = document.getElementById('tab-btn-overview');
     const btnCosts = document.getElementById('tab-btn-costs');
+    const btnTraces = document.getElementById('tab-btn-traces');
     const contentOverview = document.getElementById('tab-content-overview');
     const contentCosts = document.getElementById('tab-content-costs');
+    const contentTraces = document.getElementById('tab-content-traces');
+    const pageLayout = document.querySelector('.page-layout');
 
     if (tabName === 'costs') {
         btnOverview.classList.remove('active');
         btnCosts.classList.add('active');
+        btnTraces.classList.remove('active');
         contentOverview.classList.remove('active');
         contentCosts.classList.add('active');
+        contentTraces.classList.remove('active');
+        if (pageLayout) pageLayout.classList.remove('traces-full');
+        // Stop trace polling when switching away
+        if (traceChatPollInterval) {
+            clearInterval(traceChatPollInterval);
+            traceChatPollInterval = null;
+        }
         // lazy load
         loadCostSummary();
+    } else if (tabName === 'traces') {
+        btnOverview.classList.remove('active');
+        btnCosts.classList.remove('active');
+        btnTraces.classList.add('active');
+        contentOverview.classList.remove('active');
+        contentCosts.classList.remove('active');
+        contentTraces.classList.add('active');
+        if (pageLayout) pageLayout.classList.add('traces-full');
+        // Initialize date inputs to today if empty
+        const sinceEl = document.getElementById('trace-since');
+        const untilEl = document.getElementById('trace-until');
+        const t = _todayIso();
+        if (sinceEl && !sinceEl.value) sinceEl.value = t;
+        if (untilEl && !untilEl.value) untilEl.value = t;
+        loadTracesDropdown();
     } else {
         btnOverview.classList.add('active');
         btnCosts.classList.remove('active');
+        btnTraces.classList.remove('active');
         contentOverview.classList.add('active');
         contentCosts.classList.remove('active');
+        contentTraces.classList.remove('active');
+        if (pageLayout) pageLayout.classList.remove('traces-full');
+        // Stop trace polling when switching away
+        if (traceChatPollInterval) {
+            clearInterval(traceChatPollInterval);
+            traceChatPollInterval = null;
+        }
     }
 }
 
@@ -1025,12 +1340,13 @@ function initResizeHandle() {
 }
 
 // Load available projects
-async function loadProjects() {
+async function loadProjects(preserveSelection = true) {
     try {
         const response = await fetch('/api/projects');
         const projects = await response.json();
         
         const dropdown = document.getElementById('project-dropdown');
+        const prev = dropdown ? dropdown.value : '';
         dropdown.innerHTML = '';
         
         if (projects.length === 0) {
@@ -1045,14 +1361,26 @@ async function loadProjects() {
             dropdown.appendChild(option);
         });
         
-        // Select first project
-        currentProject = projects[0];
+        // Preserve selection when possible; otherwise fall back to first project.
+        let desired = (preserveSelection ? (prev || currentProject || '') : '') || '';
+        if (desired && projects.includes(desired)) {
+            currentProject = desired;
+        } else {
+            currentProject = projects[0];
+        }
+        dropdown.value = currentProject;
+
         loadProjectData();
     } catch (error) {
         console.error('Failed to load projects:', error);
         document.getElementById('project-dropdown').innerHTML = 
             '<option value="">Error loading projects</option>';
     }
+}
+
+async function refreshProjects(showToast) {
+    // For now, just reload dropdown and preserve selection. showToast reserved for future UI.
+    await loadProjects(true);
 }
 
 // Handle project change
@@ -1063,6 +1391,14 @@ function onProjectChange() {
     // Clear buffers when switching projects
     streamedLogs = [];
     streamedMessages = [];
+    
+    // Stop trace polling when switching projects
+    if (traceChatPollInterval) {
+        clearInterval(traceChatPollInterval);
+        traceChatPollInterval = null;
+    }
+    selectedTraceId = null;
+    traceChatLastCount = 0;
     
     // Reset view modes to live
     logViewMode = 'live';
@@ -1084,6 +1420,549 @@ function loadProjectData() {
     connectChatStream();
     // Keep cost summary up to date for the selected project (even if tab not visible)
     loadCostSummary();
+    if (rightTab === 'traces') {
+        loadTracesDropdown();
+    }
+}
+
+// ---------------------------------------------------------------------
+// Tracing UI
+// ---------------------------------------------------------------------
+let selectedTraceId = null;
+let selectedLlmSpanId = null;
+let traceAdvanced = false;
+let traceChatLastCount = 0; // Track last message count for auto-append
+let traceChatPollInterval = null; // Polling interval for trace updates
+
+function _escapeHtml(s) {
+    const t = (s === null || s === undefined) ? '' : String(s);
+    return t.replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+}
+
+function _fmtTs(ts) {
+    if (!ts) return '';
+    const n = Number(ts);
+    if (!Number.isFinite(n)) return String(ts);
+    try {
+        return new Date(n * 1000).toISOString();
+    } catch {
+        return String(ts);
+    }
+}
+
+function _fmtDurMs(startTs, endTs) {
+    const s = Number(startTs);
+    if (!Number.isFinite(s)) return '';
+
+    // endTs is missing for running spans; treat as "now"
+    let e = Number(endTs);
+    if (!Number.isFinite(e) || e <= 0) {
+        e = Date.now() / 1000.0;
+    }
+
+    const ms = (e - s) * 1000.0;
+    if (!Number.isFinite(ms)) return '';
+    // Guard against negative values if clocks/data are inconsistent
+    if (ms < 0) return 'running';
+    return `${ms.toFixed(1)}ms`;
+}
+
+function _todayIso() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+}
+
+function onTraceAdvancedToggle() {
+    const cb = document.getElementById('trace-advanced-toggle');
+    traceAdvanced = !!(cb && cb.checked);
+    const adv = document.getElementById('trace-advanced');
+    if (adv) adv.style.display = traceAdvanced ? '' : 'none';
+    // Refresh current trace detail if selected
+    if (selectedTraceId) {
+        // Only replace if not already polling (to preserve auto-append behavior)
+        if (!traceChatPollInterval) {
+            traceChatLastCount = 0;
+            loadTraceChat(selectedTraceId, true);
+            startTraceChatPolling(selectedTraceId);
+        }
+        if (traceAdvanced) {
+            loadTraceAdvanced(selectedTraceId);
+        }
+    }
+}
+
+function onTraceDropdownChange() {
+    const dd = document.getElementById('trace-dropdown');
+    const rid = dd ? (dd.value || '') : '';
+    if (!rid) {
+        // Clear selection - stop polling
+        selectedTraceId = null;
+        traceChatLastCount = 0;
+        if (traceChatPollInterval) {
+            clearInterval(traceChatPollInterval);
+            traceChatPollInterval = null;
+        }
+        return;
+    }
+    selectedTraceId = rid;
+    traceChatLastCount = 0; // Reset count when selecting new trace
+    try { if (dd) dd.title = dd.options && dd.selectedIndex >= 0 ? (dd.options[dd.selectedIndex].textContent || '') : ''; } catch (e) {}
+    loadTraceChat(rid, true); // true = initial load (replace all)
+    if (traceAdvanced) {
+        loadTraceAdvanced(rid);
+    }
+    // Start polling for updates
+    startTraceChatPolling(rid);
+}
+
+async function loadTracesDropdown() {
+    if (!currentProject) return;
+    const chatEl = document.getElementById('trace-chat');
+    // Don't wipe the chat panel when refreshing the dropdown; it can leave the UI stuck
+    // in "Loading trace list…" if we don't reload the selected trace afterwards.
+    const hadSelection = !!selectedTraceId;
+    if (chatEl && !hadSelection) chatEl.innerHTML = '<span class="muted">Loading trace list…</span>';
+
+    const qEl = document.getElementById('trace-q');
+    const q = qEl ? (qEl.value || '').trim() : '';
+    const sinceEl = document.getElementById('trace-since');
+    const untilEl = document.getElementById('trace-until');
+    const since = sinceEl ? (sinceEl.value || '') : '';
+    const until = untilEl ? (untilEl.value || '') : '';
+
+    const qs = [];
+    qs.push('limit=500');
+    const ingressEl = document.getElementById('trace-ingress-only');
+    const ingressOnly = ingressEl ? !!ingressEl.checked : true;
+    qs.push(`ingress_only=${ingressOnly ? '1' : '0'}`);
+    if (q) qs.push(`q=${encodeURIComponent(q)}`);
+    if (since) qs.push(`since=${encodeURIComponent(since)}`);
+    if (until) qs.push(`until=${encodeURIComponent(until)}`);
+    const url = `/api/projects/${currentProject}/traces?${qs.join('&')}`;
+
+    try {
+        const resp = await fetch(url);
+        const traces = await resp.json();
+        renderTraceDropdown(traces || []);
+        if (!selectedTraceId && traces && traces.length > 0) {
+            selectedTraceId = traces[0].request_id;
+            const dd = document.getElementById('trace-dropdown');
+            if (dd) dd.value = selectedTraceId;
+            traceChatLastCount = 0;
+            loadTraceChat(selectedTraceId, true);
+            if (traceAdvanced) loadTraceAdvanced(selectedTraceId);
+            startTraceChatPolling(selectedTraceId);
+        } else if (selectedTraceId) {
+            // Keep selection if present in list
+            const dd = document.getElementById('trace-dropdown');
+            if (dd) dd.value = selectedTraceId;
+            // Refresh chat + advanced panes for current selection (fixes "Loading trace list…" getting stuck).
+            // Only replace if not already polling (to preserve auto-append behavior)
+            if (!traceChatPollInterval) {
+                traceChatLastCount = 0;
+                loadTraceChat(selectedTraceId, true);
+                startTraceChatPolling(selectedTraceId);
+            }
+            if (traceAdvanced) loadTraceAdvanced(selectedTraceId);
+        } else if (chatEl) {
+            chatEl.innerHTML = '<span class="muted">No traces found for the filter.</span>';
+        }
+    } catch (e) {
+        if (chatEl) chatEl.innerHTML = `<div class="error">Failed to load traces: ${_escapeHtml(e)}</div>`;
+    }
+}
+
+function renderTraceDropdown(traces) {
+    const dd = document.getElementById('trace-dropdown');
+    if (!dd) return;
+    dd.innerHTML = '<option value="">Select a request_id…</option>';
+    (traces || []).forEach(t => {
+        const rid = t.request_id || '';
+        if (!rid) return;
+        const started = t.started_at || '';
+        const agent = t.root_agent || '';
+        const status = t.status || '';
+        const opt = document.createElement('option');
+        opt.value = rid;
+        opt.textContent = `${started} | ${rid} | ${agent} | ${status}`;
+        opt.title = opt.textContent;
+        dd.appendChild(opt);
+    });
+    try {
+        dd.title = dd.options && dd.selectedIndex >= 0 ? (dd.options[dd.selectedIndex].textContent || '') : '';
+    } catch (e) {}
+}
+
+async function loadTraceAdvanced(requestId) {
+    if (!currentProject) return;
+    const detailEl = document.getElementById('trace-detail');
+    if (detailEl) detailEl.innerHTML = 'Loading trace…';
+
+    try {
+        const resp = await fetch(`/api/projects/${currentProject}/traces/${encodeURIComponent(requestId)}`);
+        const data = await resp.json();
+        renderTraceDetail(data);
+    } catch (e) {
+        if (detailEl) detailEl.innerHTML = `<div class="error">Failed to load trace: ${_escapeHtml(e)}</div>`;
+    }
+}
+
+function startTraceChatPolling(requestId) {
+    // Stop any existing polling
+    if (traceChatPollInterval) {
+        clearInterval(traceChatPollInterval);
+        traceChatPollInterval = null;
+    }
+    
+    // Poll every 2 seconds for new messages
+    traceChatPollInterval = setInterval(() => {
+        if (selectedTraceId === requestId && currentProject) {
+            loadTraceChat(requestId, false); // false = append mode
+        } else {
+            // Selection changed, stop polling
+            if (traceChatPollInterval) {
+                clearInterval(traceChatPollInterval);
+                traceChatPollInterval = null;
+            }
+        }
+    }, 2000);
+}
+
+async function loadTraceChat(requestId, replaceAll = false) {
+    if (!currentProject) return;
+    const chatEl = document.getElementById('trace-chat');
+    if (!chatEl) return;
+    
+    if (replaceAll) {
+        chatEl.innerHTML = '<span class="muted">Loading chain…</span>';
+    }
+
+    try {
+        const resp = await fetch(`/api/projects/${currentProject}/traces/${encodeURIComponent(requestId)}/llm_chat`);
+        const items = await resp.json();
+        if (replaceAll) {
+            renderTraceChat(items || []);
+        } else {
+            appendTraceChat(items || []);
+        }
+    } catch (e) {
+        if (replaceAll) {
+            chatEl.innerHTML = `<div class="error">Failed to load chain: ${_escapeHtml(e)}</div>`;
+        }
+    }
+}
+
+function _truncate(s, n) {
+    const t = (s === null || s === undefined) ? '' : String(s);
+    if (t.length <= n) return {text: t, truncated: false};
+    return {text: t.slice(0, n), truncated: true};
+}
+
+function renderTraceChat(items) {
+    const chatEl = document.getElementById('trace-chat');
+    if (!chatEl) return;
+    if (!items || items.length === 0) {
+        chatEl.innerHTML = '<span class="muted">No LLM messages found for this trace yet.</span>';
+        traceChatLastCount = 0;
+        return;
+    }
+    const blocks = [];
+    let lastAgent = null;
+    items.forEach((it, idx) => {
+        const role = (it.role || 'unknown').toLowerCase();
+        const cls = role === 'user' ? 'user' : (role === 'tool' ? 'tool' : 'assistant');
+        const content = it.content === null || it.content === undefined ? '' : String(it.content);
+        const spanId = it.span_id || '';
+        const spanName = it.span_name || '';
+        const agent = it.agent_name || '';
+        const kind = it.span_kind || '';
+        const status = it.span_status || '';
+        const startTs = it.span_start_ts || null;
+        const endTs = it.span_end_ts || null;
+        const dur = _fmtDurMs(startTs, endTs);
+        const startFmt = _fmtTs(startTs);
+        const parentKind = it.parent_kind || '';
+        const parentName = it.parent_name || '';
+        const owner = (parentKind || parentName) ? `${parentKind}${parentName ? ' ' + parentName : ''}` : '';
+        // For llm.call spans, span_name is the model name (avoid duplicating it under "Name").
+        const model = (kind === 'llm.call') ? (spanName || '') : '';
+        if (agent && agent !== lastAgent) {
+            blocks.push(
+                `<div class="trace-agent-divider"><span class="label">Agent: ${_escapeHtml(agent)}</span></div>`
+            );
+            lastAgent = agent;
+        }
+        const trunc = _truncate(content, 500);
+        const id = `trace_msg_${idx}`;
+        const body = `<div class="trace-bubble-body" id="${id}">${_escapeHtml(trunc.text)}${trunc.truncated ? '…' : ''}</div>`;
+        const expand = trunc.truncated
+            ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
+            : '';
+        blocks.push(`
+          <div class="trace-bubble ${cls}">
+            <div class="trace-bubble-header muted">
+              <span class="mono">${_escapeHtml(role)}</span>
+              ${agent ? `<span>${_escapeHtml(agent)}</span>` : ''}
+              ${owner ? `<span>${_escapeHtml(owner)}</span>` : ''}
+              ${spanId ? `<span class="mono">${_escapeHtml(spanId)}</span>` : ''}
+            </div>
+            <div class="trace-bubble-subheader">
+              <span class="k">Kind</span><span class="v mono">${_escapeHtml(kind)}</span>
+              <span class="k">Name</span><span class="v">${_escapeHtml(parentName || '')}</span>
+              ${model ? `<span class="k">Model</span><span class="v mono">${_escapeHtml(model)}</span>` : ''}
+              <span class="k">Start</span><span class="v mono">${_escapeHtml(startFmt)}</span>
+              <span class="k">Dur</span><span class="v mono">${_escapeHtml(dur)}</span>
+              <span class="k">Status</span><span class="v mono">${_escapeHtml(status)}</span>
+            </div>
+            ${body}
+            ${expand}
+          </div>
+        `);
+    });
+    // Store full items for expand/collapse
+    window.__traceChatItems = items;
+    window.__traceChatExpanded = window.__traceChatExpanded || {};
+    chatEl.innerHTML = blocks.join('');
+    traceChatLastCount = items.length;
+    scrollToBottom('trace-chat');
+}
+
+function appendTraceChat(items) {
+    const chatEl = document.getElementById('trace-chat');
+    if (!chatEl) return;
+    if (!items || items.length === 0) {
+        return; // No new messages
+    }
+    
+    // Only append new messages (after traceChatLastCount)
+    if (items.length <= traceChatLastCount) {
+        return; // No new messages
+    }
+    
+    const newItems = items.slice(traceChatLastCount);
+    if (newItems.length === 0) {
+        return;
+    }
+    
+    // Get the last agent from existing items to check if we need a divider
+    const existingItems = window.__traceChatItems || [];
+    let lastAgent = null;
+    if (existingItems.length > 0) {
+        const lastItem = existingItems[existingItems.length - 1];
+        lastAgent = lastItem.agent_name || null;
+    }
+    
+    const blocks = [];
+    newItems.forEach((it, relativeIdx) => {
+        const idx = traceChatLastCount + relativeIdx;
+        const role = (it.role || 'unknown').toLowerCase();
+        const cls = role === 'user' ? 'user' : (role === 'tool' ? 'tool' : 'assistant');
+        const content = it.content === null || it.content === undefined ? '' : String(it.content);
+        const spanId = it.span_id || '';
+        const spanName = it.span_name || '';
+        const agent = it.agent_name || '';
+        const kind = it.span_kind || '';
+        const status = it.span_status || '';
+        const startTs = it.span_start_ts || null;
+        const endTs = it.span_end_ts || null;
+        const dur = _fmtDurMs(startTs, endTs);
+        const startFmt = _fmtTs(startTs);
+        const parentKind = it.parent_kind || '';
+        const parentName = it.parent_name || '';
+        const owner = (parentKind || parentName) ? `${parentKind}${parentName ? ' ' + parentName : ''}` : '';
+        const model = (kind === 'llm.call') ? (spanName || '') : '';
+        
+        // Add agent divider if agent changed
+        if (agent && agent !== lastAgent) {
+            blocks.push(
+                `<div class="trace-agent-divider"><span class="label">Agent: ${_escapeHtml(agent)}</span></div>`
+            );
+            lastAgent = agent;
+        }
+        
+        const trunc = _truncate(content, 500);
+        const id = `trace_msg_${idx}`;
+        const body = `<div class="trace-bubble-body" id="${id}">${_escapeHtml(trunc.text)}${trunc.truncated ? '…' : ''}</div>`;
+        const expand = trunc.truncated
+            ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
+            : '';
+        blocks.push(`
+          <div class="trace-bubble ${cls}">
+            <div class="trace-bubble-header muted">
+              <span class="mono">${_escapeHtml(role)}</span>
+              ${agent ? `<span>${_escapeHtml(agent)}</span>` : ''}
+              ${owner ? `<span>${_escapeHtml(owner)}</span>` : ''}
+              ${spanId ? `<span class="mono">${_escapeHtml(spanId)}</span>` : ''}
+            </div>
+            <div class="trace-bubble-subheader">
+              <span class="k">Kind</span><span class="v mono">${_escapeHtml(kind)}</span>
+              <span class="k">Name</span><span class="v">${_escapeHtml(parentName || '')}</span>
+              ${model ? `<span class="k">Model</span><span class="v mono">${_escapeHtml(model)}</span>` : ''}
+              <span class="k">Start</span><span class="v mono">${_escapeHtml(startFmt)}</span>
+              <span class="k">Dur</span><span class="v mono">${_escapeHtml(dur)}</span>
+              <span class="k">Status</span><span class="v mono">${_escapeHtml(status)}</span>
+            </div>
+            ${body}
+            ${expand}
+          </div>
+        `);
+    });
+    
+    // Append new blocks to existing content
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = blocks.join('');
+    while (tempDiv.firstChild) {
+        chatEl.appendChild(tempDiv.firstChild);
+    }
+    
+    // Update stored items and count
+    window.__traceChatItems = items;
+    traceChatLastCount = items.length;
+    
+    // Auto-scroll to bottom
+    scrollToBottom('trace-chat');
+}
+
+function toggleTraceMsg(domId, idx) {
+    const el = document.getElementById(domId);
+    if (!el) return;
+    const items = window.__traceChatItems || [];
+    const it = items[idx];
+    if (!it) return;
+    const full = it.content === null || it.content === undefined ? '' : String(it.content);
+    window.__traceChatExpanded = window.__traceChatExpanded || {};
+    const isExpanded = !!window.__traceChatExpanded[domId];
+    if (isExpanded) {
+        const trunc = _truncate(full, 500);
+        el.textContent = trunc.text + '…';
+        window.__traceChatExpanded[domId] = false;
+        // update link text
+        const link = el.parentElement && el.parentElement.querySelector('.trace-expand');
+        if (link) link.textContent = 'Expand';
+    } else {
+        el.textContent = full;
+        window.__traceChatExpanded[domId] = true;
+        const link = el.parentElement && el.parentElement.querySelector('.trace-expand');
+        if (link) link.textContent = 'Collapse';
+    }
+}
+
+function renderTraceDetail(data) {
+    const detailEl = document.getElementById('trace-detail');
+    if (!detailEl) return;
+    const tr = data && data.trace ? data.trace : null;
+    const spans = (data && Array.isArray(data.spans)) ? data.spans : [];
+
+    if (!tr) {
+        detailEl.innerHTML = '<div class="muted">Trace not found.</div>';
+        return;
+    }
+
+    // Build parent->children map
+    const byId = {};
+    const children = {};
+    spans.forEach(s => {
+        byId[s.span_id] = s;
+        const p = s.parent_span_id || '';
+        if (!children[p]) children[p] = [];
+        children[p].push(s.span_id);
+    });
+    Object.keys(children).forEach(p => {
+        children[p].sort((a, b) => (byId[a].start_ts || 0) - (byId[b].start_ts || 0));
+    });
+
+    // Roots: parent missing or null/empty
+    const roots = spans
+        .filter(s => !s.parent_span_id || !byId[s.parent_span_id])
+        .sort((a, b) => (a.start_ts || 0) - (b.start_ts || 0))
+        .map(s => s.span_id);
+
+    function renderNode(spanId, depth) {
+        const s = byId[spanId];
+        const kids = children[spanId] || [];
+        const dur = _fmtDurMs(s.start_ts, s.end_ts);
+        const isLlm = (s.kind === 'llm.call');
+        // IMPORTANT: do not HTML-escape values used inside inline JS string literals.
+        // HTML entities are decoded by the browser before JS executes, which can reintroduce quotes and break syntax.
+        const safeSpanId = encodeURIComponent(String(spanId || ''));
+        const btn = isLlm ? `<button class="mini-btn" onclick="event.stopPropagation();selectLlmSpan('${safeSpanId}')">LLM</button>` : '';
+        const line = `
+          <div class="span-line" onclick="selectSpan('${safeSpanId}')">
+            <span class="mono">${'&nbsp;'.repeat(depth * 2)}${_escapeHtml(s.kind || '')}</span>
+            <span class="span-name">${_escapeHtml(s.name || '')}</span>
+            <span class="muted">${_escapeHtml(dur)}</span>
+            <span class="muted">${_escapeHtml(s.status || '')}</span>
+            ${btn}
+          </div>
+        `;
+        const childHtml = kids.map(k => renderNode(k, depth + 1)).join('');
+        return line + childHtml;
+    }
+
+    const treeHtml = roots.map(r => renderNode(r, 0)).join('');
+
+    detailEl.innerHTML = `
+      <div class="trace-meta">
+        <div><span class="muted">request_id</span>: <span class="mono">${_escapeHtml(tr.request_id || '')}</span></div>
+        <div class="muted">root_agent=${_escapeHtml(tr.root_agent || '')} root_kind=${_escapeHtml(tr.root_kind || '')} status=${_escapeHtml(tr.status || '')} started_at=${_escapeHtml(tr.started_at || '')}</div>
+      </div>
+      <div>
+        <div class="trace-subtitle">Span tree</div>
+        <div class="span-tree">${treeHtml || '<div class="muted">No spans.</div>'}</div>
+      </div>
+    `;
+}
+
+async function selectLlmSpan(spanId) {
+    if (!currentProject) return;
+    // spanId may be URL-encoded when coming from inline onclick handlers.
+    try { spanId = decodeURIComponent(String(spanId || '')); } catch { spanId = String(spanId || ''); }
+    selectedLlmSpanId = spanId;
+    // Stop polling when viewing a specific span (different view mode)
+    if (traceChatPollInterval) {
+        clearInterval(traceChatPollInterval);
+        traceChatPollInterval = null;
+    }
+    traceChatLastCount = 0;
+    const llmEl = document.getElementById('trace-chat');
+    if (!llmEl) return;
+    llmEl.innerHTML = 'Loading LLM messages…';
+    try {
+        const url = '/api/projects/' + encodeURIComponent(currentProject) + '/spans/' + encodeURIComponent(spanId) + '/llm_messages';
+        const resp = await fetch(url);
+        const msgs = await resp.json();
+        const out = [];
+        for (const m of (msgs || [])) {
+            const role = (m && m.role) ? String(m.role) : '';
+            const nm = (m && m.name) ? (' (' + String(m.name) + ')') : '';
+            const content = (m && (m.content !== null && m.content !== undefined)) ? String(m.content) : '';
+            out.push('=== ' + role + nm + ' ===\\n' + content + '\\n');
+        }
+        const joined = out.join('\\n');
+        llmEl.innerHTML =
+            '<div class="trace-subtitle">LLM messages for span <span class="mono">' +
+            _escapeHtml(spanId) +
+            '</span></div><pre class="mono pre-wrap">' +
+            _escapeHtml(joined) +
+            '</pre>';
+        scrollToBottom('trace-chat');
+    } catch (e) {
+        llmEl.innerHTML = '<div class="error">Failed to load LLM messages: ' + _escapeHtml(e) + '</div>';
+    }
+}
+
+function selectSpan(spanId) {
+    // spanId may be URL-encoded from inline onclick handlers.
+    try { spanId = decodeURIComponent(String(spanId || '')); } catch { spanId = String(spanId || ''); }
+    // currently a no-op placeholder (could be used to highlight in timeline/tree)
+    return;
 }
 
 // Load agents for current project
@@ -1891,3 +2770,4 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 '''
+

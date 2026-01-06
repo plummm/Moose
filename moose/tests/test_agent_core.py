@@ -6,13 +6,13 @@ import tempfile
 import shutil
 import json
 from pathlib import Path
-from framework.agent_core import (
+from moose.framework.agent_core import (
     AgentLoader,
     ContainerManager,
     DockerfileGenerator,
     AgentRegistry
 )
-from framework.logging import init_core_logger, set_global_debug
+from moose.framework.logging import init_core_logger, set_global_debug
 
 
 class TestAgentCore:

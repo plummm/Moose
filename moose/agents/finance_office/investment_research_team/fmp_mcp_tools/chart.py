@@ -19,7 +19,9 @@ class ChartMCPTools(FMPMCPTools):
         return str(symbol).strip().upper()
 
     @mcp_tool()
-    def get_stock_price_volume_data(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def get_stock_price_volume_data(
+        self, symbol: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Retrieves end-of-day historical price and volume data for a symbol.
 
@@ -48,9 +50,10 @@ class ChartMCPTools(FMPMCPTools):
         - GET `https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD`
         Reference: [FMP stable historical-price-eod/full endpoint](https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=AAPL&apikey=ixF8ja8u0jxXUkWEGL58R9OGXH9MySq3)
         """
-        meta = {"tool": "get_stock_price_volume_data", "symbol": symbol, "from_date": from_date, "to_date": to_date}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = self._normalize_symbol(str(symbol or ticker or ""))
+        meta = {"tool": "get_stock_price_volume_data", "symbol": sym, "from_date": from_date, "to_date": to_date}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if from_date:
             err = self._validate_iso_date(from_date, "from_date")
             if err:
@@ -60,7 +63,6 @@ class ChartMCPTools(FMPMCPTools):
             if err:
                 return err
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {"symbol": sym}
         if from_date:
             params["from"] = str(from_date).strip()
@@ -84,7 +86,9 @@ class ChartMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_historical_chart_5min(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def get_historical_chart_5min(
+        self, symbol: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Retrieves 5-minute interval historical chart data for a symbol.
 
@@ -112,10 +116,12 @@ class ChartMCPTools(FMPMCPTools):
         Data source: FMP Stable 5 Min Interval Stock Chart API
         - GET `https://financialmodelingprep.com/stable/historical-chart/5min?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD`
         """
-        return self._get_historical_chart_interval(symbol=symbol, interval="5min", from_date=from_date, to_date=to_date)
+        return self._get_historical_chart_interval(symbol=symbol, ticker=ticker, interval="5min", from_date=from_date, to_date=to_date)
 
     @mcp_tool()
-    def get_historical_chart_15min(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def get_historical_chart_15min(
+        self, symbol: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Retrieves 15-minute interval historical chart data for a symbol.
 
@@ -143,10 +149,12 @@ class ChartMCPTools(FMPMCPTools):
         Data source: FMP Stable 15 Min Interval Stock Chart API
         - GET `https://financialmodelingprep.com/stable/historical-chart/15min?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD`
         """
-        return self._get_historical_chart_interval(symbol=symbol, interval="15min", from_date=from_date, to_date=to_date)
+        return self._get_historical_chart_interval(symbol=symbol, ticker=ticker, interval="15min", from_date=from_date, to_date=to_date)
 
     @mcp_tool()
-    def get_historical_chart_30min(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def get_historical_chart_30min(
+        self, symbol: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Retrieves 30-minute interval historical chart data for a symbol.
 
@@ -174,10 +182,12 @@ class ChartMCPTools(FMPMCPTools):
         Data source: FMP Stable 30 Min Interval Stock Chart API
         - GET `https://financialmodelingprep.com/stable/historical-chart/30min?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD`
         """
-        return self._get_historical_chart_interval(symbol=symbol, interval="30min", from_date=from_date, to_date=to_date)
+        return self._get_historical_chart_interval(symbol=symbol, ticker=ticker, interval="30min", from_date=from_date, to_date=to_date)
 
     @mcp_tool()
-    def get_historical_chart_1hour(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def get_historical_chart_1hour(
+        self, symbol: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Retrieves 1-hour interval historical chart data for a symbol.
 
@@ -205,10 +215,12 @@ class ChartMCPTools(FMPMCPTools):
         Data source: FMP Stable 1 Hour Interval Stock Chart API
         - GET `https://financialmodelingprep.com/stable/historical-chart/1hour?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD`
         """
-        return self._get_historical_chart_interval(symbol=symbol, interval="1hour", from_date=from_date, to_date=to_date)
+        return self._get_historical_chart_interval(symbol=symbol, ticker=ticker, interval="1hour", from_date=from_date, to_date=to_date)
 
     @mcp_tool()
-    def get_historical_chart_4hour(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def get_historical_chart_4hour(
+        self, symbol: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Retrieves 4-hour interval historical chart data for a symbol.
 
@@ -236,7 +248,7 @@ class ChartMCPTools(FMPMCPTools):
         Data source: FMP Stable 4 Hour Interval Stock Chart API
         - GET `https://financialmodelingprep.com/stable/historical-chart/4hour?symbol=...&from=YYYY-MM-DD&to=YYYY-MM-DD`
         """
-        return self._get_historical_chart_interval(symbol=symbol, interval="4hour", from_date=from_date, to_date=to_date)
+        return self._get_historical_chart_interval(symbol=symbol, ticker=ticker, interval="4hour", from_date=from_date, to_date=to_date)
 
     def _validate_iso_date(self, value: str, field: str) -> Optional[dict]:
         v = str(value).strip()
@@ -247,10 +259,19 @@ class ChartMCPTools(FMPMCPTools):
             return mcp_envelope_err(f"{field} must be in YYYY-MM-DD format", meta={"tool": "_validate_iso_date", "field": field})
         return None
 
-    def _get_historical_chart_interval(self, symbol: str, interval: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
-        meta = {"tool": f"get_historical_chart_{interval}", "symbol": symbol, "interval": interval, "from_date": from_date, "to_date": to_date}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+    def _get_historical_chart_interval(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
+        interval: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> dict:
+        sym = self._normalize_symbol(str(symbol or ticker or ""))
+        meta = {"tool": f"get_historical_chart_{interval}", "symbol": sym, "interval": interval, "from_date": from_date, "to_date": to_date}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if from_date:
             err = self._validate_iso_date(from_date, "from_date")
             if err:
@@ -260,7 +281,6 @@ class ChartMCPTools(FMPMCPTools):
             if err:
                 return err
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {"symbol": sym}
         if from_date:
             params["from"] = str(from_date).strip()

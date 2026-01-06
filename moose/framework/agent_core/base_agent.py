@@ -12,11 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
 from abc import abstractmethod
-try:
-    from moose.framework.logging import get_agent_logger, set_project, set_global_debug
-except ImportError:
-    # Fallback for development mode
-    from framework.logging import get_agent_logger, set_project, set_global_debug
+from moose.framework.logging import get_agent_logger, set_project, set_global_debug
 
 try:
     from flask import Flask, request, jsonify, Response, stream_with_context
@@ -28,12 +24,12 @@ except ImportError:
 try:
     from moose.framework.agent_core.agent_web_ui import generate_homepage_html, get_endpoints_list
 except ImportError:
-    # Fallback for development mode
-    try:
-        from framework.agent_core.agent_web_ui import generate_homepage_html, get_endpoints_list
-    except ImportError:
-        generate_homepage_html = None
-        get_endpoints_list = None
+    generate_homepage_html = None
+    get_endpoints_list = None
+
+from moose.framework.logging.tracing import ensure_trace, span as trace_span
+
+from moose.framework.logging import get_project_id
 
 
 class BaseAgent():
@@ -495,12 +491,41 @@ class BaseAgent():
                 unique_name = f"endpoint_{safe_name}_{ep_method.lower()}"
                 
                 def endpoint_wrapper():
+                    inbound_request_id = (request.headers.get("X-Moose-Request-Id") or "").strip()
+                    inbound_parent_span_id = (request.headers.get("X-Moose-Parent-Span-Id") or "").strip() or None
+                    body_rid = None
+                    try:
+                        j = request.get_json(silent=True) or {}
+                        if isinstance(j, dict):
+                            body_rid = (j.get("request_id") or j.get("requestId") or "").strip() or None
+                    except Exception:
+                        body_rid = None
+
+                    ctx = ensure_trace(
+                        request_id=inbound_request_id or body_rid,
+                        project_id=get_project_id(),
+                        agent_name=self.name,
+                    )
+
+                    with trace_span(
+                        kind="ingress.http",
+                        name=f"{ep_method} {ep_path}",
+                        parent_span_id=inbound_parent_span_id,
+                        attrs={
+                            "http.method": ep_method,
+                            "http.path": ep_path,
+                            "agent.name": self.name,
+                        },
+                        request_id=ctx.request_id,
+                        project_id=ctx.project_id,
+                        agent_name=ctx.agent_name,
+                    ):
                     # Check auth if required
-                    if requires_auth and not self._check_auth(request):
-                        return jsonify({
-                            "status": "error",
-                            "error": "Unauthorized"
-                        }), 401
+                        if requires_auth and not self._check_auth(request):
+                            return jsonify({
+                                "status": "error",
+                                "error": "Unauthorized"
+                            }), 401
                     
                     # Call handler with request data
                     try:
@@ -536,12 +561,41 @@ class BaseAgent():
                         }), 500
                 
                 async def endpoint_wrapper_async():
+                    inbound_request_id = (request.headers.get("X-Moose-Request-Id") or "").strip()
+                    inbound_parent_span_id = (request.headers.get("X-Moose-Parent-Span-Id") or "").strip() or None
+                    body_rid = None
+                    try:
+                        j = request.get_json(silent=True) or {}
+                        if isinstance(j, dict):
+                            body_rid = (j.get("request_id") or j.get("requestId") or "").strip() or None
+                    except Exception:
+                        body_rid = None
+
+                    ctx = ensure_trace(
+                        request_id=inbound_request_id or body_rid,
+                        project_id=get_project_id(),
+                        agent_name=self.name,
+                    )
+
+                    with trace_span(
+                        kind="ingress.http",
+                        name=f"{ep_method} {ep_path}",
+                        parent_span_id=inbound_parent_span_id,
+                        attrs={
+                            "http.method": ep_method,
+                            "http.path": ep_path,
+                            "agent.name": self.name,
+                        },
+                        request_id=ctx.request_id,
+                        project_id=ctx.project_id,
+                        agent_name=ctx.agent_name,
+                    ):
                     # Check auth if required
-                    if requires_auth and not self._check_auth(request):
-                        return jsonify({
-                            "status": "error",
-                            "error": "Unauthorized"
-                        }), 401
+                        if requires_auth and not self._check_auth(request):
+                            return jsonify({
+                                "status": "error",
+                                "error": "Unauthorized"
+                            }), 401
                     
                     # Call handler with request data
                     try:

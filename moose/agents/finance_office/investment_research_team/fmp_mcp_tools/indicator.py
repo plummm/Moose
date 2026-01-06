@@ -42,23 +42,25 @@ class IndicatorMCPTools(FMPMCPTools):
         *,
         indicator_path: str,
         tool_name: str,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        text_label: str,
+        symbol: Optional[str] = None,
+        ticker: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
-        text_label: str,
     ) -> dict:
+        sym = self._normalize_symbol(str(symbol or ticker or ""))
         meta = {
             "tool": tool_name,
-            "symbol": symbol,
+            "symbol": sym,
             "period_length": period_length,
             "timeframe": timeframe,
             "from_date": from_date,
             "to_date": to_date,
         }
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if not isinstance(period_length, int) or period_length < 1:
             return mcp_envelope_err("period_length must be a positive integer", meta=meta)
         if not timeframe:
@@ -72,7 +74,6 @@ class IndicatorMCPTools(FMPMCPTools):
             if derr:
                 return mcp_envelope_err(derr, meta=meta)
 
-        sym = self._normalize_symbol(symbol)
         params: Dict[str, Any] = {
             "symbol": sym,
             "periodLength": period_length,
@@ -101,11 +102,13 @@ class IndicatorMCPTools(FMPMCPTools):
     @mcp_tool()
     def get_sma(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Simple Moving Average (SMA) values for a symbol (FMP Stable).
@@ -143,22 +146,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/sma",
             tool_name="get_sma",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="SMA",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="SMA",
         )
 
     @mcp_tool()
     def get_ema(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Exponential Moving Average (EMA) values for a symbol (FMP Stable).
@@ -196,22 +202,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/ema",
             tool_name="get_ema",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="EMA",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="EMA",
         )
 
     @mcp_tool()
     def get_wma(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Weighted Moving Average (WMA) values for a symbol (FMP Stable).
@@ -249,22 +258,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/wma",
             tool_name="get_wma",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="WMA",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="WMA",
         )
 
     @mcp_tool()
     def get_dema(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Double Exponential Moving Average (DEMA) values for a symbol (FMP Stable).
@@ -302,22 +314,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/dema",
             tool_name="get_dema",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="DEMA",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="DEMA",
         )
 
     @mcp_tool()
     def get_tema(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Triple Exponential Moving Average (TEMA) values for a symbol (FMP Stable).
@@ -355,22 +370,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/tema",
             tool_name="get_tema",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="TEMA",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="TEMA",
         )
 
     @mcp_tool()
     def get_rsi(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Relative Strength Index (RSI) values for a symbol (FMP Stable).
@@ -408,22 +426,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/rsi",
             tool_name="get_rsi",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="RSI",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="RSI",
         )
 
     @mcp_tool()
     def get_standard_deviation(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Standard Deviation values for a symbol (FMP Stable).
@@ -461,22 +482,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/standarddeviation",
             tool_name="get_standard_deviation",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="standard deviation",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="standard deviation",
         )
 
     @mcp_tool()
     def get_williams(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Williams %R values for a symbol (FMP Stable).
@@ -514,22 +538,25 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/williams",
             tool_name="get_williams",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="Williams %R",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="Williams %R",
         )
 
     @mcp_tool()
     def get_adx(
         self,
-        symbol: str,
         period_length: int,
         timeframe: str,
+        symbol: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        ticker: Optional[str] = None,
     ) -> dict:
         """
         Retrieve Average Directional Index (ADX) values for a symbol (FMP Stable).
@@ -567,12 +594,13 @@ class IndicatorMCPTools(FMPMCPTools):
         return self._technical_indicator(
             indicator_path="technical-indicators/adx",
             tool_name="get_adx",
-            symbol=symbol,
             period_length=period_length,
             timeframe=timeframe,
+            text_label="ADX",
+            symbol=symbol,
+            ticker=ticker,
             from_date=from_date,
             to_date=to_date,
-            text_label="ADX",
         )
 
 

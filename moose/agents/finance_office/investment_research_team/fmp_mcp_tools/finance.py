@@ -130,7 +130,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_company_metrics_ttm(self, symbol: str) -> dict:
+    def get_company_metrics_ttm(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches TTM key metrics and computes a best-effort `summary` from the first returned record.
 
@@ -157,11 +157,12 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Key Metrics TTM API
         - GET `https://financialmodelingprep.com/stable/key-metrics-ttm?symbol=...`
         """
-        meta = {"tool": "get_company_metrics_ttm", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_company_metrics_ttm", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         raw = self._request_json("key-metrics-ttm", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -172,7 +173,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        summary: dict = {"symbol": str(symbol).upper(), "ttm": True}
+        summary: dict = {"symbol": sym, "ttm": True}
         if isinstance(rec, dict) and "error" not in rec:
             for k in (
                 "date",
@@ -378,7 +379,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_company_finance_ttm(self, symbol: str) -> dict:
+    def get_company_finance_ttm(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches TTM financial ratios and groups common fields into buckets as a best-effort `summary` built from the
           first returned record.
@@ -406,11 +407,12 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Financial Ratios TTM API
         - GET `https://financialmodelingprep.com/stable/ratios-ttm?symbol=...`
         """
-        meta = {"tool": "get_company_finance_ttm", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_company_finance_ttm", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         raw = self._request_json("ratios-ttm", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -422,7 +424,7 @@ class FinanceMCPTools(FMPMCPTools):
 
         rec = self._coerce_first_record(raw)
         summary: dict = {
-            "symbol": str(symbol).upper(),
+            "symbol": sym,
             "ttm": True,
             "profitability": {},
             "liquidity": {},
@@ -528,7 +530,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_financial_scores(self, symbol: str) -> dict:
+    def get_financial_scores(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches financial “health” scores (e.g., Altman Z-Score, Piotroski Score) for a company.
 
@@ -555,11 +557,12 @@ class FinanceMCPTools(FMPMCPTools):
         - GET `https://financialmodelingprep.com/stable/financial-scores?symbol=...`
         Reference: [FMP stable financial-scores endpoint](https://financialmodelingprep.com/stable/financial-scores?symbol=AAPL)
         """
-        meta = {"tool": "get_financial_scores", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_financial_scores", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         raw = self._request_json("financial-scores", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -570,7 +573,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: financial scores"
+        tf = f"{sym}: financial scores"
         if isinstance(rec, dict):
             az = rec.get("altmanZScore")
             ps = rec.get("piotroskiScore")
@@ -581,7 +584,7 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_owner_earnings(self, symbol: str, limit: Optional[int] = None) -> dict:
+    def get_owner_earnings(self, symbol: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches “owner earnings” metrics (including owner earnings per share) across periods.
 
@@ -609,13 +612,14 @@ class FinanceMCPTools(FMPMCPTools):
         - GET `https://financialmodelingprep.com/stable/owner-earnings?symbol=...`
         Reference: [FMP stable owner-earnings endpoint](https://financialmodelingprep.com/stable/owner-earnings?symbol=AAPL)
         """
-        meta = {"tool": "get_owner_earnings", "symbol": symbol, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_owner_earnings", "symbol": sym, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if limit is not None:
             params["limit"] = limit
         raw = self._request_json("owner-earnings", params=params)
@@ -628,7 +632,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: owner earnings"
+        tf = f"{sym}: owner earnings"
         if isinstance(rec, dict):
             dt = rec.get("date")
             oe = rec.get("ownersEarnings")
@@ -642,7 +646,9 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_enterprise_values(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_enterprise_values(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches enterprise value and its components (market cap, cash, total debt) across dates.
 
@@ -671,16 +677,17 @@ class FinanceMCPTools(FMPMCPTools):
         - GET `https://financialmodelingprep.com/stable/enterprise-values?symbol=...`
         Reference: [FMP stable enterprise-values endpoint](https://financialmodelingprep.com/stable/enterprise-values?symbol=AAPL)
         """
-        meta = {"tool": "get_enterprise_values", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_enterprise_values", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -695,7 +702,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: enterprise values"
+        tf = f"{sym}: enterprise values"
         if isinstance(rec, dict):
             dt = rec.get("date")
             ev = rec.get("enterpriseValue")
@@ -709,7 +716,14 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_income_statement(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_income_statement(
+        self,
+        symbol: Optional[str] = None,
+        period: Optional[str] = None,
+        limit: Optional[int] = None,
+        *,
+        ticker: Optional[str] = None,
+    ) -> dict:
         """
         Fetches income statement line items across periods (reported financials).
 
@@ -738,16 +752,18 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Income Statement API
         - GET `https://financialmodelingprep.com/stable/income-statement?symbol=...&limit=...&period=...`
         """
-        meta = {"tool": "get_income_statement", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        # Be tolerant to LLM tool calls that use `ticker` instead of `symbol`.
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_income_statement", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -763,7 +779,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        summary: dict = {"symbol": str(symbol).upper(), "period": period}
+        summary: dict = {"symbol": sym, "period": period}
         if isinstance(rec, dict) and "error" not in rec:
             for k in (
                 "date",
@@ -806,7 +822,9 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_balance_sheet_statement(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_balance_sheet_statement(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches balance sheet statement line items across periods (assets, liabilities, and equity).
 
@@ -835,16 +853,17 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Balance Sheet Statement API
         - GET `https://financialmodelingprep.com/stable/balance-sheet-statement?symbol=...&limit=...&period=...`
         """
-        meta = {"tool": "get_balance_sheet_statement", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_balance_sheet_statement", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -860,7 +879,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        summary: dict = {"symbol": str(symbol).upper(), "period": period}
+        summary: dict = {"symbol": sym, "period": period}
         if isinstance(rec, dict) and "error" not in rec:
             for k in (
                 "date",
@@ -906,7 +925,9 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_cash_flow_statement(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_cash_flow_statement(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches cash flow statement line items across periods (operating, investing, and financing cash flows).
 
@@ -935,16 +956,17 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Cash Flow Statement API
         - GET `https://financialmodelingprep.com/stable/cash-flow-statement?symbol=...&limit=...&period=...`
         """
-        meta = {"tool": "get_cash_flow_statement", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_cash_flow_statement", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -960,7 +982,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        summary: dict = {"symbol": str(symbol).upper(), "period": period}
+        summary: dict = {"symbol": sym, "period": period}
         if isinstance(rec, dict) and "error" not in rec:
             for k in (
                 "date",
@@ -1002,7 +1024,9 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_financial_reports_json(self, symbol: str, year: int, period: str = "FY") -> dict:
+    def get_financial_reports_json(
+        self, year: int, period: str = "FY", symbol: Optional[str] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches comprehensive annual report financials in JSON form (Form 10-K style tables/sections).
 
@@ -1031,16 +1055,17 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Financial Reports JSON API
         - GET `https://financialmodelingprep.com/stable/financial-reports-json?symbol=...&year=...&period=...`
         """
-        meta = {"tool": "get_financial_reports_json", "symbol": symbol, "year": year, "period": period}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_financial_reports_json", "symbol": sym, "year": year, "period": period}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if not isinstance(year, int) or year < 1900:
             return mcp_envelope_err("year must be a valid integer (e.g., 2022)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
 
-        params = {"symbol": str(symbol).upper(), "year": year, "period": str(period).strip()}
+        params = {"symbol": sym, "year": year, "period": str(period).strip()}
         raw = self._request_json("financial-reports-json", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -1059,14 +1084,16 @@ class FinanceMCPTools(FMPMCPTools):
             except Exception:
                 section_count = None
 
-        tf = f"{str(symbol).upper()}: financial reports json {year} (period={str(period).strip()})"
+        tf = f"{sym}: financial reports json {year} (period={str(period).strip()})"
         if section_count is not None:
             tf += f"; sections={section_count}"
 
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_income_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_income_statement_growth(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches growth rates for income statement line items (e.g., revenue growth, net income growth) across periods.
 
@@ -1095,16 +1122,17 @@ class FinanceMCPTools(FMPMCPTools):
         - GET `https://financialmodelingprep.com/stable/income-statement-growth?symbol=...`
         Reference: [FMP stable income-statement-growth endpoint](https://financialmodelingprep.com/stable/income-statement-growth?symbol=AAPL)
         """
-        meta = {"tool": "get_income_statement_growth", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_income_statement_growth", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -1119,7 +1147,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: income statement growth"
+        tf = f"{sym}: income statement growth"
         if isinstance(rec, dict):
             dt = rec.get("date")
             gr = rec.get("growthRevenue")
@@ -1133,7 +1161,9 @@ class FinanceMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_balance_sheet_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_balance_sheet_statement_growth(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches growth rates for balance sheet line items across periods.
 
@@ -1161,16 +1191,17 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Balance Sheet Statement Growth API
         - GET `https://financialmodelingprep.com/stable/balance-sheet-statement-growth?symbol=...`
         """
-        meta = {"tool": "get_balance_sheet_statement_growth", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_balance_sheet_statement_growth", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -1185,13 +1216,15 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: balance sheet growth"
+        tf = f"{sym}: balance sheet growth"
         if isinstance(rec, dict) and rec.get("date"):
             tf += f" as of {rec.get('date')}"
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_cash_flow_statement_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_cash_flow_statement_growth(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches growth rates for cash flow statement line items across periods.
 
@@ -1219,16 +1252,17 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Cashflow Statement Growth API
         - GET `https://financialmodelingprep.com/stable/cash-flow-statement-growth?symbol=...`
         """
-        meta = {"tool": "get_cash_flow_statement_growth", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_cash_flow_statement_growth", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -1243,13 +1277,15 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: cash flow growth"
+        tf = f"{sym}: cash flow growth"
         if isinstance(rec, dict) and rec.get("date"):
             tf += f" as of {rec.get('date')}"
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_financial_growth(self, symbol: str, period: Optional[str] = None, limit: Optional[int] = None) -> dict:
+    def get_financial_growth(
+        self, symbol: Optional[str] = None, period: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches growth rates across financial statements (aggregated growth metrics) across periods.
 
@@ -1277,16 +1313,17 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Financial Statement Growth API
         - GET `https://financialmodelingprep.com/stable/financial-growth?symbol=...`
         """
-        meta = {"tool": "get_financial_growth", "symbol": symbol, "period": period, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_financial_growth", "symbol": sym, "period": period, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         perr = self._validate_growth_period(period)
         if perr:
             return perr
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         if period is not None:
             params["period"] = str(period).strip()
         if limit is not None:
@@ -1301,13 +1338,13 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: financial growth"
+        tf = f"{sym}: financial growth"
         if isinstance(rec, dict) and rec.get("date"):
             tf += f" as of {rec.get('date')}"
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_revenue_product_segmentation(self, symbol: str) -> dict:
+    def get_revenue_product_segmentation(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches annual revenue breakdown by product line (product segmentation).
 
@@ -1333,11 +1370,12 @@ class FinanceMCPTools(FMPMCPTools):
         Data source: FMP Stable Revenue Product Segmentation API
         - GET `https://financialmodelingprep.com/stable/revenue-product-segmentation?symbol=...`
         """
-        meta = {"tool": "get_revenue_product_segmentation", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_revenue_product_segmentation", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         raw = self._request_json("revenue-product-segmentation", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -1348,7 +1386,7 @@ class FinanceMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        summary: dict = {"symbol": str(symbol).upper()}
+        summary: dict = {"symbol": sym}
         seg_keys: list[str] = []
         if isinstance(rec, dict) and "error" not in rec:
             for k in ("date", "fiscalYear", "period", "reportedCurrency"):

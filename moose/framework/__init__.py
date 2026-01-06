@@ -2,13 +2,8 @@
 
 __version__ = "0.1.0"
 
-try:
-    from moose.framework.agent_core import *
-    from moose.framework.llm_core import *
-except ImportError:
-    # Fallback for development mode
-    from framework.agent_core import *
-    from framework.llm_core import *
+from moose.framework.agent_core import *
+from moose.framework.llm_core import *
 
 __all__ = [
     '__version__',

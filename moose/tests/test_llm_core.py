@@ -4,9 +4,9 @@ import os
 import pytest
 import tempfile
 from pathlib import Path
-from framework.llm_core import LLMClient, Message, MessageRole, LLMResponse
-from framework.llm_core.cost_tracker import CostTracker
-from framework.logging import init_core_logger, set_global_debug
+from moose.framework.llm_core import LLMClient, Message, MessageRole, LLMResponse
+from moose.framework.llm_core.cost_tracker import CostTracker
+from moose.framework.logging import init_core_logger, set_global_debug
 
 
 pytestmark = pytest.mark.llm
@@ -265,7 +265,7 @@ class TestLLMCore:
     def test_pdf_text_extraction(self):
         """Test PDF text extraction using PyPDFLoader."""
         try:
-            from framework.llm_core.pdf_utils import extract_pdf_text
+            from moose.framework.llm_core.pdf_utils import extract_pdf_text
         except ImportError:
             pytest.skip("langchain-community not installed")
         
@@ -344,7 +344,7 @@ startxref
     def test_pdf_extraction_with_llm(self):
         """Test using PDF text extraction with LLM."""
         try:
-            from framework.llm_core.pdf_utils import extract_pdf_text
+            from moose.framework.llm_core.pdf_utils import extract_pdf_text
         except ImportError:
             pytest.skip("langchain-community not installed")
         
@@ -436,7 +436,7 @@ startxref
     def test_langchain_integration(self):
         """Test LangChain integration with native provider classes."""
         try:
-            from framework.llm_core.langchain_integration import LangChainLLM
+            from moose.framework.llm_core.langchain_integration import LangChainLLM
         except ImportError:
             pytest.skip("LangChain not installed")
         
@@ -469,7 +469,7 @@ startxref
     def test_multiple_models_via_langchain(self):
         """Test that multiple models work via LangChain (OpenAI, Claude, Gemini)."""
         try:
-            from framework.llm_core.langchain_integration import LangChainLLM
+            from moose.framework.llm_core.langchain_integration import LangChainLLM
         except ImportError:
             pytest.skip("LangChain not installed")
         
@@ -509,7 +509,7 @@ startxref
     def test_llmclient_uses_langchain(self):
         """Test that LLMClient uses LangChain."""
         try:
-            from framework.llm_core.langchain_integration import LangChainLLM
+            from moose.framework.llm_core.langchain_integration import LangChainLLM
         except ImportError:
             pytest.skip("LangChain not installed")
         
@@ -532,7 +532,7 @@ startxref
     def test_cost_calculation_from_config(self):
         """Test that cost is calculated from config when not in response."""
         try:
-            from framework.llm_core.config import ModelConfig
+            from moose.framework.llm_core.config import ModelConfig
         except ImportError:
             pytest.skip("Config not available")
         

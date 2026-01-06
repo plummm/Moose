@@ -171,7 +171,7 @@ class InsiderMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_insider_trade_statistics(self, symbol: str) -> dict:
+    def get_insider_trade_statistics(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches insider trading statistics for a symbol (by year/quarter).
 
@@ -201,11 +201,12 @@ class InsiderMCPTools(FMPMCPTools):
         Data source: FMP Stable Insider Trade Statistics API
         - GET `https://financialmodelingprep.com/stable/insider-trading/statistics?symbol=...`
         """
-        meta = {"tool": "get_insider_trade_statistics", "symbol": symbol}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_insider_trade_statistics", "symbol": sym}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
-        params = {"symbol": str(symbol).upper()}
+        params = {"symbol": sym}
         raw = self._request_json("insider-trading/statistics", params=params)
         if isinstance(raw, dict) and "error" in raw:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else None
@@ -216,7 +217,7 @@ class InsiderMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: insider trade statistics"
+        tf = f"{sym}: insider trade statistics"
         if isinstance(rec, dict):
             y = rec.get("year")
             q = rec.get("quarter")
@@ -234,7 +235,9 @@ class InsiderMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_acquisition_of_beneficial_ownership(self, symbol: str, limit: Optional[int] = None) -> dict:
+    def get_acquisition_of_beneficial_ownership(
+        self, symbol: Optional[str] = None, limit: Optional[int] = None, *, ticker: Optional[str] = None
+    ) -> dict:
         """
         Fetches “acquisition of beneficial ownership” filings for a symbol.
 
@@ -265,13 +268,14 @@ class InsiderMCPTools(FMPMCPTools):
         Data source: FMP Stable Acquisition Ownership API
         - GET `https://financialmodelingprep.com/stable/acquisition-of-beneficial-ownership?symbol=...&limit=...`
         """
-        meta = {"tool": "get_acquisition_of_beneficial_ownership", "symbol": symbol, "limit": limit}
-        if not symbol:
-            return mcp_envelope_err("symbol is required", meta=meta)
+        sym = str(symbol or ticker or "").strip().upper()
+        meta = {"tool": "get_acquisition_of_beneficial_ownership", "symbol": sym, "limit": limit}
+        if not sym:
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         if limit is not None and (not isinstance(limit, int) or limit < 1):
             return mcp_envelope_err("limit must be a positive integer", meta=meta)
 
-        params: Dict[str, Any] = {"symbol": str(symbol).upper()}
+        params: Dict[str, Any] = {"symbol": sym}
         if limit is not None:
             params["limit"] = limit
 
@@ -285,7 +289,7 @@ class InsiderMCPTools(FMPMCPTools):
             )
 
         rec = self._coerce_first_record(raw)
-        tf = f"{str(symbol).upper()}: acquisition of beneficial ownership"
+        tf = f"{sym}: acquisition of beneficial ownership"
         if isinstance(raw, list):
             tf += f"; records={len(raw)}"
         if isinstance(rec, dict):

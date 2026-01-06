@@ -7,20 +7,16 @@ This module provides a unified interface to LangChain using native provider clas
 """
 
 import asyncio
+import json
 import os
+import random
 import threading
+import time
 from typing import List, Optional, Dict, Any, Union, Iterator, Tuple
-try:
-    from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
-    from moose.framework.llm_core.providers import LLMProvider, get_provider
-    from moose.framework.llm_core.config import ModelConfig
-    from moose.framework.logging import get_core_logger, get_llm_logger
-except ImportError:
-    # Fallback for development mode
-    from framework.llm_core.models import Message, MessageRole, LLMResponse
-    from framework.llm_core.providers import LLMProvider, get_provider
-    from framework.llm_core.config import ModelConfig
-    from framework.logging import get_core_logger, get_llm_logger
+from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
+from moose.framework.llm_core.providers import LLMProvider, get_provider
+from moose.framework.llm_core.config import ModelConfig
+from moose.framework.logging import get_core_logger, get_llm_logger
 
 try:
     from langchain_openai import ChatOpenAI
@@ -111,11 +107,82 @@ class LangChainLLM:
         self._init_temperature = float(temperature)
         self._init_max_tokens = max_tokens
         self._init_timeout = timeout
+
+        # Retry configuration for quota/rate-limit errors (not passed through to LangChain providers).
+        # Defaults are intentionally conservative to avoid long stalls.
+        def _env_int(name: str, default: int) -> int:
+            try:
+                v = str(os.getenv(name, "")).strip()
+                return int(v) if v else int(default)
+            except Exception:
+                return int(default)
+
+        def _env_float(name: str, default: float) -> float:
+            try:
+                v = str(os.getenv(name, "")).strip()
+                return float(v) if v else float(default)
+            except Exception:
+                return float(default)
+
+        self._retry_429_max_attempts = int(kwargs.pop("retry_429_max_attempts", _env_int("MOOSE_LLM_RETRY_429_MAX_ATTEMPTS", 2)))
+        self._retry_429_base_seconds = float(kwargs.pop("retry_429_base_seconds", _env_float("MOOSE_LLM_RETRY_429_BASE_SECONDS", 1.0)))
+        self._retry_429_max_seconds = float(kwargs.pop("retry_429_max_seconds", _env_float("MOOSE_LLM_RETRY_429_MAX_SECONDS", 20.0)))
+        self._retry_429_jitter_ratio = float(kwargs.pop("retry_429_jitter_ratio", _env_float("MOOSE_LLM_RETRY_429_JITTER_RATIO", 0.15)))
+        self._retry_429_max_attempts = max(0, min(10, int(self._retry_429_max_attempts)))
+        self._retry_429_base_seconds = max(0.0, float(self._retry_429_base_seconds))
+        self._retry_429_max_seconds = max(self._retry_429_base_seconds, float(self._retry_429_max_seconds))
+        self._retry_429_jitter_ratio = max(0.0, min(1.0, float(self._retry_429_jitter_ratio)))
+
         self._init_kwargs: Dict[str, Any] = dict(kwargs)
         self._llm_cache: Dict[Tuple[str, int], Any] = {}
         self._llm_lock = threading.Lock()
 
         self.logger.debug(f"Initialized LangChainLLM for {self.provider.value} model: {model}")
+
+    @staticmethod
+    def _is_quota_exhausted_429(e: Exception) -> bool:
+        """
+        Best-effort detection for provider quota/rate-limit exhaustion.
+
+        Provider-agnostic: treats HTTP 429 / "Too Many Requests" as retryable regardless of vendor.
+        """
+        try:
+            sc = getattr(e, "status_code", None)
+            if sc == 429:
+                return True
+        except Exception:
+            pass
+        try:
+            resp = getattr(e, "response", None)
+            sc2 = getattr(resp, "status_code", None)
+            if sc2 == 429:
+                return True
+        except Exception:
+            pass
+
+        msg = ""
+        try:
+            msg = str(e) or ""
+        except Exception:
+            msg = ""
+        msg_u = msg.upper()
+        if "429" in msg_u:
+            return True
+        if "TOO MANY REQUESTS" in msg_u:
+            return True
+        return False
+
+    def _backoff_seconds(self, attempt_index: int) -> float:
+        """
+        attempt_index starts at 0 for the first retry backoff.
+        """
+        base = float(self._retry_429_base_seconds)
+        mx = float(self._retry_429_max_seconds)
+        delay = min(mx, base * (2.0 ** float(max(0, attempt_index))))
+        jr = float(self._retry_429_jitter_ratio)
+        if jr > 0 and delay > 0:
+            delay = delay + random.uniform(0.0, jr * delay)
+        return float(delay)
 
     def _build_langchain_llm_instance(self) -> Any:
         """Build a fresh underlying LangChain chat model (with tools bound if provided)."""
@@ -270,9 +337,93 @@ class LangChainLLM:
                         pass
                     return tm
             return ToolMessage(content=tm_content, tool_call_id=tm_tool_call_id)
-        else:
-            # Default to human message
-            return HumanMessage(content=str(message.content))
+
+    @staticmethod
+    def _normalize_content_to_text(content: Any) -> str:
+        """
+        Provider-agnostic normalization for LangChain message content.
+
+        Some providers return AIMessage.content as a list of blocks, e.g.:
+          [{"type":"text","text":"..."}, ...]
+
+        We normalize to a plain string for downstream JSON extraction + SQLite logging.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        # Common multimodal/content-block formats
+        if isinstance(content, list):
+            parts: List[str] = []
+            for b in content:
+                if b is None:
+                    continue
+                if isinstance(b, str):
+                    if b:
+                        parts.append(b)
+                    continue
+                if isinstance(b, dict):
+                    # Most common: {"type":"text","text":"..."}
+                    if b.get("type") == "text" and b.get("text") is not None:
+                        parts.append(str(b.get("text") or ""))
+                        continue
+                    # Fallback: try a generic "text" field if present
+                    if b.get("text") is not None:
+                        parts.append(str(b.get("text") or ""))
+                        continue
+                    # Last resort: JSON-ish repr
+                    try:
+                        parts.append(json.dumps(b, ensure_ascii=False, default=str))
+                    except Exception:
+                        parts.append(str(b))
+                    continue
+                # Unknown element type
+                parts.append(str(b))
+            return "\n".join([p for p in parts if p])
+        if isinstance(content, dict):
+            # Some SDKs may return dict-typed content.
+            try:
+                if content.get("type") == "text" and content.get("text") is not None:
+                    return str(content.get("text") or "")
+            except Exception:
+                pass
+            try:
+                return json.dumps(content, ensure_ascii=False, default=str)
+            except Exception:
+                return str(content)
+        return str(content)
+
+    def _normalized_response_for_logging(self, response: Any) -> Any:
+        """
+        Ensure the object we hand to LLMLogger has string content, so trace DB writes don't
+        fail when providers return list/dict content blocks.
+        """
+        if response is None:
+            return None
+        try:
+            raw = getattr(response, "content", None)
+        except Exception:
+            raw = None
+        text = self._normalize_content_to_text(raw)
+        # Best-effort: mutate in-place so all loggers see the normalized content.
+        try:
+            setattr(response, "content", text)
+            return response
+        except Exception:
+            pass
+        # Fallback: construct a new AIMessage preserving tool_calls/metadata if possible.
+        try:
+            tc = getattr(response, "tool_calls", None)
+            nm = AIMessage(content=text, tool_calls=tc) if tc else AIMessage(content=text)
+            for attr in ("additional_kwargs", "response_metadata", "usage_metadata", "id", "name"):
+                if hasattr(response, attr):
+                    try:
+                        setattr(nm, attr, getattr(response, attr))
+                    except Exception:
+                        pass
+            return nm
+        except Exception:
+            return response
     
     def _langchain_to_message(self, langchain_msg: BaseMessage) -> Message:
         """Convert LangChain message to our Message model."""
@@ -428,18 +579,60 @@ class LangChainLLM:
         self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
         # Invoke LangChain LLM asynchronously (loop-scoped instance)
-        try:
-            llm = self._get_cached_llm(kind="async")
-            if hasattr(llm, "ainvoke"):
-                response = await llm.ainvoke(langchain_messages, **kwargs)
-            else:
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(None, lambda: llm.invoke(langchain_messages, **kwargs))
-        except Exception as e:
-            if hasattr(e, 'status_code') and e.status_code == 404:
-                self.logger.error(f"Model {self.model} not found")
-            self.logger.critical(f"Error invoking model {self.model}: {e}")
-            response = None
+        response = None
+        llm = self._get_cached_llm(kind="async")
+        retries = int(self._retry_429_max_attempts or 0)
+        attempt = 0
+        while True:
+            try:
+                if hasattr(llm, "ainvoke"):
+                    response = await llm.ainvoke(langchain_messages, **kwargs)
+                else:
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(None, lambda: llm.invoke(langchain_messages, **kwargs))
+                break
+            except Exception as e:
+                if hasattr(e, 'status_code') and e.status_code == 404:
+                    self.logger.error(f"Model {self.model} not found")
+
+                if self._is_quota_exhausted_429(e) and attempt < retries:
+                    delay = self._backoff_seconds(attempt)
+                    attempt += 1
+                    try:
+                        self.logger.warning(
+                            "Model %s returned 429/RESOURCE_EXHAUSTED; backing off %.2fs (retry %d/%d)",
+                            self.model,
+                            delay,
+                            attempt,
+                            retries,
+                        )
+                    except Exception:
+                        pass
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+
+                # Final failure: log a response record (NoneType) for trace visibility, then stop.
+                try:
+                    self.llm_logger.log_response(
+                        response=None,
+                        request_id=request_id or "unknown",
+                        model=self.model,
+                        usage=None,
+                        cost=None,
+                        **log_meta,
+                    )
+                except Exception:
+                    pass
+
+                self.logger.critical(f"Error invoking model {self.model}: {e}")
+                # Stop on 429 to avoid tight multi-stage loops hammering quota.
+                if self._is_quota_exhausted_429(e):
+                    raise RuntimeError(
+                        f"LLM quota exhausted (HTTP 429) for model '{self.model}' after {attempt} retry(s): {e}"
+                    ) from e
+                response = None
+                break
         
         # Extract content
         content = response.content if hasattr(response, 'content') else str(response)
@@ -474,8 +667,9 @@ class LangChainLLM:
                 finish_reason = metadata.get('finish_reason') or metadata.get('stop_reason')
         
         # Log LLM response
+        response_for_log = self._normalized_response_for_logging(response)
         self.llm_logger.log_response(
-            response=response,
+            response=response_for_log,
             request_id=request_id or "unknown",
             model=self.model,
             usage=usage,
@@ -484,7 +678,7 @@ class LangChainLLM:
         )
         
         return LLMResponse(
-            content=content or "",
+            content=self._normalize_content_to_text(content),
             model=self.model,
             finish_reason=finish_reason,
             usage=usage,
@@ -541,14 +735,54 @@ class LangChainLLM:
         self.llm_logger.log_request(messages=langchain_messages, request_id=request_id or "unknown", model=self.model, **log_meta)
         
         # Invoke LangChain LLM (thread-scoped instance)
-        try:
-            llm = self._get_cached_llm(kind="sync")
-            response = llm.invoke(langchain_messages, **kwargs)
-        except Exception as e:
-            if hasattr(e, 'status_code') and e.status_code == 404:
-                self.logger.error(f"Model {self.model} not found")
-            self.logger.critical(f"Error invoking model {self.model}: {e}")
-            response = None
+        response = None
+        llm = self._get_cached_llm(kind="sync")
+        retries = int(self._retry_429_max_attempts or 0)
+        attempt = 0
+        while True:
+            try:
+                response = llm.invoke(langchain_messages, **kwargs)
+                break
+            except Exception as e:
+                if hasattr(e, 'status_code') and e.status_code == 404:
+                    self.logger.error(f"Model {self.model} not found")
+
+                if self._is_quota_exhausted_429(e) and attempt < retries:
+                    delay = self._backoff_seconds(attempt)
+                    attempt += 1
+                    try:
+                        self.logger.warning(
+                            "Model %s returned 429/RESOURCE_EXHAUSTED; backing off %.2fs (retry %d/%d)",
+                            self.model,
+                            delay,
+                            attempt,
+                            retries,
+                        )
+                    except Exception:
+                        pass
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+
+                try:
+                    self.llm_logger.log_response(
+                        response=None,
+                        request_id=request_id or "unknown",
+                        model=self.model,
+                        usage=None,
+                        cost=None,
+                        **log_meta,
+                    )
+                except Exception:
+                    pass
+
+                self.logger.critical(f"Error invoking model {self.model}: {e}")
+                if self._is_quota_exhausted_429(e):
+                    raise RuntimeError(
+                        f"LLM quota exhausted (HTTP 429) for model '{self.model}' after {attempt} retry(s): {e}"
+                    ) from e
+                response = None
+                break
         
         # Extract content
         content = response.content if hasattr(response, 'content') else str(response)
@@ -583,8 +817,9 @@ class LangChainLLM:
                 finish_reason = metadata.get('finish_reason') or metadata.get('stop_reason')
         
         # Log LLM response
+        response_for_log = self._normalized_response_for_logging(response)
         self.llm_logger.log_response(
-            response=response,
+            response=response_for_log,
             request_id=request_id or "unknown",
             model=self.model,
             usage=usage,
@@ -593,7 +828,7 @@ class LangChainLLM:
         )
         
         return LLMResponse(
-            content=content or "",
+            content=self._normalize_content_to_text(content),
             model=self.model,
             finish_reason=finish_reason,
             usage=usage,

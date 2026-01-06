@@ -361,31 +361,7 @@ class LLMClient:
         
         return total
 
-    def _normalize_content_to_text(self, content: Any) -> str:
-        """
-        Normalize provider/LangChain content into a plain text string.
-
-        Some providers (and some LangChain versions) can return content as a list of
-        structured blocks (e.g., [{"type":"text","text":"..."}]). Downstream code frequently
-        assumes `LLMResponse.content` is a string (e.g., for JSON extraction), so we
-        normalize to text at the client boundary.
-        """
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            text_parts: List[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(str(block.get("text", "")))
-                elif isinstance(block, str):
-                    text_parts.append(block)
-            out = "\n".join([t for t in text_parts if str(t).strip()])
-            if out:
-                return out
-            return str(content)
-        return str(content)
+    # NOTE: Content normalization is handled at the source in LangChainLLM.(a)invoke.
 
     def _safe_input_budget(self, *, safety_margin: int = 256) -> int:
         """
@@ -617,17 +593,29 @@ class LLMClient:
                     "Prefer a structured format aligned with the task (headings + bullet points are OK).\n"
                     "Do not apologize for missing data.\n"
                 )
-                resp = await self.langchain_llm.ainvoke(
-                    message=partial_user,
-                    messages=None,
-                    system_message=compaction_system,
-                    request_id=f"{request_id}_partial_{iteration}_a{attempt}",
-                    agent_name=self.agent_name,
-                    temperature=0,
-                    max_output_tokens=int(max_out),
-                    tool_choice="none",
-                )
-                partial = self._normalize_content_to_text(getattr(resp, "content", "") or "").strip()
+                from moose.framework.logging.tracing import span as trace_span
+
+                with trace_span(
+                    kind="llm.call",
+                    name=str(self.model),
+                    attrs={
+                        "llm.model": str(self.model),
+                        "llm.stage": "compact",
+                        "llm.iteration": int(iteration),
+                        "llm.attempt": int(attempt),
+                    },
+                ):
+                    resp = await self.langchain_llm.ainvoke(
+                        message=partial_user,
+                        messages=None,
+                        system_message=compaction_system,
+                        request_id=str(request_id),
+                        agent_name=self.agent_name,
+                        temperature=0,
+                        max_output_tokens=int(max_out),
+                        tool_choice="none",
+                    )
+                partial = str(getattr(resp, "content", "") or "").strip()
                 if not partial:
                     continue
 
@@ -755,14 +743,21 @@ Original instructions:
 Please provide your analysis/response for this chunk, following the same format as specified in the original instructions."""
         
         # Process chunk asynchronously (include conversation history if available)
-        response = await self.langchain_llm.ainvoke(
-            message=chunk_content,
-            messages=messages,
-            system_message=chunk_system_message,
-            request_id=f"{request_id}_chunk_{chunk_index}" if request_id else None,
-            agent_name=self.agent_name,
-            **kwargs
-        )
+        from moose.framework.logging.tracing import span as trace_span
+
+        with trace_span(
+            kind="llm.call",
+            name=str(self.model),
+            attrs={"llm.model": str(self.model), "llm.stage": "chunk", "llm.chunk_index": int(chunk_index)},
+        ):
+            response = await self.langchain_llm.ainvoke(
+                message=chunk_content,
+                messages=messages,
+                system_message=chunk_system_message,
+                request_id=str(request_id) if request_id else None,
+                agent_name=self.agent_name,
+                **kwargs
+            )
         
         return response
     
@@ -813,14 +808,21 @@ Your task:
 Provide your final combined response:"""
         
         # Get summarization response asynchronously
-        response = await self.langchain_llm.ainvoke(
-            message=combined_content,
-            messages=None,
-            system_message=summarization_system_message,
-            request_id=f"{request_id}_summary",
-            agent_name=self.agent_name,
-            **kwargs
-        )
+        from moose.framework.logging.tracing import span as trace_span
+
+        with trace_span(
+            kind="llm.call",
+            name=str(self.model),
+            attrs={"llm.model": str(self.model), "llm.stage": "summary", "llm.total_chunks": int(len(chunk_responses or []))},
+        ):
+            response = await self.langchain_llm.ainvoke(
+                message=combined_content,
+                messages=None,
+                system_message=summarization_system_message,
+                request_id=str(request_id),
+                agent_name=self.agent_name,
+                **kwargs
+            )
         
         return response
     
@@ -851,7 +853,14 @@ Provide your final combined response:"""
             >>> response = client.send_message("Hello, how are you?")
             >>> print(response.content)
         """
-        request_id = str(uuid.uuid4())
+        try:
+            from moose.framework.logging.tracing import ensure_trace
+            from moose.framework.logging import get_project_id
+        except Exception:
+            pass
+
+        ctx = ensure_trace(project_id=get_project_id(), agent_name=self.agent_name)
+        request_id = ctx.request_id
         self.logger.debug(f"Sending message via LangChain to {self.model} (request_id: {request_id})")
         
         try:
@@ -1004,11 +1013,7 @@ Provide your final combined response:"""
             **kwargs
         )
 
-        # Normalize summary content to plain text (providers may return content blocks).
-        try:
-            final_response.content = self._normalize_content_to_text(getattr(final_response, "content", None))
-        except Exception:
-            pass
+        # Summary content is already normalized in LangChainLLM.(a)invoke.
         
         # Aggregate usage and cost from all chunks + summary
         total_input_tokens = sum(
@@ -1263,7 +1268,12 @@ Provide your final combined response:"""
             LLMResponse object
         """
         if request_id is None:
-            request_id = str(uuid.uuid4())
+            try:
+                from moose.framework.logging.tracing import ensure_trace
+                from moose.framework.logging import get_project_id
+            except Exception:
+                pass
+            request_id = ensure_trace(project_id=get_project_id(), agent_name=self.agent_name).request_id
         
         # Build conversation history
         conversation_messages = list(messages) if messages else []
@@ -1335,14 +1345,21 @@ Provide your final combined response:"""
                 )
 
             # Use LangChain LLM wrapper asynchronously
-            response = await self.langchain_llm.ainvoke(
-                message=None,  # Don't split - pass everything in messages
-                messages=conversation_messages,  # Pass full conversation history
-                system_message=system_message,
-                request_id=f"{request_id}_iter_{iteration}",
-                agent_name=self.agent_name,
-                **kwargs
-            )
+            from moose.framework.logging.tracing import span as trace_span
+
+            with trace_span(
+                kind="llm.call",
+                name=str(self.model),
+                attrs={"llm.model": str(self.model), "llm.iteration": int(iteration), "llm.stage": "direct"},
+            ):
+                response = await self.langchain_llm.ainvoke(
+                    message=None,  # Don't split - pass everything in messages
+                    messages=conversation_messages,  # Pass full conversation history
+                    system_message=system_message,
+                    request_id=str(request_id),
+                    agent_name=self.agent_name,
+                    **kwargs
+                )
             
             # Accumulate cost and usage
             if response.cost:
@@ -1352,8 +1369,8 @@ Provide your final combined response:"""
                 total_usage["output_tokens"] += response.usage.get("output_tokens", 0)
                 total_usage["total_tokens"] += response.usage.get("total_tokens", 0)
             
-            # Normalize content blocks (some providers may return a list) to text for all downstream logic.
-            response_text = self._normalize_content_to_text(response.content)
+            # Content is normalized in LangChainLLM.(a)invoke; keep a cheap cast for safety.
+            response_text = str(getattr(response, "content", "") or "")
 
             # Check for termination marker FIRST (multi-stage reasoning mode)
             if self.enable_multi_stage_reasoning and self._has_final_answer_marker(response_text):
@@ -1456,14 +1473,21 @@ Provide your final combined response:"""
             )
 
             try:
-                forced = await self.langchain_llm.ainvoke(
-                    message=None, 
-                    messages=conversation_messages, 
-                    system_message=system_message,
-                    request_id=f"{request_id}_final",
-                    agent_name=self.agent_name,
-                    **kwargs
-                )
+                from moose.framework.logging.tracing import span as trace_span
+
+                with trace_span(
+                    kind="llm.call",
+                    name=str(self.model),
+                    attrs={"llm.model": str(self.model), "llm.stage": "forced_final"},
+                ):
+                    forced = await self.langchain_llm.ainvoke(
+                        message=None,
+                        messages=conversation_messages,
+                        system_message=system_message,
+                        request_id=str(request_id),
+                        agent_name=self.agent_name,
+                        **kwargs
+                    )
             except Exception as e:
                 self.logger.error(f"Finalization call failed after max iterations: {e}")
                 forced = response  # fallback to last response

@@ -10,6 +10,13 @@ from .specialists_runner import SpecialistsRunnerNode
 
 from moose.framework.llm_core import LLMClient
 
+try:
+    from langchain_core.tools import StructuredTool
+    LANGCHAIN_TOOLS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    StructuredTool = None  # type: ignore
+    LANGCHAIN_TOOLS_AVAILABLE = False
+
 
 @dataclass
 class RoutingDecision:
@@ -32,6 +39,51 @@ def _extract_json(text: str) -> Optional[dict]:
         return json.loads(s[start : end + 1])
     except Exception:
         return None
+
+
+def _dedupe_keep_order(items: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for x in items or []:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def normalize_router_tickers(items: Any) -> List[str]:
+    """
+    Router tickers normalization:
+    - Uppercase + strip
+    - Dedupe
+    - ECONOMY-only becomes [] (macro/economy mode represented as empty list)
+    - ECONOMY is removed when any other ticker exists
+    """
+    raw = items if isinstance(items, list) else []
+    tickers = [str(x).upper().strip() for x in raw if str(x).strip()]
+    tickers = _dedupe_keep_order(tickers)
+    if "ECONOMY" in tickers:
+        non_econ = [t for t in tickers if t != "ECONOMY"]
+        return non_econ if non_econ else []
+    return tickers
+
+
+def normalize_tool_tickers(items: Any) -> List[str]:
+    """
+    Tool tickers normalization:
+    - Uppercase + strip
+    - Dedupe
+    - If any non-ECONOMY tickers exist, drop ECONOMY
+    - If no company tickers exist, return ["ECONOMY"]
+    """
+    raw = items if isinstance(items, list) else []
+    tickers = [str(x).upper().strip() for x in raw if str(x).strip()]
+    tickers = _dedupe_keep_order(tickers)
+    non_econ = [t for t in tickers if t and t != "ECONOMY"]
+    if non_econ:
+        return non_econ
+    return ["ECONOMY"]
 
 
 class TeamRouteNode(BaseNode):
@@ -57,7 +109,115 @@ class TeamRouteNode(BaseNode):
         super().__init__(analyzer=analyzer, logger=logger)
         self.node_name = "team_route"
         self.playbooks = playbooks
-        self.agent_client = self._build_agent_client(node_name="team_route", tools=[])
+        tools: List[Any] = []
+        if LANGCHAIN_TOOLS_AVAILABLE and StructuredTool is not None:
+            tools.append(
+                StructuredTool.from_function(  # type: ignore[union-attr]
+                    func=self.identify_affected_tickers,
+                    name="identify_affected_tickers",
+                    description=(
+                        "Identify the most relevant affected tickers from (task_instruction, metadata, context_text). "
+                        "Returns STRICT JSON: {\"tickers\":[\"TICKER\", ...]}. "
+                    ),
+                )
+            )
+        self.agent_client = self._build_agent_client(node_name="team_route", tools=tools)
+
+    async def identify_affected_tickers(
+        self,
+        task_instruction: str,
+        metadata: Dict[str, Any],
+        context_text: str,
+    ) -> str:
+        """
+        Tool: identify affected tickers using the same LLM config/model as `team_route`.
+
+        Returns STRICT JSON string: {"tickers":[...]}
+        Business rule:
+        - If no company tickers exist, returns {"tickers":[]}
+        """
+        # Build a dedicated tool-side client with the same config but *no tools* (avoid recursion).
+        cfg = self._node_cfg("team_route")
+        tool_llm = LLMClient(
+            model=str(cfg.get("model") or "").strip(),
+            temperature=float(cfg.get("temperature", 0.7)),
+            tools=[],
+            enable_multi_stage_reasoning=False,
+            agent_name=self.main_agent_name,
+            **(cfg.get("kwargs") or {}),
+        )
+
+        system_message = """You are a finance analyst whose ONLY job is to extract affected stock/asset tickers.
+
+You will be given:
+- task_instruction: user intent / request (may be empty)
+- metadata: may contain tickers, URLs, company names, or other context (may be empty)
+- context_text: supporting text such as an article or conversation context (may be empty)
+
+Your task:
+1) Extract ALL tickers that are explicitly mentioned anywhere in the input. You MUST include all of them.
+2) Only if user did not explicitly mention any tickers, you can identify additional tickers that are strongly affected by the situation described (suppliers, competitors, customers, major partners, sector proxies, key beneficiaries/losers).
+   - If you add inferred tickers, choose the MOST relevant ones and return at most 5 inferred tickers (hard limit).
+3) If you cannot identify any company/asset tickers, return [] to indicate a macro/economy-wide impact.
+4) Output tickers in UPPERCASE, deduplicated.
+
+Output format (STRICT):
+Return ONLY a single JSON object with exactly one key:
+{"tickers":["TICKER", "..."], "rationale": "..."}
+No markdown, no extra keys, no commentary.
+"""
+
+        user_message = f"""Identify affected tickers for this request:
+
+Task instruction (may be empty):
+{str(task_instruction or "")}
+
+Metadata (may be empty): {json.dumps(metadata or {}, ensure_ascii=False)}
+
+Context text (may be empty):
+{(str(context_text or "")).strip()}
+"""
+
+        resp = await tool_llm.send_message(message=user_message, system_message=system_message)
+        # Attribute tool-side LLM usage/cost back to the outer request (best-effort).
+        try:
+            from moose.framework.llm_core.tool_runtime import ToolRuntime
+
+            rt = ToolRuntime.current()
+            if rt is not None:
+                rt.add_external_llm_usage(usage=getattr(resp, "usage", None), cost=getattr(resp, "cost", None))
+        except Exception:
+            pass
+
+        content = getattr(resp, "content", "") or ""
+        data = _extract_json(content)
+        if data is None:
+            # One-shot JSON repair retry
+            try:
+                repaired = await repair_json_once(tool_llm, bad_output=str(content), error_hint=json_decode_error(content))
+                data = _extract_json(getattr(repaired, "content", "") or "")
+                # Attribute repair usage too.
+                try:
+                    from moose.framework.llm_core.tool_runtime import ToolRuntime
+
+                    rt = ToolRuntime.current()
+                    if rt is not None:
+                        rt.add_external_llm_usage(
+                            usage=getattr(repaired, "usage", None),
+                            cost=getattr(repaired, "cost", None),
+                        )
+                except Exception:
+                    pass
+            except Exception:
+                data = None
+
+        tickers: List[str] = []
+        if isinstance(data, dict):
+            tickers = normalize_tool_tickers(data.get("tickers"))
+        else:
+            tickers = []
+
+        return json.dumps({"tickers": tickers}, ensure_ascii=False)
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         context_text = str(state.get("context_text", "") or "")
@@ -164,7 +324,11 @@ class TeamRouteNode(BaseNode):
 
 You manage a team of specialist sub-agents, each with a limited toolset relevant to their specialty.
 
-You do NOT call tools yourself. Your job is to:
+Ticker identification (REQUIRED):
+- First, call tool `identify_affected_tickers` using the provided task_instruction, metadata, and context_text to determine relevant tickers.
+- Then, use the tool result to populate the final JSON field "tickers".
+
+Your job is to:
 - choose the best ONE playbook (strategy) for this request
 - decide which specialist sub-agents to run (one or more)
 - give each selected sub-agents a concrete, tool-friendly task with clear objectives, tickers/entities, and constraints
@@ -186,7 +350,7 @@ You can delegate to these sub-agent specialists ONLY:
 For each selected sub-agent:
 - goal: a single, specific research objective aligned to the playbook (what they should conclude/produce)
 - notes: constraints and how to use their tools (e.g., “verify via filings”, “focus on last 4 quarters”, “include key numbers/snippets”, “don’t speculate”)
-- tickers: list of tickers you believe are relevant (can be [])
+- tickers: list of tickers from identify_affected_tickers tool result
 
 Keep goals tool-oriented (so an sub-agent can translate it into concrete tool calls).
 
@@ -250,7 +414,7 @@ Context text (may be empty):
         return RoutingDecision(
             playbook=str(data.get("playbook") or "CatalystValidation"),
             rationale=str(data.get("rationale") or ""),
-            tickers=[str(x).upper().strip() for x in (data.get("tickers") or []) if str(x).strip()],
+            tickers=normalize_router_tickers(data.get("tickers")),
             selected_agents=[str(x).strip() for x in (data.get("selected_agents") or []) if str(x).strip()],
             agent_tasks={k: (v if isinstance(v, dict) else {}) for k, v in (data.get("agent_tasks") or {}).items()},
         )

@@ -62,6 +62,93 @@ class SpecialistsRunnerNode(BaseNode):
             return None
 
     @staticmethod
+    def _extract_tool_errors(content: str, data: Dict[str, Any]) -> Optional[str]:
+        """
+        Extract error messages from tool failures in the LLM response content.
+        Looks for FMP API errors and other tool failure messages.
+        Returns None if no errors found, otherwise returns a formatted error message.
+        """
+        import re
+        
+        errors_found = []
+        content_lower = content.lower()
+        
+        # Check for FMP-specific errors
+        if "fmp" in content_lower or "financialmodelingprep" in content_lower:
+            # Look for status code 402 (Payment Required)
+            status_match = re.search(r"status_code['\"]?\s*:\s*(\d{3})", content, re.IGNORECASE)
+            if status_match:
+                status_code = status_match.group(1)
+                if status_code == "402":
+                    # Try to extract URL
+                    url_match = re.search(r"url['\"]?\s*:\s*['\"]([^'\"]+)['\"]", content, re.IGNORECASE)
+                    url = url_match.group(1) if url_match else "FMP API"
+                    # Clean URL to remove API key if present
+                    if "apikey=" in url:
+                        url = url.split("apikey=")[0] + "apikey=..."
+                    errors_found.append(f"FMP request failed: 402 Client Error: Payment Required for url: {url}")
+                else:
+                    url_match = re.search(r"url['\"]?\s*:\s*['\"]([^'\"]+)['\"]", content, re.IGNORECASE)
+                    url = url_match.group(1) if url_match else "FMP API"
+                    if "apikey=" in url:
+                        url = url.split("apikey=")[0] + "apikey=..."
+                    errors_found.append(f"FMP request failed: {status_code} Client Error for url: {url}")
+            
+            # Look for subscription error message
+            sub_match = re.search(r"not available under your current subscription", content, re.IGNORECASE)
+            if sub_match and not errors_found:
+                errors_found.append("FMP API: Feature not available under current subscription plan")
+        
+        # Extract from fmp_error_details if present
+        fmp_details_match = re.search(r"fmp_error_details['\"]?\s*:\s*\{([^}]+)\}", content, re.IGNORECASE | re.DOTALL)
+        if fmp_details_match:
+            details = fmp_details_match.group(1)
+            status_match = re.search(r"status_code['\"]?\s*:\s*(\d{3})", details, re.IGNORECASE)
+            url_match = re.search(r"url['\"]?\s*:\s*['\"]([^'\"]+)['\"]", details, re.IGNORECASE)
+            if status_match:
+                status_code = status_match.group(1)
+                url = url_match.group(1) if url_match else "FMP API"
+                if "apikey=" in url:
+                    url = url.split("apikey=")[0] + "apikey=..."
+                if status_code == "402":
+                    errors_found.append(f"FMP request failed: 402 Client Error: Payment Required for url: {url}")
+                else:
+                    errors_found.append(f"FMP request failed: {status_code} Client Error for url: {url}")
+        
+        # Extract generic error messages from tool responses
+        # Look for 'ok': False patterns
+        if "'ok': False" in content or '"ok": False' in content:
+            # Try to extract error message
+            error_msg_match = re.search(
+                r"error['\"]?\s*:\s*\{[^}]*['\"]message['\"]?\s*:\s*['\"]([^'\"]+)['\"]",
+                content,
+                re.IGNORECASE
+            )
+            if error_msg_match:
+                error_msg = error_msg_match.group(1)
+                if error_msg not in errors_found:
+                    errors_found.append(error_msg)
+        
+        # Look for "Failed to fetch data from" patterns
+        failed_match = re.search(r"Failed to fetch data from ([^\\n]+)", content, re.IGNORECASE)
+        if failed_match and not errors_found:
+            errors_found.append(f"Failed to fetch data from {failed_match.group(1).strip()}")
+        
+        # Fallback: look for any "Error:" pattern
+        if not errors_found:
+            error_pattern = re.search(r"Error:\s*([^\\n]+)", content, re.IGNORECASE)
+            if error_pattern:
+                error_text = error_pattern.group(1).strip()
+                if error_text and len(error_text) < 500:  # Limit length
+                    errors_found.append(f"Tool error: {error_text}")
+        
+        if errors_found:
+            # Return the first meaningful error, or combine them if multiple
+            return "; ".join(errors_found[:2])  # Limit to 2 errors to keep it concise
+        
+        return None
+
+    @staticmethod
     async def run_specialist(
         *,
         agent: str,
@@ -69,7 +156,6 @@ class SpecialistsRunnerNode(BaseNode):
         context_text: str,
         task: Dict[str, Any],
         prior_reports: Optional[Dict[str, Any]] = None,
-        tool_summary: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SpecialistResult:
         """
@@ -79,7 +165,7 @@ class SpecialistsRunnerNode(BaseNode):
 
         system_message = f"""You are the `{agent}` sub-agent in an Investment Research team.
 
-You have a scoped toolset (listed below). Your job is to use tools to gather evidence and return a structured analysis report.
+You have a scoped toolset (available via tool calling). Your job is to use tools to gather evidence and return a structured analysis report.
 You do NOT write the final department answer; you produce research inputs that a merge step can use.
 
 Tool usage:
@@ -123,9 +209,6 @@ Rules:
 - If you did not call any tool, set `evidence` to [] and explain why tools were unnecessary or unavailable.
 - `key_fields` must be minimal and help reproduce the call (ticker, accession, date window, etc.).
 - `next_steps` is optional; use [] if you are confident you’ve answered your part of the task.
-
-Scoped tools for this sub-agent:
-{tool_summary.strip()}
 
 Cross-specialist help:
 Cross-specialist help is not available in this context.
@@ -263,20 +346,12 @@ Return STRICT JSON only."""
 
             client = clients.get(agent_name) or self.agent_client
 
-            tool_summary = ""
-            try:
-                if hasattr(self.analyzer, "_summarize_tools"):
-                    tool_summary = self.analyzer._summarize_tools(agent_name=agent_name)  # type: ignore[attr-defined]
-            except Exception:
-                tool_summary = ""
-
             res = await self.run_specialist(
                 agent=agent_name,
                 llm_client=client,
                 context_text=context_text,
                 task=task,
                 prior_reports=prior_reports,
-                tool_summary=tool_summary,
                 metadata=metadata,
             )
 
@@ -291,6 +366,41 @@ Return STRICT JSON only."""
                 ee.setdefault("excerpt", ee.get("excerpt") or "")
                 normalized.append(ee)
 
+            # Extract error messages from tool failures
+            error_msg = None
+            try:
+                if isinstance(res.raw, dict):
+                    raw_text = res.raw.get("text")
+                    parsed_data = res.raw.get("parsed", {}) or {}
+                    
+                    # Try to get content from response object
+                    content_str = ""
+                    if raw_text:
+                        content = getattr(raw_text, "content", "") or ""
+                        if isinstance(content, list):
+                            # Handle list of content blocks (e.g., from Gemini)
+                            content_str = " ".join(str(c.get("text", "")) if isinstance(c, dict) else str(c) for c in content)
+                        else:
+                            content_str = str(content) if content else ""
+                    
+                    # Also check raw_response if available
+                    if not content_str and hasattr(raw_text, "raw_response"):
+                        raw_resp = getattr(raw_text, "raw_response")
+                        if raw_resp:
+                            # Try to extract content from raw response
+                            if hasattr(raw_resp, "content"):
+                                raw_content = getattr(raw_resp, "content", "")
+                                if isinstance(raw_content, list):
+                                    content_str = " ".join(str(c.get("text", "")) if isinstance(c, dict) else str(c) for c in raw_content)
+                                else:
+                                    content_str = str(raw_content) if raw_content else ""
+                    
+                    # Extract errors from content
+                    if content_str:
+                        error_msg = SpecialistsRunnerNode._extract_tool_errors(content_str, parsed_data)
+            except Exception:
+                pass
+
             report = {
                 "summary": res.summary,
                 "key_findings": res.key_findings,
@@ -298,6 +408,10 @@ Return STRICT JSON only."""
                 "next_steps": res.next_steps,
                 "tool_evidence_refs": [],
             }
+            
+            # Add error field if tool failures were detected
+            if error_msg:
+                report["error"] = error_msg
             llm_resp = None
             try:
                 if isinstance(res.raw, dict):

@@ -17,6 +17,7 @@ from .nodes.specialists_runner import SpecialistsRunnerNode
 from .nodes.team_merge import TeamMergeNode
 from .nodes.monthly_memory_writer import MonthlyMemoryWriterNode
 from .nodes.utils import normalize_usage, raw_snapshot
+import inspect
 
 
 def load_playbooks(playbooks_path: Path) -> Dict[str, Any]:
@@ -71,11 +72,32 @@ class InvestmentResearchWorkflow:
         """
         g = StateGraph(dict)
 
-        g.add_node("load_ticker_memory", self.load_ticker_memory.run)
-        g.add_node("prompt_engineer", self.prompt_engineer.run)
-        g.add_node("run_selected_specialists_parallel", self.run_selected_specialists_parallel.run)
-        g.add_node("team_merge", self.team_merge.run)
-        g.add_node("write_monthly_memory", self.write_monthly_memory.run)
+        def _wrap_node(node_name: str, fn: Any) -> Any:
+            async def _wrapped(state: Dict[str, Any]) -> Dict[str, Any]:
+                from moose.framework.logging.tracing import span as trace_span
+
+                with trace_span(
+                    kind="workflow.node",
+                    name=f"investment_research_team.{node_name}",
+                    attrs={"workflow": "investment_research_team", "node": node_name},
+                ):
+                    if inspect.iscoroutinefunction(fn):
+                        return await fn(state)
+                    out = fn(state)
+                    if inspect.isawaitable(out):
+                        return await out
+                    return out
+
+            return _wrapped
+
+        g.add_node("load_ticker_memory", _wrap_node("load_ticker_memory", self.load_ticker_memory.run))
+        g.add_node("prompt_engineer", _wrap_node("prompt_engineer", self.prompt_engineer.run))
+        g.add_node(
+            "run_selected_specialists_parallel",
+            _wrap_node("run_selected_specialists_parallel", self.run_selected_specialists_parallel.run),
+        )
+        g.add_node("team_merge", _wrap_node("team_merge", self.team_merge.run))
+        g.add_node("write_monthly_memory", _wrap_node("write_monthly_memory", self.write_monthly_memory.run))
 
         def _route_after_load_ticker_memory(state: Dict[str, Any]) -> str:
             sm = str(state.get("merge_system_message") or "").strip()
@@ -131,12 +153,33 @@ class InvestmentResearchWorkflow:
         - per-ticker merge results in state.final.result (dict by ticker)
         """
         g = StateGraph(dict)
+
+        def _wrap_node(node_name: str, fn: Any) -> Any:
+            async def _wrapped(state: Dict[str, Any]) -> Dict[str, Any]:
+                from moose.framework.logging.tracing import span as trace_span
+
+                with trace_span(
+                    kind="workflow.node",
+                    name=f"investment_research_team.{node_name}",
+                    attrs={"workflow": "investment_research_team", "node": node_name},
+                ):
+                    if inspect.iscoroutinefunction(fn):
+                        return await fn(state)
+                    out = fn(state)
+                    if inspect.isawaitable(out):
+                        return await out
+                    return out
+
+            return _wrapped
         
-        g.add_node("load_ticker_memory", self.load_ticker_memory.run)
-        g.add_node("prompt_engineer", self.prompt_engineer.run)
-        g.add_node("run_selected_specialists_parallel", self.run_selected_specialists_parallel.run)
-        g.add_node("team_merge", self.team_merge.run)
-        g.add_node("write_monthly_memory", self.write_monthly_memory.run)
+        g.add_node("load_ticker_memory", _wrap_node("load_ticker_memory", self.load_ticker_memory.run))
+        g.add_node("prompt_engineer", _wrap_node("prompt_engineer", self.prompt_engineer.run))
+        g.add_node(
+            "run_selected_specialists_parallel",
+            _wrap_node("run_selected_specialists_parallel", self.run_selected_specialists_parallel.run),
+        )
+        g.add_node("team_merge", _wrap_node("team_merge", self.team_merge.run))
+        g.add_node("write_monthly_memory", _wrap_node("write_monthly_memory", self.write_monthly_memory.run))
         
         def _route_after_load_ticker_memory(state: Dict[str, Any]) -> str:
             sm = str(state.get("merge_system_message") or "").strip()

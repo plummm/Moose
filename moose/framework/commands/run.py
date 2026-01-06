@@ -8,21 +8,12 @@ import threading
 import traceback
 from pathlib import Path
 
-try:
-    from moose.framework.logging import (
-        init_core_logger, get_core_logger, set_global_debug,
-        set_project, reinit_llm_logger, enable_webui_logging, _current_log_suffix
-    )
-    from moose.web_ui import register_project
-    from moose.framework.agent_core import AgentLoader, ContainerManager
-except ImportError:
-    # Fallback for development mode
-    from framework.logging import (
-        init_core_logger, get_core_logger, set_global_debug,
-        set_project, reinit_llm_logger, enable_webui_logging, _current_log_suffix
-    )
-    from web_ui import register_project
-    from framework.agent_core import AgentLoader, ContainerManager
+from moose.framework.logging import (
+    init_core_logger, get_core_logger, set_global_debug,
+    set_project, reinit_llm_logger, enable_webui_logging, _current_log_suffix
+)
+from moose.web_ui import register_project
+from moose.framework.agent_core import AgentLoader, ContainerManager
 
 
 class RunCommand:

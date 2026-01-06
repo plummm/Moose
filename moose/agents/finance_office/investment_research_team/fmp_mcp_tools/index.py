@@ -115,7 +115,7 @@ class IndexMCPTools(FMPMCPTools):
         return None
 
     @mcp_tool()
-    def get_index_quote(self, symbol: str) -> dict:
+    def get_index_quote(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches a real-time quote snapshot for a stock index symbol.
 
@@ -147,10 +147,10 @@ class IndexMCPTools(FMPMCPTools):
         Data source: FMP Stable Quote API (Index symbols supported)
         - GET `https://financialmodelingprep.com/stable/quote?symbol=...`
         """
-        meta = {"tool": "get_index_quote", "symbol": symbol}
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_index_quote", "symbol": sym}
         if not sym:
-            return mcp_envelope_err("symbol is required", meta=meta)
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
         params = {"symbol": sym}
         raw = self._request_json("quote", params=params)
@@ -177,7 +177,7 @@ class IndexMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_index_short_quote(self, symbol: str) -> dict:
+    def get_index_short_quote(self, symbol: Optional[str] = None, *, ticker: Optional[str] = None) -> dict:
         """
         Fetches a concise quote snapshot for a stock index symbol.
 
@@ -207,10 +207,10 @@ class IndexMCPTools(FMPMCPTools):
         Data source: FMP Stable Quote Short API (Index symbols supported)
         - GET `https://financialmodelingprep.com/stable/quote-short?symbol=...`
         """
-        meta = {"tool": "get_index_short_quote", "symbol": symbol}
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_index_short_quote", "symbol": sym}
         if not sym:
-            return mcp_envelope_err("symbol is required", meta=meta)
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
 
         params = {"symbol": sym}
         raw = self._request_json("quote-short", params=params)
@@ -237,7 +237,7 @@ class IndexMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_historical_index_light_chart(self, symbol: str, from_date: str, to_date: str) -> dict:
+    def get_historical_index_light_chart(self, symbol: Optional[str] = None, from_date: str = "", to_date: str = "", *, ticker: Optional[str] = None) -> dict:
         """
         Fetches end-of-day historical index prices (light payload).
 
@@ -270,10 +270,10 @@ class IndexMCPTools(FMPMCPTools):
         Data source: FMP Stable Historical Price EOD Light API (Index symbols supported)
         - GET `https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=...&from=...&to=...`
         """
-        meta = {"tool": "get_historical_index_light_chart", "symbol": symbol, "from": from_date, "to": to_date}
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_historical_index_light_chart", "symbol": sym, "from": from_date, "to": to_date}
         if not sym:
-            return mcp_envelope_err("symbol is required", meta=meta)
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         ferr = self._validate_iso_date(from_date, "from_date")
         if ferr:
             return ferr
@@ -300,7 +300,7 @@ class IndexMCPTools(FMPMCPTools):
         return mcp_envelope_ok(data=raw, meta=meta, text_fallback=tf)
 
     @mcp_tool()
-    def get_historical_index_full_chart(self, symbol: str, from_date: str, to_date: str) -> dict:
+    def get_historical_index_full_chart(self, symbol: Optional[str] = None, from_date: str = "", to_date: str = "", *, ticker: Optional[str] = None) -> dict:
         """
         Fetches end-of-day historical index prices (full OHLCV payload).
 
@@ -334,10 +334,10 @@ class IndexMCPTools(FMPMCPTools):
         Data source: FMP Stable Historical Price EOD Full API (Index symbols supported)
         - GET `https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=...&from=...&to=...`
         """
-        meta = {"tool": "get_historical_index_full_chart", "symbol": symbol, "from": from_date, "to": to_date}
-        sym = self._normalize_symbol(symbol)
+        sym = self._normalize_symbol(symbol or ticker or "")
+        meta = {"tool": "get_historical_index_full_chart", "symbol": sym, "from": from_date, "to": to_date}
         if not sym:
-            return mcp_envelope_err("symbol is required", meta=meta)
+            return mcp_envelope_err("symbol is required (provide `symbol` or `ticker`)", meta=meta)
         ferr = self._validate_iso_date(from_date, "from_date")
         if ferr:
             return ferr

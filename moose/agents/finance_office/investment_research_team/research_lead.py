@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 
 from moose.framework.llm_core import LLMClient
+from moose.framework.logging.tracing import get_current as get_current_trace
 LLM_AVAILABLE = True
 
 try:
@@ -293,7 +294,7 @@ class ResearchLead:
         elif err_val is not None and not isinstance(err_val, str):
             err_val = str(err_val)
 
-        return {
+        out = {
             "status": "success" if ok_flag else "error",
             "error": None if ok_flag else (err_val or "unknown_error"),
             "result": final if isinstance(final, dict) else {},
@@ -302,6 +303,27 @@ class ResearchLead:
             "llm_usage_total": (team_out.get("llm_usage_total") if isinstance(team_out, dict) else None),
             "llm_cost_total": (team_out.get("llm_cost_total") if isinstance(team_out, dict) else None),
         }
+
+        # Log right before returning (helps debug timeouts / downstream delivery issues).
+        try:
+            ctx = get_current_trace()
+            rid = str(getattr(ctx, "request_id", "") or "")
+            final_obj = out.get("result") if isinstance(out.get("result"), dict) else {}
+            inner = final_obj.get("result") if isinstance(final_obj.get("result"), dict) else {}
+            tickers = inner.get("tickers") if isinstance(inner.get("tickers"), list) else []
+            if self.logger:
+                self.logger.info(
+                    "investment_research_team.run_task returning"
+                    + (f" request_id={rid}" if rid else "")
+                    + f" status={out.get('status')}"
+                    + f" ok={bool(final_obj.get('ok')) if isinstance(final_obj.get('ok'), bool) else 'unknown'}"
+                    + f" tickers={len(tickers)}"
+                    + f" has_by_ticker={isinstance(inner.get('by_ticker'), dict)}"
+                )
+        except Exception:
+            pass
+
+        return out
     
     def _summarize_tools(self, *, agent_name: Optional[str] = None) -> str:
         """

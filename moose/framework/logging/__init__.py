@@ -385,6 +385,20 @@ class LLMLogger:
             cost: Cost in USD (for responses)
             **kwargs: Additional metadata
         """
+        # Attach current span_id (if any) for trace linkage.
+        span_id = None
+        try:
+            from moose.framework.logging.tracing import get_current as _trace_current
+        except Exception:
+            _trace_current = None  # type: ignore
+        try:
+            if _trace_current is not None:
+                _ctx = _trace_current()
+                if _ctx is not None:
+                    span_id = getattr(_ctx, "current_span_id", None)
+        except Exception:
+            span_id = None
+
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "request_id": request_id,
@@ -392,6 +406,9 @@ class LLMLogger:
             "model": model,
             "message": self._serialize_message(message),
         }
+
+        if span_id:
+            log_entry["span_id"] = span_id
         
         if usage:
             log_entry["usage"] = usage
@@ -407,6 +424,60 @@ class LLMLogger:
         
         # Also write to dedicated LLM log file in JSON format
         self._write_to_llm_log(log_entry)
+
+        # Best-effort: persist to trace DB (SQLite).
+        try:
+            from moose.framework.logging.trace_db import enqueue_event as _enqueue
+        except Exception:
+            _enqueue = None  # type: ignore
+        if _enqueue is not None and span_id:
+            try:
+                msg = log_entry.get("message") if isinstance(log_entry.get("message"), dict) else {}
+                role = None
+                mt = str((msg or {}).get("type") or "")
+                if mt == "HumanMessage":
+                    role = "user"
+                elif mt == "AIMessage":
+                    role = "assistant"
+                elif mt == "ToolMessage":
+                    role = "tool"
+                elif mt == "SystemMessage":
+                    role = "system"
+                else:
+                    role = mt.lower() if mt else "unknown"
+
+                _enqueue(
+                    "llm_message",
+                    {
+                        "span_id": span_id,
+                        "role": role,
+                        "content": (msg or {}).get("content"),
+                        "name": (msg or {}).get("name"),
+                        "tool_call_id": (msg or {}).get("tool_call_id"),
+                        "tool_calls_json": json.dumps((msg or {}).get("tool_calls"), default=str)
+                        if (msg or {}).get("tool_calls") is not None
+                        else None,
+                    },
+                )
+
+                if direction == "response":
+                    agent_name = None
+                    try:
+                        agent_name = str((kwargs or {}).get("agent_name") or "") or None
+                    except Exception:
+                        agent_name = None
+                    _enqueue(
+                        "llm_call_update",
+                        {
+                            "span_id": span_id,
+                            "agent_name": agent_name,
+                            "model": model,
+                            "usage_json": json.dumps(usage or {}, default=str) if usage is not None else None,
+                            "cost": float(cost) if cost is not None else None,
+                        },
+                    )
+            except Exception:
+                pass
     
     def log_tool_result(
         self,
@@ -425,6 +496,19 @@ class LLMLogger:
             tool_name: Name of the tool that was called
             **kwargs: Additional metadata
         """
+        span_id = None
+        try:
+            from moose.framework.logging.tracing import get_current as _trace_current
+        except Exception:
+            _trace_current = None  # type: ignore
+        try:
+            if _trace_current is not None:
+                _ctx = _trace_current()
+                if _ctx is not None:
+                    span_id = getattr(_ctx, "current_span_id", None)
+        except Exception:
+            span_id = None
+
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "request_id": request_id,
@@ -432,6 +516,9 @@ class LLMLogger:
             "model": model,
             "message": self._serialize_message(tool_message),
         }
+
+        if span_id:
+            log_entry["span_id"] = span_id
         
         if tool_name:
             log_entry["tool_name"] = tool_name
@@ -444,6 +531,29 @@ class LLMLogger:
         
         # Also write to dedicated LLM log file in JSON format
         self._write_to_llm_log(log_entry)
+
+        try:
+            from moose.framework.logging.trace_db import enqueue_event as _enqueue
+        except Exception:
+            _enqueue = None  # type: ignore
+        if _enqueue is not None and span_id:
+            try:
+                msg = log_entry.get("message") if isinstance(log_entry.get("message"), dict) else {}
+                _enqueue(
+                    "llm_message",
+                    {
+                        "span_id": span_id,
+                        "role": "tool",
+                        "content": (msg or {}).get("content"),
+                        "name": (msg or {}).get("name") or tool_name,
+                        "tool_call_id": (msg or {}).get("tool_call_id"),
+                        "tool_calls_json": json.dumps((msg or {}).get("tool_calls"), default=str)
+                        if (msg or {}).get("tool_calls") is not None
+                        else None,
+                    },
+                )
+            except Exception:
+                pass
     
     # Keep old methods for backward compatibility
     def log_request(
@@ -784,6 +894,14 @@ def set_project(project_id: str, base_dir: Optional[Path] = None):
     core_logger = get_core_logger()
     moose_log_file = _get_unique_log_file(_project_log_dir, "moose.log")
     core_logger.add_file_handler(moose_log_file)
+
+    # Enable per-project trace DB (best-effort; failures must not break startup).
+    try:
+        from moose.framework.logging.trace_db import init_trace_db
+
+        init_trace_db(project_id=str(project_id), log_dir=_project_log_dir)
+    except Exception:
+        pass
 
 
 def get_project_id() -> Optional[str]:

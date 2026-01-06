@@ -9,6 +9,8 @@ Singleton Flask server that handles multiple projects with:
 import json
 import threading
 import errno
+import sqlite3
+import os
 from typing import Dict, List, Optional, Set
 from pathlib import Path
 
@@ -73,8 +75,32 @@ class CoreWebServer:
         
         @self.app.route('/api/projects')
         def list_projects():
-            """List all registered projects."""
-            return jsonify(sorted(list(self._projects)))
+            """
+            List projects.
+
+            This is dynamic: it merges the in-memory registered projects with a best-effort
+            filesystem scan of the projects base directory so newly launched projects appear
+            without restarting the web UI.
+            """
+            projects: Set[str] = set(self._projects or set())
+
+            # Best-effort scan:
+            # - if MOOSE_PROJECTS_DIR is set, treat it as the projects base directory
+            # - else default to ./projects relative to current working directory
+            base = os.getenv("MOOSE_PROJECTS_DIR")
+            base_dir = Path(base) if base else (Path.cwd() / "projects")
+            try:
+                if base_dir.exists() and base_dir.is_dir():
+                    for child in base_dir.iterdir():
+                        if not child.is_dir():
+                            continue
+                        # Heuristic: include directory if it looks like a Moose project.
+                        if (child / "logs").exists() or (child / "project_config.json").exists():
+                            projects.add(child.name)
+            except Exception:
+                pass
+
+            return jsonify(sorted(list(projects)))
         
         @self.app.route('/api/projects/<project_id>/agents')
         def list_agents(project_id: str):
@@ -286,6 +312,265 @@ class CoreWebServer:
                     "per_day": per_day,
                 }
             )
+
+        # ------------------------------------------------------------------
+        # Trace DB (SQLite) endpoints
+        # ------------------------------------------------------------------
+        def _get_trace_db_path(project_id: str) -> Optional[Path]:
+            chat_manager = get_chat_manager()
+            try:
+                log_dir = chat_manager._get_log_dir(project_id)  # type: ignore[attr-defined]
+            except Exception:
+                log_dir = None
+            if not log_dir:
+                return None
+            db_path = Path(log_dir) / "trace.db"
+            return db_path if db_path.exists() and db_path.is_file() else None
+
+        @self.app.route('/api/projects/<project_id>/traces')
+        def list_traces(project_id: str):
+            """
+            List recent traces for a project.
+
+            Query params:
+              - limit: max traces (default 100, max 1000)
+              - q: optional substring filter on request_id
+              - since: YYYY-MM-DD (inclusive, based on traces.started_at)
+              - until: YYYY-MM-DD (inclusive, based on traces.started_at)
+              - ingress_only: 1/0 (default 1) - only include traces that have an ingress.http span
+            """
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return jsonify([])
+
+            limit = request.args.get('limit', type=int) or 100
+            limit = max(1, min(1000, int(limit)))
+            q = (request.args.get('q') or "").strip()
+            since = (request.args.get('since') or "").strip()
+            until = (request.args.get('until') or "").strip()
+            ingress_only = str(request.args.get('ingress_only') or "1").strip().lower() not in {"0", "false", "no"}
+
+            # Basic YYYY-MM-DD validation
+            def _is_date(s: str) -> bool:
+                if len(s) != 10:
+                    return False
+                return s[4] == "-" and s[7] == "-" and s[:4].isdigit() and s[5:7].isdigit() and s[8:10].isdigit()
+
+            since_ok = since if _is_date(since) else ""
+            until_ok = until if _is_date(until) else ""
+
+            # Build filters over traces.started_at (ISO string). This is lexicographically sortable.
+            where = []
+            args: list[object] = []
+            if q:
+                where.append("t.request_id LIKE ?")
+                args.append(f"%{q}%")
+            if since_ok:
+                where.append("t.started_at >= ?")
+                args.append(f"{since_ok}T00:00:00")
+            if until_ok:
+                # Inclusive end-of-day: compare to next day at 00:00.
+                try:
+                    import datetime as _dt
+
+                    y, m, d = int(until_ok[:4]), int(until_ok[5:7]), int(until_ok[8:10])
+                    nxt = (_dt.date(y, m, d) + _dt.timedelta(days=1)).isoformat()
+                    where.append("t.started_at < ?")
+                    args.append(f"{nxt}T00:00:00")
+                except Exception:
+                    pass
+
+            where_sql = " AND ".join(where) if where else "1=1"
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                if ingress_only:
+                    rows = conn.execute(
+                        f"""
+                        SELECT t.request_id, t.project_id, t.started_at, t.root_agent, t.root_kind, t.status
+                        FROM traces t
+                        WHERE ({where_sql})
+                          AND EXISTS (
+                            SELECT 1 FROM spans s
+                            WHERE s.request_id = t.request_id AND s.kind = 'ingress.http'
+                          )
+                        ORDER BY t.started_at DESC
+                        LIMIT ?;
+                        """,
+                        (*args, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"""
+                        SELECT t.request_id, t.project_id, t.started_at, t.root_agent, t.root_kind, t.status
+                        FROM traces t
+                        WHERE ({where_sql})
+                        ORDER BY t.started_at DESC
+                        LIMIT ?;
+                        """,
+                        (*args, limit),
+                    ).fetchall()
+                return jsonify([dict(r) for r in rows])
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        @self.app.route('/api/projects/<project_id>/traces/<request_id>')
+        def get_trace(project_id: str, request_id: str):
+            """Get a trace summary and all spans for the trace."""
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return jsonify({"trace": None, "spans": []})
+
+            rid = str(request_id or "").strip()
+            if not rid:
+                return jsonify({"trace": None, "spans": []})
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                tr = conn.execute(
+                    "SELECT request_id, project_id, started_at, root_agent, root_kind, status, attrs_json FROM traces WHERE request_id = ?;",
+                    (rid,),
+                ).fetchone()
+                spans = conn.execute(
+                    """
+                    SELECT span_id, request_id, parent_span_id, kind, name, start_ts, end_ts, status, error, attrs_json, project_id, agent_name
+                    FROM spans
+                    WHERE request_id = ?
+                    ORDER BY start_ts ASC;
+                    """,
+                    (rid,),
+                ).fetchall()
+                return jsonify({"trace": dict(tr) if tr else None, "spans": [dict(s) for s in spans]})
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        @self.app.route('/api/projects/<project_id>/traces/<request_id>/llm_chat')
+        def get_trace_llm_chat(project_id: str, request_id: str):
+            """
+            Flatten all llm.call spans' messages for a trace into a single chronological stream.
+
+            Intended for chat-bubble UI.
+            """
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return jsonify([])
+
+            rid = str(request_id or "").strip()
+            if not rid:
+                return jsonify([])
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT
+                      s.span_id AS span_id,
+                      s.kind AS span_kind,
+                      s.status AS span_status,
+                      s.start_ts AS span_start_ts,
+                      s.end_ts AS span_end_ts,
+                      s.name AS span_name,
+                      s.agent_name AS agent_name,
+                      p.kind AS parent_kind,
+                      p.name AS parent_name,
+                      m.role AS role,
+                      m.idx AS idx,
+                      m.content AS content,
+                      m.name AS name,
+                      m.tool_call_id AS tool_call_id,
+                      m.tool_calls_json AS tool_calls_json
+                    FROM spans s
+                    LEFT JOIN spans p ON p.span_id = s.parent_span_id
+                    JOIN llm_messages m ON m.span_id = s.span_id
+                    WHERE s.request_id = ?
+                      AND s.kind = 'llm.call'
+                    ORDER BY s.start_ts ASC, m.idx ASC;
+                    """,
+                    (rid,),
+                ).fetchall()
+                return jsonify([dict(r) for r in rows])
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        @self.app.route('/api/projects/<project_id>/spans/<span_id>')
+        def get_span(project_id: str, span_id: str):
+            """Get one span and its immediate children."""
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return jsonify({"span": None, "children": []})
+
+            sid = str(span_id or "").strip()
+            if not sid:
+                return jsonify({"span": None, "children": []})
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                sp = conn.execute(
+                    """
+                    SELECT span_id, request_id, parent_span_id, kind, name, start_ts, end_ts, status, error, attrs_json, project_id, agent_name
+                    FROM spans
+                    WHERE span_id = ?;
+                    """,
+                    (sid,),
+                ).fetchone()
+                children = conn.execute(
+                    """
+                    SELECT span_id, request_id, parent_span_id, kind, name, start_ts, end_ts, status
+                    FROM spans
+                    WHERE parent_span_id = ?
+                    ORDER BY start_ts ASC;
+                    """,
+                    (sid,),
+                ).fetchall()
+                return jsonify({"span": dict(sp) if sp else None, "children": [dict(c) for c in children]})
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        @self.app.route('/api/projects/<project_id>/spans/<span_id>/llm_messages')
+        def get_span_llm_messages(project_id: str, span_id: str):
+            """Get LLM messages for a given llm.call span."""
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return jsonify([])
+
+            sid = str(span_id or "").strip()
+            if not sid:
+                return jsonify([])
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT role, idx, content, name, tool_call_id, tool_calls_json
+                    FROM llm_messages
+                    WHERE span_id = ?
+                    ORDER BY idx ASC;
+                    """,
+                    (sid,),
+                ).fetchall()
+                return jsonify([dict(r) for r in rows])
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     
     def _check_agent_health(self, url: str, timeout: float = 2.0) -> str:
         """Check agent health via HTTP /health endpoint.
@@ -326,10 +611,7 @@ class CoreWebServer:
         
         try:
             # Import AgentLoader and AgentRegistry
-            try:
-                from moose.framework.agent_core import AgentLoader, AgentRegistry, ContainerManager
-            except ImportError:
-                from framework.agent_core import AgentLoader, AgentRegistry, ContainerManager
+            from moose.framework.agent_core import AgentLoader, AgentRegistry, ContainerManager
             
             loader = AgentLoader()
             registry = AgentRegistry()

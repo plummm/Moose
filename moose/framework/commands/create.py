@@ -3,13 +3,8 @@ import os
 import json
 import re
 from pathlib import Path
-try:
-    from moose.framework.logging import init_core_logger, get_core_logger, set_global_debug, set_project, get_project_logger
-    from moose.framework.agent_core import AgentLoader
-except ImportError:
-    # Fallback for development mode
-    from framework.logging import init_core_logger, get_core_logger, set_global_debug, set_project, get_project_logger
-    from framework.agent_core import AgentLoader
+from moose.framework.logging import init_core_logger, get_core_logger, set_global_debug, set_project, get_project_logger
+from moose.framework.agent_core import AgentLoader
 
 
 class CreateCommand:
@@ -138,7 +133,7 @@ __all__ = ['app', 'workflow', 'WorkflowState']
                     config_content = f.read()
             else:
                 # Generate default config if template doesn't exist
-                from framework.llm_core.config import ModelConfig
+                from moose.framework.llm_core.config import ModelConfig
                 config_obj = ModelConfig()
                 config_obj.save_template(config_path)
                 logger.info(f"Created LLM config file: {config_path}")
