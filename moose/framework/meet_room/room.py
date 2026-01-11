@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from .participants import MeetingParticipant
 from .types import DoneBehavior, Guardrails, MeetingMessage, MeetingMode, MeetingRole
+from .orders import MeetingOrder
 
 
 @dataclass
@@ -43,11 +44,13 @@ class MeetingRoom:
         mode: MeetingMode,
         guardrails: Optional[Guardrails] = None,
         host_id: Optional[str] = None,
+        order: Optional[MeetingOrder] = None,
     ) -> None:
         self.room_id = str(room_id)
         self.mode = mode
         self.guardrails = guardrails or Guardrails()
         self.host_id = str(host_id) if host_id is not None else None
+        self._order: Optional[MeetingOrder] = order
 
         self._participants: dict[str, MeetingParticipant] = {}
         self._room_messages: list[MeetingMessage] = []
@@ -56,12 +59,21 @@ class MeetingRoom:
 
         self._lock = asyncio.Lock()
         self._turns = 0
+        self._current_round = 0
         self._started_at = time.time()
 
         # Passive mode dispatch loop
         self._queue: asyncio.Queue[MeetingMessage] = asyncio.Queue()
         self._dispatch_task: Optional[asyncio.Task] = None
         self._dispatch_started = False
+
+        # Validate order requirement for ACTIVE mode
+        if self.mode == MeetingMode.ACTIVE and self._order is None:
+            raise ValueError("ACTIVE mode requires an order to be specified")
+        
+        # Validate order setup
+        if self._order is not None:
+            self._order.validate_setup(self)
 
     # -------------------------
     # Contextvar helpers (per-request)
@@ -119,6 +131,21 @@ class MeetingRoom:
         return dict(self._participants)
 
     # -------------------------
+    # Round tracking
+    # -------------------------
+    def current_round(self) -> int:
+        """Return the current round number."""
+        return self._current_round
+
+    def increment_round(self) -> None:
+        """Increment the current round counter."""
+        self._current_round += 1
+
+    def reset_round(self) -> None:
+        """Reset the current round counter to 0."""
+        self._current_round = 0
+
+    # -------------------------
     # Transcripts / rendering
     # -------------------------
     def room_messages(self) -> list[MeetingMessage]:
@@ -127,6 +154,36 @@ class MeetingRoom:
     def thread_messages(self, thread_id: str) -> list[MeetingMessage]:
         info = self._threads.get(thread_id)
         return list(info.messages) if info else []
+
+    def visible_messages(
+        self,
+        *,
+        for_participant: str,
+        thread_id: Optional[str],
+        limit: int = 80,
+    ) -> list[MeetingMessage]:
+        """
+        Return the participant-visible transcript messages (structured, not rendered text).
+
+        Semantics match render_view():
+        - Room transcript is visible to all participants.
+        - Private thread transcript is visible only if the participant is in that thread.
+
+        Args:
+            for_participant: participant id requesting the view
+            thread_id: thread id (private) or None for room transcript
+            limit: max messages from the tail of the transcript to return
+        """
+        pid = str(for_participant)
+        n = int(limit) if int(limit) > 0 else 80
+        if thread_id:
+            info = self._threads.get(thread_id)
+            if info is None or pid not in info.participants:
+                return []
+            msgs = info.messages
+        else:
+            msgs = self._room_messages
+        return list(msgs[-n:])
 
     def render_view(self, *, for_participant: str, thread_id: Optional[str]) -> str:
         """
@@ -160,6 +217,44 @@ class MeetingRoom:
         if (time.time() - self._started_at) >= float(self.guardrails.max_time_s):
             return True
         return False
+    
+    def should_stop(self) -> bool:
+        """
+        Public method for orders to check if the meeting should stop.
+        
+        Returns:
+            True if meeting should stop (max turns or time exceeded)
+        """
+        return self._should_stop()
+
+    def elapsed_s(self) -> float:
+        """Elapsed wall-clock seconds since meeting start."""
+        try:
+            return float(time.time() - float(self._started_at))
+        except Exception:
+            return 0.0
+
+    def is_time_exceeded(self) -> bool:
+        """Whether the meeting time limit has been exceeded."""
+        try:
+            return self.elapsed_s() >= float(self.guardrails.max_time_s)
+        except Exception:
+            return False
+
+    def is_turn_limit_exceeded(self) -> bool:
+        """Whether the meeting turn limit has been exceeded."""
+        try:
+            return int(self._turns) >= int(self.guardrails.max_turns)
+        except Exception:
+            return False
+    
+    def get_turns(self) -> int:
+        """Get current turn count."""
+        return self._turns
+    
+    def increment_turn(self) -> None:
+        """Increment turn counter."""
+        self._turns += 1
 
     # -------------------------
     # Publishing API
@@ -391,6 +486,15 @@ class MeetingRoom:
             await self.remove_participant(pid)
         else:
             p.wait_only = True
+    
+    async def apply_done_signal(self, msg: MeetingMessage) -> None:
+        """
+        Public method for orders to apply done signal handling.
+        
+        Args:
+            msg: Message that may contain done signal
+        """
+        await self._apply_done(msg)
 
     async def dispatch_message(self, msg: MeetingMessage) -> None:
         # Apply done first (so a participant can mark done and then stop responding)
@@ -441,73 +545,35 @@ class MeetingRoom:
             await self.start()
 
     async def _run_active(self) -> None:
-        if self.host_id and self.host_id not in self._participants:
-            raise ValueError("host_id is set but not present in participants")
+        """
+        Run ACTIVE mode meeting using the configured order.
+        
+        This method validates the setup and delegates to the order's run_active() method.
+        """
+        order = self._order
+        if order is None:
+            raise ValueError("ACTIVE mode requires an order to be specified")
 
-        # Opening: host posts topic prompt if desired (host implements take_turn)
-        if self.host_id:
-            host = self._participants[self.host_id]
-            if host.active and host.can_emit(self.guardrails):
-                for out in await host.take_turn(room=self):
-                    await self.publish(out)
-                    await self._apply_done(out)
-
-        rr: list[str] = list(self._participants.keys())
-        idx = 0
-        spoke_in_round = False
-        round_start_count = len(self._room_messages)
-
-        while not self._should_stop():
-            self._turns += 1
-
-            # update rr to include new joiners, drop leavers/inactive
-            rr = [pid for pid in rr if pid in self._participants and self._participants[pid].active]
-            for pid in self._participants.keys():
-                if pid not in rr and self._participants[pid].active:
-                    rr.append(pid)
-            if not rr:
-                break
-
-            pid = rr[idx % len(rr)]
-            idx += 1
-            p = self._participants.get(pid)
-            if p is None or not p.active or p.wait_only:
-                continue
-            if not p.can_emit(self.guardrails):
-                continue
-
-            before = len(self._room_messages)
-            outs = await p.take_turn(room=self)
-            for out in outs or []:
-                await self.publish(out)
-                await self._apply_done(out)
-            after = len(self._room_messages)
-            if after > before:
-                spoke_in_round = True
-
-            # If we completed a full cycle and nobody spoke, host concludes.
-            if idx % max(1, len(rr)) == 0:
-                if not spoke_in_round and self.host_id and self.host_id in self._participants:
-                    await self.send_room(
-                        sender_id=self.host_id,
-                        role=MeetingRole.SYSTEM,
-                        content="Final check: does anyone have last points? If not, we will conclude.",
-                        targets=None,
+        # Runtime validation: Check that host exists in participants if required
+        # DefenseOrder uses deterministic host messages and doesn't need host as participant
+        # Other orders (like RoundRobinOrder) need host as participant for take_turn()
+        if order.requires_host():
+            if not self.host_id:
+                raise ValueError(f"Order '{order.name}' requires a host_id to be set")
+            if order.name != "defense":
+                if self.host_id not in self._participants:
+                    raise ValueError(f"host_id '{self.host_id}' is set but not present in participants")
+        
+        # Runtime validation: Check that defense candidate exists (if order is DefenseOrder)
+        if order.name == "defense":
+            if hasattr(order, 'defense_candidate_id'):
+                if order.defense_candidate_id not in self._participants:
+                    raise ValueError(
+                        f"Defense candidate '{order.defense_candidate_id}' is not in participants"
                     )
-                    break
-                spoke_in_round = False
 
-            # also detect room stagnation over a full round (alternative to spoke_in_round)
-            if idx % max(1, len(rr)) == 0:
-                if len(self._room_messages) == round_start_count and self.host_id and self.host_id in self._participants:
-                    await self.send_room(
-                        sender_id=self.host_id,
-                        role=MeetingRole.SYSTEM,
-                        content="No new messages this round. Concluding the meeting.",
-                        targets=None,
-                    )
-                    break
-                round_start_count = len(self._room_messages)
+        # Delegate to order's run_active method
+        await order.run_active(self)
 
 
 

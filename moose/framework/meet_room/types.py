@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -66,10 +67,35 @@ class MeetingMessage:
         )
 
     def is_done_signal(self) -> bool:
+        # Primary: explicit metadata marker (preferred for programmatic participants)
         try:
-            return bool(self.metadata.get("done") is True)
+            if self.metadata.get("done") is True:
+                return True
         except Exception:
+            pass
+
+        # Secondary: allow participants to signal done via JSON in content:
+        #   {"done": true}
+        # This is required for LLM participants that cannot reliably set metadata.
+        try:
+            content = str(self.content or "").strip()
+        except Exception:
+            content = ""
+        if not content:
             return False
+
+        def _is_done_obj(obj: Any) -> bool:
+            return isinstance(obj, dict) and obj.get("done") is True
+
+        # Try parsing whole content as JSON
+        try:
+            parsed = json.loads(content)
+            if _is_done_obj(parsed):
+                return True
+        except Exception:
+            pass
+
+        return False
 
 
 @dataclass
@@ -92,5 +118,20 @@ class Guardrails:
     # ask_private wait timeout (seconds)
     help_timeout_s: float = 30.0
 
+
+@dataclass
+class HostPrompts:
+    """
+    Host prompt templates for orders that require host coordination (e.g., defense order).
+    
+    Fields are templates that can be formatted with participant names, round numbers, etc.
+    """
+    introduction_prompt: str = ""
+    ask_candidate_prompt: str = ""
+    candidate_agree_prompt: str = ""
+    candidate_disagree_prompt: str = ""
+    final_round_begin_prompt: str = ""
+    conclusion_round_begin_prompt: str = ""
+    turn_notification_template: str = "{participant_id}, it's your turn"
 
 

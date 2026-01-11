@@ -74,17 +74,43 @@ class LLMClientParticipant(MeetingParticipant):
         self.system_prompt = str(system_prompt or "")
         self.task_prompt = str(task_prompt or "").strip()
 
+    @staticmethod
+    def _to_llm_messages(view_msgs: list[MeetingMessage]) -> list[Any]:
+        """
+        Convert MeetingMessage transcript into LLMClient conversation messages.
+
+        We keep this intentionally simple (no pinning/budget trimming here).
+        """
+        from moose.framework.llm_core.models import Message, MessageRole
+
+        def _map_role(r: MeetingRole) -> MessageRole:
+            if r == MeetingRole.SYSTEM:
+                # Claude doesn't support non-consecutive system messages, so we use assistant role instead
+                return MessageRole.ASSISTANT
+            if r == MeetingRole.HUMAN:
+                return MessageRole.USER
+            if r == MeetingRole.TOOL:
+                return MessageRole.TOOL
+            return MessageRole.ASSISTANT
+
+        out: list[Message] = []
+        for m in view_msgs:
+            tgt = "" if m.targets is None else f" -> {m.targets}"
+            # Keep sender/target info in content so the model can follow multi-party context.
+            content = f"[{m.sender_id}{tgt}]: {m.content}"
+            out.append(Message(role=_map_role(m.role), content=content))
+        return out
+
     async def handle(self, msg: MeetingMessage, *, room: Any) -> list[MeetingMessage]:
-        view = room.render_view(for_participant=self.participant_id, thread_id=msg.thread_id)
+        view_msgs = room.visible_messages(for_participant=self.participant_id, thread_id=msg.thread_id)
+        history = self._to_llm_messages(view_msgs)
+
         user = f"""You are participating in a meeting.
 
 Incoming message:
 - sender: {msg.sender_id}
 - role: {msg.role.value}
 - content: {msg.content}
-
-Meeting context:
-{view}
 
 Instructions:
 - Reply ONLY if you are a target of this message (you are).
@@ -94,7 +120,7 @@ Return plain text only (no markdown)."""
         if self.task_prompt:
             user = f"{self.task_prompt}\n\n{user}"
 
-        resp = await self.llm_client.send_message(message=user, system_message=self.system_prompt)
+        resp = await self.llm_client.send_message(message=user, messages=history, system_message=self.system_prompt)
         text = str(getattr(resp, "content", "") or "").strip()
         if not text:
             return []
@@ -121,20 +147,14 @@ Return plain text only (no markdown)."""
     async def take_turn(self, *, room: Any) -> list[MeetingMessage]:
         if self.wait_only:
             return []
-        view = room.render_view(for_participant=self.participant_id, thread_id=None)
-        user = f"""It is your turn in the meeting. Speak only if you have something useful.
+        view_msgs = room.visible_messages(for_participant=self.participant_id, thread_id=None)
+        history = self._to_llm_messages(view_msgs)
 
-Meeting context:
-{view}
-
-Rules:
-- If you have nothing to add, respond with an empty message.
-- If you are done, set metadata.done=true in your output message.
-Return plain text only (no markdown)."""
+        user = f"""You are {self.participant_id}, it is your turn to speak."""
         if self.task_prompt:
             user = f"{self.task_prompt}\n\n{user}"
 
-        resp = await self.llm_client.send_message(message=user, system_message=self.system_prompt)
+        resp = await self.llm_client.send_message(message=user, messages=history, system_message=self.system_prompt)
         text = str(getattr(resp, "content", "") or "").strip()
         if not text:
             return []

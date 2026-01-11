@@ -144,42 +144,83 @@ def get_dashboard_html() -> str:
                         </div>
                     </div>
 
-                    <div class="costs-grid">
-                        <div class="costs-card">
-                            <div class="costs-card-title">Project totals</div>
-                            <div id="cost-totals" class="costs-metrics">Loading…</div>
-                        </div>
+                    <div id="costs-main-view">
+                        <div class="costs-grid">
+                            <div class="costs-card">
+                                <div class="costs-card-title">Project totals</div>
+                                <div id="cost-totals" class="costs-metrics">Loading…</div>
+                            </div>
 
+                            <div class="costs-card">
+                                <div class="costs-card-title">By agent</div>
+                                <div class="costs-table-container">
+                                    <table class="costs-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Agent</th>
+                                                <th>Cost (USD)</th>
+                                                <th>Input tokens</th>
+                                                <th>Output tokens</th>
+                                                <th>Total tokens</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="cost-by-agent-tbody">
+                                            <tr><td colspan="5" class="loading">Loading…</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="costs-card">
+                                <div class="costs-card-title">Cost per day (stacked)</div>
+                                <div id="chart-legend-cost" class="chart-legend"></div>
+                                <div id="chart-cost" class="stacked-chart"></div>
+                            </div>
+
+                            <div class="costs-card">
+                                <div class="costs-card-title">Tokens per day (stacked)</div>
+                                <div id="chart-legend-tokens" class="chart-legend"></div>
+                                <div id="chart-tokens" class="stacked-chart"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="costs-agent-view" style="display:none;">
                         <div class="costs-card">
-                            <div class="costs-card-title">By agent</div>
+                            <div class="costs-agent-header">
+                                <div class="costs-card-title">
+                                    Agent: <span id="cost-agent-name" class="mono"></span>
+                                </div>
+                                <div class="costs-agent-controls">
+                                    <button class="mini-btn" onclick="backToCostSummary()">Back</button>
+                                    <label class="muted">Rows</label>
+                                    <select id="cost-agent-limit" onchange="onAgentLimitChange()">
+                                        <option value="20">20</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
+                                    <button id="cost-agent-prev" class="mini-btn" onclick="agentPrevPage()">Prev</button>
+                                    <button id="cost-agent-next" class="mini-btn" onclick="agentNextPage()">Next</button>
+                                </div>
+                            </div>
+
                             <div class="costs-table-container">
                                 <table class="costs-table">
                                     <thead>
                                         <tr>
-                                            <th>Agent</th>
+                                            <th></th>
+                                            <th>Request id</th>
                                             <th>Cost (USD)</th>
                                             <th>Input tokens</th>
                                             <th>Output tokens</th>
                                             <th>Total tokens</th>
                                         </tr>
                                     </thead>
-                                    <tbody id="cost-by-agent-tbody">
-                                        <tr><td colspan="5" class="loading">Loading…</td></tr>
+                                    <tbody id="cost-agent-requests-tbody">
+                                        <tr><td colspan="6" class="loading">Loading…</td></tr>
                                     </tbody>
                                 </table>
                             </div>
-                        </div>
-
-                        <div class="costs-card">
-                            <div class="costs-card-title">Cost per day (stacked)</div>
-                            <div id="chart-legend-cost" class="chart-legend"></div>
-                            <div id="chart-cost" class="stacked-chart"></div>
-                        </div>
-
-                        <div class="costs-card">
-                            <div class="costs-card-title">Tokens per day (stacked)</div>
-                            <div id="chart-legend-tokens" class="chart-legend"></div>
-                            <div id="chart-tokens" class="stacked-chart"></div>
                         </div>
                     </div>
                 </section>
@@ -1077,6 +1118,99 @@ body {
     text-transform: uppercase;
 }
 
+.cost-link {
+    color: var(--accent-blue);
+    text-decoration: none;
+}
+
+.cost-link:hover {
+    text-decoration: underline;
+}
+
+.costs-agent-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.costs-agent-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.costs-agent-controls select {
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.tri-btn {
+    font: inherit;
+    padding: 0 4px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.tri-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-color);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.cost-agent-detail-row td {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.costs-subtable {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+}
+
+.costs-subtable th,
+.costs-subtable td {
+    padding: 6px 8px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 11px;
+}
+
+.costs-subtable th {
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+}
+
+/* Costs-only mode (agent request breakdown page) */
+.page-layout.costs-only .chat-panel,
+.page-layout.costs-only .resize-handle {
+    display: none;
+}
+
+.page-layout.costs-only .header,
+.page-layout.costs-only .tab-bar {
+    display: none;
+}
+
+.page-layout.costs-only #tab-content-overview,
+.page-layout.costs-only #tab-content-traces {
+    display: none !important;
+}
+
 .stacked-chart {
     display: flex;
     flex-direction: column;
@@ -1213,6 +1347,21 @@ let currentProject = null;
 let logEventSource = null;
 let chatEventSource = null;
 
+// URL-driven view state (applied once after projects load)
+let initialProjectFromUrl = null;
+let initialTabFromUrl = null;          // 'overview' | 'costs' | 'traces'
+let initialCostAgentFromUrl = null;    // agent name
+let initialTraceRequestIdFromUrl = null;
+let initialTraceIngressOnlyFromUrl = null; // boolean | null
+let _initialUrlApplied = false;
+
+// Costs agent-detail view state
+let costAgent = null;
+let agentPageLimit = 20;
+let agentPageOffset = 0;
+let agentHasMore = false;
+let agentExpanded = {}; // request_id -> bool
+
 // Buffers for preserving streamed messages when switching views
 let streamedLogs = [];
 let streamedMessages = [];
@@ -1228,9 +1377,36 @@ let hideToolMessages = false; // session-only
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    readUrlParams();
     loadProjects();
     initResizeHandle();
 });
+
+function readUrlParams() {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        const p = (params.get('project') || '').trim();
+        const tab = (params.get('tab') || '').trim().toLowerCase();
+        const agent = (params.get('agent') || '').trim();
+        const rid = (params.get('request_id') || '').trim();
+        const ingressOnlyRaw = (params.get('ingress_only') || '').trim().toLowerCase();
+
+        if (p) initialProjectFromUrl = p;
+        if (tab === 'costs' || tab === 'traces' || tab === 'overview') initialTabFromUrl = tab;
+        if (agent) initialCostAgentFromUrl = agent;
+        if (rid) initialTraceRequestIdFromUrl = rid;
+        if (ingressOnlyRaw) {
+            // ingress_only=0/1, false/true, no/yes
+            initialTraceIngressOnlyFromUrl = !(ingressOnlyRaw === '0' || ingressOnlyRaw === 'false' || ingressOnlyRaw === 'no');
+        }
+        // If an agent is specified, force costs tab.
+        if (initialCostAgentFromUrl) initialTabFromUrl = 'costs';
+        // If a request_id is specified, force traces tab.
+        if (initialTraceRequestIdFromUrl) initialTabFromUrl = 'traces';
+    } catch (e) {
+        // ignore
+    }
+}
 
 function onHideToolMessagesToggle() {
     const cb = document.getElementById('hide-tool-messages');
@@ -1279,12 +1455,24 @@ function switchRightTab(tabName) {
         contentCosts.classList.remove('active');
         contentTraces.classList.add('active');
         if (pageLayout) pageLayout.classList.add('traces-full');
+        if (pageLayout) pageLayout.classList.remove('costs-only');
         // Initialize date inputs to today if empty
         const sinceEl = document.getElementById('trace-since');
         const untilEl = document.getElementById('trace-until');
         const t = _todayIso();
         if (sinceEl && !sinceEl.value) sinceEl.value = t;
         if (untilEl && !untilEl.value) untilEl.value = t;
+
+        // Apply URL deep-link preferences if present
+        try {
+            const desiredId = window.__desiredTraceId || null;
+            const desiredIngress = (typeof window.__desiredIngressOnly === 'boolean') ? window.__desiredIngressOnly : null;
+            const ingressEl = document.getElementById('trace-ingress-only');
+            if (ingressEl && desiredIngress !== null) ingressEl.checked = !!desiredIngress;
+            const qEl = document.getElementById('trace-q');
+            if (qEl && desiredId) qEl.value = desiredId;
+        } catch (e) {}
+
         loadTracesDropdown();
     } else {
         btnOverview.classList.add('active');
@@ -1294,6 +1482,7 @@ function switchRightTab(tabName) {
         contentCosts.classList.remove('active');
         contentTraces.classList.remove('active');
         if (pageLayout) pageLayout.classList.remove('traces-full');
+        if (pageLayout) pageLayout.classList.remove('costs-only');
         // Stop trace polling when switching away
         if (traceChatPollInterval) {
             clearInterval(traceChatPollInterval);
@@ -1361,12 +1550,17 @@ async function loadProjects(preserveSelection = true) {
             dropdown.appendChild(option);
         });
         
-        // Preserve selection when possible; otherwise fall back to first project.
-        let desired = (preserveSelection ? (prev || currentProject || '') : '') || '';
-        if (desired && projects.includes(desired)) {
-            currentProject = desired;
+        // URL selection wins, otherwise preserve selection when possible; else fall back to first project.
+        if (initialProjectFromUrl && projects.includes(initialProjectFromUrl)) {
+            currentProject = initialProjectFromUrl;
+            initialProjectFromUrl = null;
         } else {
-            currentProject = projects[0];
+            let desired = (preserveSelection ? (prev || currentProject || '') : '') || '';
+            if (desired && projects.includes(desired)) {
+                currentProject = desired;
+            } else {
+                currentProject = projects[0];
+            }
         }
         dropdown.value = currentProject;
 
@@ -1420,8 +1614,32 @@ function loadProjectData() {
     connectChatStream();
     // Keep cost summary up to date for the selected project (even if tab not visible)
     loadCostSummary();
+    if (costAgent) {
+        loadAgentCostBreakdown();
+    }
     if (rightTab === 'traces') {
         loadTracesDropdown();
+    }
+
+    // Apply URL-driven initial view state once.
+    if (!_initialUrlApplied) {
+        _initialUrlApplied = true;
+        if (initialTabFromUrl) {
+            switchRightTab(initialTabFromUrl);
+        }
+        // If agent param present, enter agent detail view (cost-only).
+        if (initialCostAgentFromUrl) {
+            enterAgentCostView(initialCostAgentFromUrl);
+        } else {
+            exitAgentCostView();
+        }
+        // Trace deep link is applied when traces tab loads (see trace deeplink support).
+        if (initialTraceRequestIdFromUrl) {
+            window.__desiredTraceId = initialTraceRequestIdFromUrl;
+            if (initialTraceIngressOnlyFromUrl !== null) {
+                window.__desiredIngressOnly = initialTraceIngressOnlyFromUrl;
+            }
+        }
     }
 }
 
@@ -1551,6 +1769,21 @@ async function loadTracesDropdown() {
         const resp = await fetch(url);
         const traces = await resp.json();
         renderTraceDropdown(traces || []);
+        // URL deep-link: jump directly to a specific request_id (even if not in dropdown results).
+        try {
+            const desired = window.__desiredTraceId || null;
+            if (desired) {
+                selectedTraceId = String(desired);
+                const dd = document.getElementById('trace-dropdown');
+                if (dd) dd.value = selectedTraceId;
+                traceChatLastCount = 0;
+                loadTraceChat(selectedTraceId, true);
+                if (traceAdvanced) loadTraceAdvanced(selectedTraceId);
+                startTraceChatPolling(selectedTraceId);
+                // Apply once to avoid overriding subsequent user selection.
+                window.__desiredTraceId = null;
+            }
+        } catch (e) {}
         if (!selectedTraceId && traces && traces.length > 0) {
             selectedTraceId = traces[0].request_id;
             const dd = document.getElementById('trace-dropdown');
@@ -2534,6 +2767,245 @@ async function loadCostSummary() {
     }
 }
 
+// ---------------------------------------------------------------------
+// Costs: agent request-level breakdown view
+// ---------------------------------------------------------------------
+function exitAgentCostView() {
+    costAgent = null;
+    agentPageOffset = 0;
+    agentHasMore = false;
+    agentExpanded = {};
+    const main = document.getElementById('costs-main-view');
+    const view = document.getElementById('costs-agent-view');
+    if (main) main.style.display = '';
+    if (view) view.style.display = 'none';
+    const pageLayout = document.querySelector('.page-layout');
+    if (pageLayout) pageLayout.classList.remove('costs-only');
+}
+
+function enterAgentCostView(agent) {
+    costAgent = (agent || '').trim();
+    if (!costAgent) {
+        exitAgentCostView();
+        return;
+    }
+    agentPageOffset = 0;
+    agentHasMore = false;
+    agentExpanded = {};
+
+    const main = document.getElementById('costs-main-view');
+    const view = document.getElementById('costs-agent-view');
+    if (main) main.style.display = 'none';
+    if (view) view.style.display = '';
+
+    const nameEl = document.getElementById('cost-agent-name');
+    if (nameEl) nameEl.textContent = costAgent;
+
+    const limitSel = document.getElementById('cost-agent-limit');
+    if (limitSel) limitSel.value = String(agentPageLimit);
+
+    const pageLayout = document.querySelector('.page-layout');
+    if (pageLayout) pageLayout.classList.add('costs-only');
+
+    loadAgentCostBreakdown();
+}
+
+function backToCostSummary() {
+    // Navigate back to main cost page (no agent param).
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        params.set('project', currentProject || '');
+        params.set('tab', 'costs');
+        params.delete('agent');
+        params.delete('request_id');
+        params.delete('ingress_only');
+        window.location.search = params.toString();
+    } catch (e) {
+        window.location.href = '/';
+    }
+}
+
+function onAgentLimitChange() {
+    const sel = document.getElementById('cost-agent-limit');
+    const v = sel ? parseInt(sel.value || '20', 10) : 20;
+    agentPageLimit = (v === 50 || v === 100) ? v : 20;
+    agentPageOffset = 0;
+    loadAgentCostBreakdown();
+}
+
+function agentPrevPage() {
+    agentPageOffset = Math.max(0, agentPageOffset - agentPageLimit);
+    loadAgentCostBreakdown();
+}
+
+function agentNextPage() {
+    if (!agentHasMore) return;
+    agentPageOffset = agentPageOffset + agentPageLimit;
+    loadAgentCostBreakdown();
+}
+
+async function loadAgentCostBreakdown() {
+    if (!currentProject || !costAgent) return;
+    const tbody = document.getElementById('cost-agent-requests-tbody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading…</td></tr>';
+    try {
+        const url =
+            `/api/projects/${encodeURIComponent(currentProject)}` +
+            `/llm/usage_by_agent/${encodeURIComponent(costAgent)}` +
+            `?limit=${encodeURIComponent(String(agentPageLimit))}&offset=${encodeURIComponent(String(agentPageOffset))}`;
+        const resp = await fetch(url);
+        const data = await resp.json();
+        renderAgentCostBreakdown(data);
+    } catch (e) {
+        if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="loading">Failed to load agent breakdown.</td></tr>';
+    }
+}
+
+function openTraceDeepLink(requestId) {
+    try {
+        const params = new URLSearchParams(window.location.search || '');
+        params.set('project', currentProject || '');
+        params.set('tab', 'traces');
+        params.set('request_id', requestId || '');
+        params.set('ingress_only', '0');
+        params.delete('agent');
+        window.location.search = params.toString();
+    } catch (e) {
+        window.location.href = '/';
+    }
+}
+
+function renderAgentCostBreakdown(data) {
+    const tbody = document.getElementById('cost-agent-requests-tbody');
+    if (!tbody) return;
+
+    const agentName = (data && data.agent_name) ? String(data.agent_name) : (costAgent || '');
+    const nameEl = document.getElementById('cost-agent-name');
+    if (nameEl) nameEl.textContent = agentName;
+
+    const reqs = Array.isArray(data && data.requests) ? data.requests : [];
+    agentHasMore = !!(data && data.has_more);
+
+    const prevBtn = document.getElementById('cost-agent-prev');
+    const nextBtn = document.getElementById('cost-agent-next');
+    if (prevBtn) prevBtn.disabled = agentPageOffset <= 0;
+    if (nextBtn) nextBtn.disabled = !agentHasMore;
+
+    tbody.innerHTML = '';
+    if (!reqs || reqs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">No requests found for this agent.</td></tr>';
+        return;
+    }
+
+    for (const r of reqs) {
+        const rid = (r && r.request_id) ? String(r.request_id) : '';
+        if (!rid) continue;
+        const expanded = !!agentExpanded[rid];
+        const tokens = (r && r.tokens && typeof r.tokens === 'object') ? r.tokens : {};
+        const it = Number(tokens.input || 0);
+        const ot = Number(tokens.output || 0);
+        const tt = Number(tokens.total || 0);
+        const cost = Number(r.cost || 0);
+
+        const mainRow = document.createElement('tr');
+
+        const toggleTd = document.createElement('td');
+        const toggleBtn = document.createElement('button');
+        toggleBtn.className = 'tri-btn';
+        toggleBtn.type = 'button';
+        toggleBtn.textContent = expanded ? '▼' : '▶';
+        toggleTd.appendChild(toggleBtn);
+
+        const ridTd = document.createElement('td');
+        const ridLink = document.createElement('a');
+        ridLink.className = 'cost-link mono';
+        ridLink.href = '#';
+        ridLink.textContent = rid;
+        ridLink.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            openTraceDeepLink(rid);
+        });
+        ridTd.appendChild(ridLink);
+
+        const costTd = document.createElement('td');
+        costTd.textContent = `$${cost.toFixed(6)}`;
+        const itTd = document.createElement('td');
+        itTd.textContent = String(Math.round(it));
+        const otTd = document.createElement('td');
+        otTd.textContent = String(Math.round(ot));
+        const ttTd = document.createElement('td');
+        ttTd.textContent = String(Math.round(tt));
+
+        mainRow.appendChild(toggleTd);
+        mainRow.appendChild(ridTd);
+        mainRow.appendChild(costTd);
+        mainRow.appendChild(itTd);
+        mainRow.appendChild(otTd);
+        mainRow.appendChild(ttTd);
+
+        const detailRow = document.createElement('tr');
+        detailRow.className = 'cost-agent-detail-row';
+        detailRow.style.display = expanded ? '' : 'none';
+        const detailTd = document.createElement('td');
+        detailTd.colSpan = 6;
+
+        const byModel = Array.isArray(r && r.by_model) ? r.by_model : [];
+        if (byModel.length === 0) {
+            const msg = document.createElement('div');
+            msg.className = 'muted';
+            msg.textContent = 'No model breakdown available.';
+            detailTd.appendChild(msg);
+        } else {
+            const sub = document.createElement('table');
+            sub.className = 'costs-subtable';
+            sub.innerHTML = `
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Cost (USD)</th>
+                        <th>Input tokens</th>
+                        <th>Output tokens</th>
+                        <th>Total tokens</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const subBody = sub.querySelector('tbody');
+            for (const m of byModel) {
+                const modelName = (m && m.model) ? String(m.model) : 'unknown';
+                const mc = Number((m && m.cost) ? m.cost : 0);
+                const mtoks = (m && m.tokens && typeof m.tokens === 'object') ? m.tokens : {};
+                const mit = Number(mtoks.input || 0);
+                const mot = Number(mtoks.output || 0);
+                const mtt = Number(mtoks.total || 0);
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="mono">${escapeHtml(modelName)}</td>
+                    <td>$${mc.toFixed(6)}</td>
+                    <td>${Math.round(mit)}</td>
+                    <td>${Math.round(mot)}</td>
+                    <td>${Math.round(mtt)}</td>
+                `;
+                if (subBody) subBody.appendChild(tr);
+            }
+            detailTd.appendChild(sub);
+        }
+
+        detailRow.appendChild(detailTd);
+
+        toggleBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            agentExpanded[rid] = !agentExpanded[rid];
+            const now = !!agentExpanded[rid];
+            toggleBtn.textContent = now ? '▼' : '▶';
+            detailRow.style.display = now ? '' : 'none';
+        });
+
+        tbody.appendChild(mainRow);
+        tbody.appendChild(detailRow);
+    }
+}
+
 function _agentColor(agent) {
     // deterministic hue hash
     let h = 0;
@@ -2563,8 +3035,9 @@ function renderCostSummary(data) {
             const row = document.createElement('tr');
             const a = byAgent[agent] || {};
             const t = a.tokens || {};
+            const href = `/?project=${encodeURIComponent(currentProject || '')}&tab=costs&agent=${encodeURIComponent(agent)}`;
             row.innerHTML = `
-                <td>${escapeHtml(agent)}</td>
+                <td><a class="cost-link" href="${href}">${escapeHtml(agent)}</a></td>
                 <td>$${Number(a.cost || 0).toFixed(6)}</td>
                 <td>${t.input || 0}</td>
                 <td>${t.output || 0}</td>

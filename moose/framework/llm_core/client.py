@@ -72,6 +72,7 @@ class LLMClient:
         timeout: Optional[float] = None,
         config: Optional[ModelConfig] = None,
         tools: Optional[List[Any]] = None,
+        enable_web_search: bool = False,
         enable_multi_stage_reasoning: bool = False,
         multi_stage_marker: str = "<FINAL_ANSWER>",
         max_tool_iterations: int = 4,
@@ -176,6 +177,7 @@ class LLMClient:
         
         # Store tools for potential tool execution
         self.tools = tools or []
+        self.enable_web_search = bool(enable_web_search)
         self.tool_map = {}
         if self.tools:
             # Create a map of tool names to tool instances for easy lookup
@@ -197,6 +199,7 @@ class LLMClient:
                 timeout=timeout,
                 config=config,
                 tools=tools,
+                enable_web_search=self.enable_web_search,
                 **kwargs
             )
             self.logger.debug(f"Initialized LangChain LLM wrapper for {model}")
@@ -612,8 +615,6 @@ class LLMClient:
                         request_id=str(request_id),
                         agent_name=self.agent_name,
                         temperature=0,
-                        max_output_tokens=int(max_out),
-                        tool_choice="none",
                     )
                 partial = str(getattr(resp, "content", "") or "").strip()
                 if not partial:
@@ -1130,12 +1131,25 @@ Provide your final combined response:"""
         Returns:
             List of ToolMessage objects with tool results
         """
-        tool_messages = []
+        tool_messages: List[Message] = []
+
+        # Provider-native web search tools are executed by the model provider when bound via LangChain.
+        # They are NOT Moose/MCP tools and should not be executed by ToolRuntime.
+        WEB_SEARCH_TOOL_NAMES = {
+            # OpenAI
+            "web_search_preview",
+            # Anthropic beta web search
+            "web_search",
+            "web_search_20250305",
+            # Gemini
+            "google_search",
+        }
         
         for tool_call in tool_calls:
             # Handle both dict format and LangChain tool call object format
             if isinstance(tool_call, dict):
-                tool_name = tool_call.get('name')
+                # Some providers use `type` for tool name (e.g., OpenAI web_search_preview).
+                tool_name = tool_call.get('name') or tool_call.get('type')
                 tool_call_id = tool_call.get('id') or tool_call.get('tool_use_id') or tool_call.get('tool_call_id')
                 tool_args = tool_call.get('args', {})
             else:
@@ -1150,6 +1164,14 @@ Provide your final combined response:"""
                 # Convert tool_args to dict if it's not already
                 if not isinstance(tool_args, dict):
                     tool_args = dict(tool_args) if hasattr(tool_args, '__dict__') else {}
+
+            # Ignore provider-native web search tool calls when enabled; provider executes them internally.
+            if self.enable_web_search and tool_name in WEB_SEARCH_TOOL_NAMES:
+                try:
+                    self.logger.debug(f"Ignoring provider web-search tool call: {tool_name}")
+                except Exception:
+                    pass
+                continue
             
             if not tool_name or tool_name not in self.tool_map:
                 error_msg = f"Tool '{tool_name}' not found or not available"
@@ -1330,19 +1352,27 @@ Provide your final combined response:"""
                 system_message=system_message,
                 messages=conversation_messages,
             )
-            if current_tokens > safe_budget:
-                self.logger.warning(
-                    f"Context budget exceeded before LLM call (iter={iteration}): "
-                    f"tokens_estimate={current_tokens} > safe_budget={safe_budget}. Compacting history."
-                )
-                conversation_messages = await self._compact_conversation_messages_for_budget_async(
-                    conversation_messages=conversation_messages,
+            
+            while current_tokens > safe_budget:
+                conversation_messages.pop(0)
+                current_tokens = self._count_message_tokens(
+                    message="",
                     system_message=system_message,
-                    safe_budget=safe_budget,
-                    reserved_output_tokens=reserved_output_tokens,
-                    iteration=iteration,
-                    request_id=str(request_id),
+                    messages=conversation_messages,
                 )
+            # if current_tokens > safe_budget:
+            #     self.logger.warning(
+            #         f"Context budget exceeded before LLM call (iter={iteration}): "
+            #         f"tokens_estimate={current_tokens} > safe_budget={safe_budget}. Compacting history."
+            #     )
+            #     conversation_messages = await self._compact_conversation_messages_for_budget_async(
+            #         conversation_messages=conversation_messages,
+            #         system_message=system_message,
+            #         safe_budget=safe_budget,
+            #         reserved_output_tokens=reserved_output_tokens,
+            #         iteration=iteration,
+            #         request_id=str(request_id),
+            #     )
 
             # Use LangChain LLM wrapper asynchronously
             from moose.framework.logging.tracing import span as trace_span

@@ -5,7 +5,7 @@ Lightweight meeting room capability for Moose agents and LLM clients, enabling s
 ## Overview
 
 Meeting Room supports two interaction styles:
-- **ACTIVE**: Round-robin turn-taking with an optional host that opens/closes the meeting
+- **ACTIVE**: Turn-taking with configurable order system (e.g., round-robin, defense) and optional host coordination
 - **PASSIVE**: Help-style targeted messages (ask/answer), with an auto-start dispatch loop
 
 Features:
@@ -14,6 +14,8 @@ Features:
 - Guardrails (max turns, time limits, per-participant limits)
 - Done signals for structured completion
 - Contextvar-based room access for tools
+- Configurable turn-taking orders (round-robin, defense, etc.)
+- Round tracking and management
 
 ## Key concepts
 
@@ -46,6 +48,38 @@ Participants decide what to publish by returning `[]` (say nothing) or `MeetingM
 - done handling: `allow_done_exit`, `done_behavior` (`leave` vs `wait_only`)
 - help waiting timeout: `help_timeout_s` (used by `ask_private`)
 
+### Orders (ACTIVE mode only)
+
+ACTIVE mode meetings use an **order** system to control turn-taking. Orders are classes that implement the `MeetingOrder` interface:
+
+- `RoundRobinOrder`: Participants speak in circular order (default round-robin behavior)
+- Custom orders: Implement `MeetingOrder` for specialized turn-taking patterns (e.g., defense mode)
+
+**Required for ACTIVE mode**: You must specify an order when creating an ACTIVE mode room:
+
+```python
+from moose.framework.meet_room import MeetingRoom, MeetingMode, RoundRobinOrder
+
+room = MeetingRoom(
+    room_id="my_meeting",
+    mode=MeetingMode.ACTIVE,
+    order=RoundRobinOrder(),  # Required!
+    guardrails=Guardrails(max_turns=10)
+)
+```
+
+**Round tracking**: The room tracks the current round number:
+- `room.current_round()` - Get current round number
+- `room.increment_round()` - Increment round counter
+- `room.reset_round()` - Reset round counter to 0
+
+**Order interface**:
+- `get_next_speaker(room, context)` - Returns next participant to speak
+- `requires_host()` - Whether this order requires a host
+- `should_host_speak(room, context)` - Whether host should speak now
+- `is_final_round(room)` - Check if current round is final
+- `on_round_start(room)` / `on_round_end(room)` - Hooks for round transitions
+
 ### Context (per-request)
 
 Tools can access the active meeting room via a contextvar:
@@ -72,10 +106,10 @@ Return shape:
 ## Usage Example
 
 ```python
-from moose.framework.meet_room import MeetingRoom, MeetingMode, Guardrails
+from moose.framework.meet_room import MeetingRoom, MeetingMode, Guardrails, RoundRobinOrder
 from moose.framework.meet_room.participants import LLMClientParticipant
 
-# Create meeting room
+# Create PASSIVE mode meeting room (no order needed)
 room = MeetingRoom(
     room_id="research_meeting",
     mode=MeetingMode.PASSIVE,
@@ -84,6 +118,14 @@ room = MeetingRoom(
         max_time_s=3600,
         help_timeout_s=30.0
     )
+)
+
+# Create ACTIVE mode meeting room (order required)
+active_room = MeetingRoom(
+    room_id="active_meeting",
+    mode=MeetingMode.ACTIVE,
+    order=RoundRobinOrder(),  # Required for ACTIVE mode
+    guardrails=Guardrails(max_turns=50, max_time_s=1800)
 )
 
 # Add participants
@@ -208,7 +250,7 @@ sequenceDiagram
     end
 ```
 
-### ACTIVE Round-Robin (Host + Turns)
+### ACTIVE Mode with Round-Robin Order
 
 ```mermaid
 sequenceDiagram

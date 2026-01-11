@@ -313,6 +313,208 @@ class CoreWebServer:
                 }
             )
 
+        @self.app.route('/api/projects/<project_id>/llm/usage_by_agent/<agent_name>')
+        def get_llm_usage_by_agent(project_id: str, agent_name: str):
+            """
+            Paginated request-level cost + token usage for one agent (agent-only attribution).
+
+            Backed by the project's trace.db (SQLite), using spans + llm_calls tables.
+
+            Query params:
+              - limit: page size (default 20; allowed: 20, 50, 100)
+              - offset: offset for pagination (default 0)
+            """
+
+            def _empty(*, limit: int, offset: int):
+                return {
+                    "project_id": project_id,
+                    "agent_name": str(agent_name or ""),
+                    "limit": int(limit),
+                    "offset": int(offset),
+                    "has_more": False,
+                    "requests": [],
+                }
+
+            # Validate pagination inputs
+            limit = request.args.get("limit", type=int) or 20
+            if limit not in (20, 50, 100):
+                limit = 20
+            offset = request.args.get("offset", type=int) or 0
+            try:
+                offset = max(0, int(offset))
+            except Exception:
+                offset = 0
+
+            agent = str(agent_name or "").strip()
+            if not agent:
+                return jsonify(_empty(limit=limit, offset=offset))
+
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return jsonify(_empty(limit=limit, offset=offset))
+
+            def _parse_usage(usage_json: object) -> tuple[int, int, int]:
+                if usage_json is None:
+                    return (0, 0, 0)
+                raw = usage_json
+                if isinstance(raw, (bytes, bytearray)):
+                    try:
+                        raw = raw.decode("utf-8", errors="ignore")
+                    except Exception:
+                        raw = ""
+                if isinstance(raw, str):
+                    s = raw.strip()
+                    if not s:
+                        return (0, 0, 0)
+                    try:
+                        obj = json.loads(s)
+                    except Exception:
+                        return (0, 0, 0)
+                elif isinstance(raw, dict):
+                    obj = raw
+                else:
+                    return (0, 0, 0)
+
+                if not isinstance(obj, dict):
+                    return (0, 0, 0)
+                try:
+                    it = int(obj.get("input_tokens", 0) or 0)
+                    ot = int(obj.get("output_tokens", 0) or 0)
+                    tt = int(obj.get("total_tokens", it + ot) or (it + ot))
+                    return (it, ot, tt)
+                except Exception:
+                    return (0, 0, 0)
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                # Page request_ids by most recent llm call start_ts for this agent.
+                page_rows = conn.execute(
+                    """
+                    SELECT
+                      s.request_id AS request_id,
+                      MAX(COALESCE(s.start_ts, 0)) AS last_ts
+                    FROM llm_calls lc
+                    JOIN spans s ON s.span_id = lc.span_id
+                    WHERE lc.agent_name = ?
+                      AND s.request_id IS NOT NULL
+                      AND s.request_id != ''
+                    GROUP BY s.request_id
+                    ORDER BY last_ts DESC
+                    LIMIT ? OFFSET ?;
+                    """,
+                    (agent, int(limit) + 1, int(offset)),
+                ).fetchall()
+
+                has_more = len(page_rows) > limit
+                page_rows = page_rows[:limit]
+
+                request_ids = [str(r["request_id"] or "") for r in page_rows if str(r["request_id"] or "")]
+                last_ts_map = {str(r["request_id"] or ""): float(r["last_ts"] or 0.0) for r in page_rows if str(r["request_id"] or "")}
+
+                if not request_ids:
+                    return jsonify(_empty(limit=limit, offset=offset))
+
+                placeholders = ",".join(["?"] * len(request_ids))
+                call_rows = conn.execute(
+                    f"""
+                    SELECT
+                      s.request_id AS request_id,
+                      s.start_ts AS start_ts,
+                      lc.model AS model,
+                      lc.cost AS cost,
+                      lc.usage_json AS usage_json
+                    FROM llm_calls lc
+                    JOIN spans s ON s.span_id = lc.span_id
+                    WHERE lc.agent_name = ?
+                      AND s.request_id IN ({placeholders})
+                    ORDER BY s.start_ts DESC;
+                    """,
+                    (agent, *request_ids),
+                ).fetchall()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+            # Aggregate per request and per model.
+            req_buckets: Dict[str, Dict[str, object]] = {}
+            for rid in request_ids:
+                req_buckets[rid] = {
+                    "request_id": rid,
+                    "last_ts": float(last_ts_map.get(rid, 0.0) or 0.0),
+                    "cost": 0.0,
+                    "tokens": {"input": 0, "output": 0, "total": 0},
+                    "_by_model": {},  # internal map: model -> bucket
+                }
+
+            for row in call_rows:
+                rid = str(row["request_id"] or "").strip()
+                if not rid or rid not in req_buckets:
+                    continue
+
+                model = str(row["model"] or "").strip() or "unknown"
+                try:
+                    cost = float(row["cost"] or 0.0)
+                except Exception:
+                    cost = 0.0
+                it, ot, tt = _parse_usage(row["usage_json"])
+
+                bucket = req_buckets[rid]
+                bucket["cost"] = float(bucket.get("cost", 0.0) or 0.0) + cost
+                toks = bucket.get("tokens") if isinstance(bucket.get("tokens"), dict) else {"input": 0, "output": 0, "total": 0}
+                toks["input"] = int(toks.get("input", 0) or 0) + it
+                toks["output"] = int(toks.get("output", 0) or 0) + ot
+                toks["total"] = int(toks.get("total", 0) or 0) + tt
+                bucket["tokens"] = toks
+
+                by_model = bucket.get("_by_model")
+                if not isinstance(by_model, dict):
+                    by_model = {}
+                    bucket["_by_model"] = by_model
+                mb = by_model.get(model)
+                if not isinstance(mb, dict):
+                    mb = {"model": model, "cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                    by_model[model] = mb
+                mb["cost"] = float(mb.get("cost", 0.0) or 0.0) + cost
+                mt = mb.get("tokens") if isinstance(mb.get("tokens"), dict) else {"input": 0, "output": 0, "total": 0}
+                mt["input"] = int(mt.get("input", 0) or 0) + it
+                mt["output"] = int(mt.get("output", 0) or 0) + ot
+                mt["total"] = int(mt.get("total", 0) or 0) + tt
+                mb["tokens"] = mt
+
+            # Format response preserving most-recent-first request order from page_rows.
+            requests_out: List[Dict[str, object]] = []
+            for rid in request_ids:
+                b = req_buckets.get(rid) or {}
+                by_model_map = b.get("_by_model") if isinstance(b.get("_by_model"), dict) else {}
+                by_model_list = list(by_model_map.values()) if isinstance(by_model_map, dict) else []
+                # Stable sort: highest cost first, then model name
+                try:
+                    by_model_list.sort(key=lambda x: (-float((x or {}).get("cost", 0.0) or 0.0), str((x or {}).get("model", ""))))
+                except Exception:
+                    pass
+                out = {
+                    "request_id": rid,
+                    "last_ts": float(b.get("last_ts", 0.0) or 0.0),
+                    "cost": float(b.get("cost", 0.0) or 0.0),
+                    "tokens": b.get("tokens") if isinstance(b.get("tokens"), dict) else {"input": 0, "output": 0, "total": 0},
+                    "by_model": by_model_list,
+                }
+                requests_out.append(out)
+
+            return jsonify(
+                {
+                    "project_id": project_id,
+                    "agent_name": agent,
+                    "limit": int(limit),
+                    "offset": int(offset),
+                    "has_more": bool(has_more),
+                    "requests": requests_out,
+                }
+            )
+
         # ------------------------------------------------------------------
         # Trace DB (SQLite) endpoints
         # ------------------------------------------------------------------

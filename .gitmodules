@@ -1,0 +1,19 @@
+[submodule "moose/agents/finance_office"]
+	path = moose/agents/finance_office
+	url = https://github.com/plummm/moose-finance-office.git
+
+[submodule "moose/agents/news_scraper"]
+	path = moose/agents/news_scraper
+	url = https://github.com/plummm/moose-news-scraper.git
+
+[submodule "moose/agents/nytimes_agent"]
+	path = moose/agents/nytimes_agent
+	url = https://github.com/plummm/moose-nytimes-agent.git
+
+[submodule "moose/agents/telegram_stock_bot"]
+	path = moose/agents/telegram_stock_bot
+	url = https://github.com/plummm/moose-telegram-stock-bot.git
+
+[submodule "moose/agents/truthsocial_agent"]
+	path = moose/agents/truthsocial_agent
+	url = https://github.com/plummm/moose-truthsocial-agent.git

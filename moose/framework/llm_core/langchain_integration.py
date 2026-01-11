@@ -67,6 +67,7 @@ class LangChainLLM:
         timeout: Optional[float] = None,
         config: Optional[ModelConfig] = None,
         tools: Optional[List[Any]] = None,
+        enable_web_search: bool = False,
         **kwargs
     ):
         """
@@ -92,6 +93,7 @@ class LangChainLLM:
         self.provider = get_provider(model)
         self.config = config
         self.tools = tools or []
+        self.enable_web_search = bool(enable_web_search)
 
         # IMPORTANT:
         # Do NOT keep a single long-lived LangChain chat model instance here.
@@ -138,6 +140,39 @@ class LangChainLLM:
         self._llm_lock = threading.Lock()
 
         self.logger.debug(f"Initialized LangChainLLM for {self.provider.value} model: {model}")
+
+    def _web_search_tool_for_provider(self) -> Optional[Any]:
+        """
+        Provider-native web search tool binding (LangChain bind_tools).
+
+        Returns:
+          - OpenAI: dict {"type": "web_search_preview"}
+          - Anthropic: BetaWebSearchTool20250305Param(...)
+          - Gemini: dict {"google_search": {}}
+          - Other providers: None
+        """
+        if self.provider == LLMProvider.OPENAI:
+            return {"type": "web_search_preview"}
+
+        if self.provider == LLMProvider.GEMINI:
+            return {"google_search": {}}
+
+        if self.provider == LLMProvider.ANTHROPIC:
+            try:
+                from anthropic.types.beta import BetaWebSearchTool20250305Param
+            except Exception as e:
+                try:
+                    self.logger.warning(f"Anthropic web search tool not available (missing beta types): {e}")
+                except Exception:
+                    pass
+                return None
+
+            return BetaWebSearchTool20250305Param(
+                name="web_search",
+                type="web_search_20250305",
+            )
+
+        return None
 
     @staticmethod
     def _is_quota_exhausted_429(e: Exception) -> bool:
@@ -194,12 +229,42 @@ class LangChainLLM:
             timeout=self._init_timeout,
             **self._init_kwargs,
         )
-        if self.tools:
+        tools_to_bind: List[Any] = list(self.tools or [])
+        if self.enable_web_search:
+            t = self._web_search_tool_for_provider()
+            if t is not None:
+                tools_to_bind.append(t)
+
+        # Anthropic (Claude) supports deferred tool loading via a tool-search helper.
+        # If any bound tool is marked with extras={"defer_loading": True}, we best-effort
+        # add Anthropic's regex tool search parameter object so the model can discover tools
+        # without eagerly loading all schemas into context.
+        if self.provider == LLMProvider.ANTHROPIC and tools_to_bind:
+            def _is_deferred_tool(x: Any) -> bool:
+                ex = getattr(x, "extras", None)
+                return isinstance(ex, dict) and ex.get("defer_loading") is True
+
+            if any(_is_deferred_tool(x) for x in tools_to_bind):
+                try:
+                    from anthropic.types.beta import BetaToolSearchToolBm25_20251119Param  # type: ignore
+
+                    tools_to_bind.insert(
+                        0,
+                        BetaToolSearchToolBm25_20251119Param(
+                            name="tool_search_tool_bm25",
+                            type="tool_search_tool_bm25_20251119",
+                        ),
+                    )
+                except Exception:
+                    # Best-effort only; skip if anthropic beta types aren't installed.
+                    pass
+
+        if tools_to_bind:
             # Some providers (notably Gemini function calling) reject duplicate tool/function names.
             # Deduplicate by tool.name to keep the schema valid.
             deduped_tools: List[Any] = []
             seen_names: set[str] = set()
-            for t in self.tools:
+            for t in tools_to_bind:
                 name = getattr(t, "name", None)
                 name = str(name) if name is not None else ""
                 if name and name in seen_names:
@@ -207,11 +272,11 @@ class LangChainLLM:
                 if name:
                     seen_names.add(name)
                 deduped_tools.append(t)
-            if len(deduped_tools) != len(self.tools):
+            if len(deduped_tools) != len(tools_to_bind):
                 try:
                     self.logger.warning(
                         "Deduplicated %d tool(s) by name before bind_tools for model=%s",
-                        (len(self.tools) - len(deduped_tools)),
+                        (len(tools_to_bind) - len(deduped_tools)),
                         self.model,
                     )
                 except Exception:
