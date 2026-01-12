@@ -10,3 +10,4 @@ build/
 entry.py
 Dockerfile
 agent_config.json
+__pycache__/

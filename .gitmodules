@@ -17,6 +17,7 @@
 [submodule "moose/agents/truthsocial_agent"]
 	path = moose/agents/truthsocial_agent
 	url = git@github.com:plummm/moose-truthsocial-agent.git
+
 [submodule "moose/agents/alpaca_trader"]
 	path = moose/agents/alpaca_trader
 	url = git@github.com:plummm/moose-alpaca-trader.git
