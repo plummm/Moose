@@ -1,4 +1,4 @@
-"""Command to run a Moose project with web UI."""
+"""Command to run a Moose project."""
 
 import os
 import sys
@@ -10,9 +10,8 @@ from pathlib import Path
 
 from moose.framework.logging import (
     init_core_logger, get_core_logger, set_global_debug,
-    set_project, reinit_llm_logger, enable_webui_logging, _current_log_suffix
+    set_project, reinit_llm_logger, _current_log_suffix
 )
-from moose.web_ui import register_project
 from moose.framework.agent_core import AgentLoader, ContainerManager
 
 
@@ -21,7 +20,7 @@ class RunCommand:
     
     def custom_subparser(self, subparser, cmd):
         """Create and return a subparser for the run command."""
-        parser = subparser.add_parser(cmd, help='Run a Moose project with web UI')
+        parser = subparser.add_parser(cmd, help='Run a Moose project (starts enabled agents)')
         
         parser.add_argument(
             'project_id',
@@ -32,15 +31,9 @@ class RunCommand:
         )
         
         parser.add_argument(
-            '--no-web',
-            action='store_true',
-            help='Disable the web UI server'
-        )
-
-        parser.add_argument(
             '--no-agents',
             action='store_true',
-            help='Do not start enabled agents; run only the web UI/logging loop'
+            help='Do not start enabled agents (useful for validating config / logs)'
         )
 
         parser.add_argument(
@@ -88,27 +81,6 @@ class RunCommand:
         
         logger = get_core_logger()
         logger.info(f"Starting project: {project_id}")
-        
-        # Start web UI server unless disabled
-        web_port_str = os.environ.get('MOOSE_WEB_UI_PORT')
-        
-        if args.no_web:
-            logger.info("Web UI disabled via --no-web flag")
-        elif not web_port_str:
-            logger.info("MOOSE_WEB_UI_PORT not set, web UI will be disabled")
-        else:
-            try:
-                web_port = int(web_port_str)
-                server = register_project(project_id, port=web_port)
-                enable_webui_logging(project_id)
-                logger.info(f"Web UI available at http://localhost:{web_port}")
-            except ValueError:
-                logger.warning(f"Invalid MOOSE_WEB_UI_PORT value: {web_port_str}, web UI disabled")
-            except ImportError as e:
-                logger.warning(f"Could not start web UI: {e}")
-                logger.warning("Install Flask with: pip install flask")
-            except Exception as e:
-                logger.warning(f"Could not start web UI: {e}")
 
         # Load project_config.json (enabled_agents)
         enabled_agents: list[str] = []

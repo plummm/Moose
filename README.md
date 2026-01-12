@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 ```bash
 export MOOSE_PROJECTS_DIR=/path/to/projects
-export MOOSE_WEB_UI_PORT=8080  # Optional: Enable web UI
+export MOOSE_WEB_UI_PORT=8080  # Optional default for `moose web` (can be overridden by --port)
 
 # LLM API Keys
 export OPENAI_API_KEY="your-key"
@@ -50,13 +50,19 @@ python -m moose create my_project --agents agent1 agent2
 python -m moose run my_project
 ```
 
-### 4. Debug an Agent Locally
+### 4. Start the Web UI (optional)
+
+```bash
+python -m moose web --port 8080 --projects-dir /path/to/projects
+```
+
+### 5. Debug an Agent Locally
 
 ```bash
 python -m moose agent debug --name agent1
 ```
 
-### 5. Deploy an Agent
+### 6. Deploy an Agent
 
 ```bash
 python -m moose agent deploy --name agent1
@@ -248,7 +254,8 @@ See [Agent Core README](moose/framework/agent_core/README.md) for detailed agent
 ## CLI Commands
 
 - `moose create <project> --agents <list>`: Create new project with enabled agents
-- `moose run <project>`: Run project with web UI and enabled agents
+- `moose run <project>`: Run project and enabled agents
+- `moose web`: Start the Moose web UI
 - `moose agent debug --name <agent>`: Run agent locally for debugging
 - `moose agent deploy --name <agent>`: Deploy agent in Docker container
 - `moose test <component>`: Run test suite
@@ -264,7 +271,7 @@ Agents communicate via HTTP endpoints. Each agent can:
 ## Environment Variables
 
 - `MOOSE_PROJECTS_DIR`: Base directory for projects (default: `./projects`)
-- `MOOSE_WEB_UI_PORT`: Web UI server port (optional)
+- `MOOSE_WEB_UI_PORT`: Default Web UI server port for `moose web` (optional; can be overridden by `--port`)
 - `MOOSE_LLM_CONFIG_PATH`: Override LLM config file path
 - `MOOSE_LLM_CONFIG_NAME`: Override LLM config filename (default: `model_config.yaml`)
 - `MOOSE_AGENT_DEBUG`: Enable debug logging for agents
