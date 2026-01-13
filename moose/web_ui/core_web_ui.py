@@ -3,24 +3,38 @@
 Provides the main dashboard page with:
 - MOOSE ASCII art header
 - Project dropdown selector
-- Online agents section
-- Logging section with file selector and live streaming
+- Online agents section with status indicators
+- Logging section with file selector, live streaming, and log level filters
 - Chat section with file selector and live streaming
+- Costs section with Chart.js visualizations and time range controls
+- Traces section for distributed tracing
+
+Improvements (v2):
+- External CSS/JS for better caching and maintainability
+- Chart.js for interactive charts with time range controls
+- SSE pause on tab visibility change (resource optimization)
+- Log level filtering
+- Skeleton loaders for async content
+- Connection status indicator
+- Auto-scroll toggles
 """
 
 # MOOSE ASCII Art
 MOOSE_ASCII = r"""
- __  __  ___   ___  ____  _____ 
+ __  __  ___   ___  ____  _____
 |  \/  |/ _ \ / _ \/ ___|| ____|
-| |\/| | | | | | | \___ \|  _|  
-| |  | | |_| | |_| |___) | |___ 
+| |\/| | | | | | | \___ \|  _|
+| |  | | |_| | |_| |___) | |___
 |_|  |_|\___/ \___/|____/|_____|
 """
+
+# Version for cache busting and verification
+WEB_UI_VERSION = "2.6.0"
 
 
 def get_dashboard_html() -> str:
     """Generate the main dashboard HTML page.
-    
+
     Returns:
         Complete HTML page as string
     """
@@ -30,9 +44,10 @@ def get_dashboard_html() -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Moose Dashboard</title>
-    <style>
-{get_css()}
-    </style>
+    <!-- External CSS (versioned for cache busting) -->
+    <link rel="stylesheet" href="/static/css/main.css?v={WEB_UI_VERSION}">
+    <!-- Chart.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="page-layout">
@@ -40,34 +55,53 @@ def get_dashboard_html() -> str:
         <section class="chat-panel" id="chat-panel">
             <div class="section-header">
                 <h2>Chat</h2>
-                <div class="section-controls">
-                    <label class="chat-toggle">
-                        <input type="checkbox" id="hide-tool-messages" onchange="onHideToolMessagesToggle()" />
-                        <span>Hide tool messages</span>
-                    </label>
-                    <select id="chat-file-dropdown" onchange="onChatFileChange()">
-                        <option value="live">Live Stream</option>
-                    </select>
-                    <button class="refresh-btn" onclick="switchToLiveChat()" title="Switch to live stream">
-                        &#x21bb;
-                    </button>
+                <div id="connection-status" class="connection-status connected">
+                    <span class="dot"></span>Connected
                 </div>
             </div>
-            <div class="chat-container" id="chat-container">
+            <div class="section-controls" style="margin-bottom: 12px;">
+                <label class="chat-toggle">
+                    <input type="checkbox" id="hide-tool-messages" onchange="onHideToolMessagesToggle()" />
+                    <span>Hide tool messages</span>
+                </label>
+                <select id="chat-file-dropdown" onchange="onChatFileChange()">
+                    <option value="live">Live Stream</option>
+                </select>
+                <button class="refresh-btn" onclick="switchToLiveChat()" title="Switch to live stream">
+                    &#x21bb;
+                </button>
+            </div>
+            <!-- Chat info bar showing message count -->
+            <div id="chat-info-bar" class="chat-info-bar">
+                <span class="muted">Loading messages...</span>
+            </div>
+            <div class="chat-container" id="chat-container" style="position: relative;">
+                <!-- Start overlay - shown by default, hidden when chat starts -->
+                <div id="chat-start-overlay" class="chat-start-overlay">
+                    <button class="chat-start-btn" onclick="startChat()">
+                        ▶ Start Chat
+                    </button>
+                    <p class="muted">Click to load chat history and live updates</p>
+                </div>
                 <div class="chat-messages" id="chat-messages">
                     <!-- Messages will be inserted here -->
+                    <!-- "Load older messages" button will be dynamically added here when needed -->
                 </div>
+                <button id="chat-auto-scroll-btn" class="auto-scroll-toggle active" onclick="toggleChatAutoScroll()">
+                    Auto-scroll: ON
+                </button>
             </div>
         </section>
-        
+
         <!-- Resize Handle -->
         <div class="resize-handle" id="resize-handle"></div>
-        
+
         <!-- Right Panel: Header, Agents, Logging -->
         <div class="right-panel" id="right-panel">
             <!-- Header with ASCII Art and Project Selector -->
             <header class="header">
                 <pre class="ascii-art">{MOOSE_ASCII}</pre>
+                <div class="version-tag">v{WEB_UI_VERSION}</div>
                 <div class="project-selector">
                     <label for="project-dropdown">Project:</label>
                     <select id="project-dropdown" onchange="onProjectChange()">
@@ -124,10 +158,31 @@ def get_dashboard_html() -> str:
                             </button>
                         </div>
                     </div>
-                    <div class="log-container" id="log-container">
+                    <!-- Log Level Filters -->
+                    <div class="filter-group" style="margin-bottom: 12px;">
+                        <label>Filter:</label>
+                        <div class="log-level-filters">
+                            <label class="log-level-filter debug">
+                                <input type="checkbox" id="log-filter-debug" checked /> DEBUG
+                            </label>
+                            <label class="log-level-filter info">
+                                <input type="checkbox" id="log-filter-info" checked /> INFO
+                            </label>
+                            <label class="log-level-filter warning">
+                                <input type="checkbox" id="log-filter-warning" checked /> WARNING
+                            </label>
+                            <label class="log-level-filter error">
+                                <input type="checkbox" id="log-filter-error" checked /> ERROR
+                            </label>
+                        </div>
+                    </div>
+                    <div class="log-container" id="log-container" style="position: relative;">
                         <div class="log-entries" id="log-entries">
                             <!-- Log entries will be inserted here -->
                         </div>
+                        <button id="log-auto-scroll-btn" class="auto-scroll-toggle active" onclick="toggleLogAutoScroll()">
+                            Auto-scroll: ON
+                        </button>
                     </div>
                 </section>
             </div>
@@ -171,16 +226,36 @@ def get_dashboard_html() -> str:
                                 </div>
                             </div>
 
+                            <!-- Chart Time Range Controls -->
                             <div class="costs-card">
-                                <div class="costs-card-title">Cost per day (stacked)</div>
-                                <div id="chart-legend-cost" class="chart-legend"></div>
-                                <div id="chart-cost" class="stacked-chart"></div>
+                                <div class="costs-card-title">Daily Cost Trends</div>
+                                <div class="chart-controls">
+                                    <div class="chart-control-group">
+                                        <label>Time Range:</label>
+                                        <select id="chart-time-range" onchange="onChartTimeRangeChange()">
+                                            <option value="7d" selected>Last 7 days</option>
+                                            <option value="24h">Last 24 hours</option>
+                                            <option value="30d">Last 30 days</option>
+                                            <option value="all">All time</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="chart-canvas-container">
+                                    <canvas id="chart-cost-canvas"></canvas>
+                                </div>
+                                <!-- Fallback for non-Chart.js -->
+                                <div id="chart-legend-cost" class="chart-legend" style="display: none;"></div>
+                                <div id="chart-cost" class="stacked-chart" style="display: none;"></div>
                             </div>
 
                             <div class="costs-card">
-                                <div class="costs-card-title">Tokens per day (stacked)</div>
-                                <div id="chart-legend-tokens" class="chart-legend"></div>
-                                <div id="chart-tokens" class="stacked-chart"></div>
+                                <div class="costs-card-title">Daily Token Usage</div>
+                                <div class="chart-canvas-container">
+                                    <canvas id="chart-tokens-canvas"></canvas>
+                                </div>
+                                <!-- Fallback for non-Chart.js -->
+                                <div id="chart-legend-tokens" class="chart-legend" style="display: none;"></div>
+                                <div id="chart-tokens" class="stacked-chart" style="display: none;"></div>
                             </div>
                         </div>
                     </div>
@@ -261,10 +336,9 @@ def get_dashboard_html() -> str:
             </div>
         </div>
     </div>
-    
-    <script>
-{get_javascript()}
-    </script>
+
+    <!-- External JavaScript (versioned for cache busting) -->
+    <script src="/static/js/app.js?v={WEB_UI_VERSION}"></script>
 </body>
 </html>'''
 

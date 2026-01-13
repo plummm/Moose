@@ -15,13 +15,16 @@ from typing import Dict, List, Optional, Set
 from pathlib import Path
 
 try:
-    from flask import Flask, Response, jsonify, request
+    from flask import Flask, Response, jsonify, request, send_from_directory
 except ImportError:
     raise ImportError("Flask is required for the web UI. Install it with: pip install flask")
 
 from .log_manager import get_log_manager
 from .chat_manager import get_chat_manager
 from .core_web_ui import get_dashboard_html
+
+# Get the directory containing this file for static file serving
+_THIS_DIR = Path(__file__).parent
 
 
 class CoreWebServer:
@@ -67,11 +70,29 @@ class CoreWebServer:
     
     def _register_routes(self):
         """Register all Flask routes."""
-        
+
         @self.app.route('/')
         def dashboard():
             """Serve the main dashboard page."""
             return get_dashboard_html()
+
+        @self.app.route('/static/<path:subpath>')
+        def serve_static(subpath):
+            """Serve static files (CSS, JS).
+
+            We explicitly disable caching so UI changes take effect immediately during local dev.
+            The HTML also includes cache-busting query params, but headers help avoid confusing
+            mixed-version behavior.
+            """
+            static_dir = _THIS_DIR / 'static'
+            resp = send_from_directory(str(static_dir), subpath)
+            try:
+                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+            except Exception:
+                pass
+            return resp
         
         @self.app.route('/api/projects')
         def list_projects():
@@ -164,30 +185,59 @@ class CoreWebServer:
         @self.app.route('/api/projects/<project_id>/chat')
         def get_chat(project_id: str):
             """Get chat messages for a project.
-            
+
             Query params:
                 file: Optional historical agent log file name (e.g., agents/<agent>.log.<n>)
+                limit: Maximum number of messages to return (default 50, for paginated mode)
+                before: Only return messages before this timestamp (ISO format, for pagination)
+                mode: 'paginated' for new pagination mode, otherwise legacy buffer mode
             """
             chat_manager = get_chat_manager()
             file = request.args.get('file')
-            
+            mode = request.args.get('mode', '')
+
             if file:
                 # Load historical chat file
                 messages = chat_manager.read_chat_file(project_id, file)
-            else:
-                # Get buffered messages
-                messages = chat_manager.get_buffer(project_id)
-            
+                return jsonify(messages)
+
+            if mode == 'paginated':
+                # New paginated mode - reads from current agent log files
+                try:
+                    limit = int(request.args.get('limit', '50'))
+                except ValueError:
+                    limit = 50
+                limit = max(1, min(limit, 200))  # Clamp between 1 and 200
+
+                before = request.args.get('before')
+
+                result = chat_manager.get_recent_messages(
+                    project_id,
+                    limit=limit,
+                    before=before
+                )
+                return jsonify(result)
+
+            # Legacy mode: return buffered messages
+            messages = chat_manager.get_buffer(project_id)
             return jsonify(messages)
-        
+
         @self.app.route('/api/projects/<project_id>/chat/stream')
         def stream_chat(project_id: str):
-            """SSE stream for real-time chat messages."""
+            """SSE stream for real-time chat messages.
+
+            Query params:
+                since: Only stream messages newer than this timestamp (ISO format).
+                       When provided, enables efficient live-tail mode where historical
+                       messages are loaded via the paginated API and only new messages
+                       come through the SSE stream.
+            """
             chat_manager = get_chat_manager()
-            
+            since = request.args.get('since')
+
             def generate():
-                yield from chat_manager.generate_sse_stream(project_id)
-            
+                yield from chat_manager.generate_sse_stream(project_id, since=since)
+
             return Response(
                 generate(),
                 mimetype='text/event-stream',
@@ -824,6 +874,7 @@ class CoreWebServer:
             for agent_name in agent_names:
                 status = 'stopped'
                 url = None
+                local_url = None  # For health checking
                 container_name = ''
                 interactive_mode = ''
                 mode = 'http'
@@ -838,7 +889,8 @@ class CoreWebServer:
                         http_config = interactive_config.get('http_server', {})
                         port = http_config.get('port', 8000)
                         interactive_mode = f"http (localhost:{port})"
-                        url = f"http://localhost:{port}"
+                        local_url = f"http://localhost:{port}"
+                        url = f"https://{agent_name}.etenal.me"
                     elif mode == 'file':
                         file_config = interactive_config.get('file', {})
                         watch_dir = file_config.get('watch_dir', '/project/agent_io')
@@ -849,9 +901,9 @@ class CoreWebServer:
                     interactive_mode = 'unknown'
                 
                 # Check agent status
-                if mode == 'http' and url:
-                    # For HTTP mode, check health endpoint
-                    status = self._check_agent_health(url)
+                if mode == 'http' and local_url:
+                    # For HTTP mode, check health endpoint using local URL
+                    status = self._check_agent_health(local_url)
                 else:
                     # For other modes, check container status
                     container_id = registry.get_container_id(project_id, agent_name)

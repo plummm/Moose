@@ -167,22 +167,109 @@ class ChatManager:
     
     def get_buffer(self, project_id: str, limit: Optional[int] = None) -> List[dict]:
         """Get buffered messages for a project.
-        
+
         Args:
             project_id: Project identifier
             limit: Maximum number of messages to return (from end)
-            
+
         Returns:
             List of chat messages
         """
         with self._lock:
             if project_id not in self._buffers:
                 return []
-            
+
             buffer = list(self._buffers[project_id])
             if limit:
                 return buffer[-limit:]
             return buffer
+
+    def get_recent_messages(
+        self,
+        project_id: str,
+        limit: int = 50,
+        before: Optional[str] = None,
+        base_dir: Optional[Path] = None
+    ) -> Dict[str, Any]:
+        """Get recent messages with pagination support.
+
+        This method reads from all current agent log files and returns the most
+        recent messages, with support for pagination via the 'before' timestamp.
+
+        Args:
+            project_id: Project identifier
+            limit: Maximum number of messages to return
+            before: Only return messages with timestamp before this value (ISO format)
+            base_dir: Base directory for projects
+
+        Returns:
+            Dict with:
+                - messages: List of chat messages (newest last)
+                - has_more: Boolean indicating if there are older messages
+                - oldest_timestamp: Timestamp of oldest returned message (for pagination)
+                - newest_timestamp: Timestamp of newest returned message (for SSE since param)
+                - total_available: Approximate total messages available
+        """
+        # Read all messages from current agent log files
+        all_messages = []
+        files = self._iter_current_agent_log_files(project_id)
+
+        for log_file in files:
+            messages = self._read_messages_from_file(log_file)
+            all_messages.extend(messages)
+
+        # Sort by timestamp (oldest first)
+        all_messages.sort(key=lambda m: m.get('timestamp', ''))
+
+        total_available = len(all_messages)
+
+        # Filter by 'before' if specified
+        if before:
+            all_messages = [m for m in all_messages if m.get('timestamp', '') < before]
+
+        # Get the last 'limit' messages
+        has_more = len(all_messages) > limit
+        result_messages = all_messages[-limit:] if len(all_messages) > limit else all_messages
+
+        oldest_timestamp = result_messages[0].get('timestamp') if result_messages else None
+        newest_timestamp = result_messages[-1].get('timestamp') if result_messages else None
+
+        return {
+            'messages': result_messages,
+            'has_more': has_more,
+            'oldest_timestamp': oldest_timestamp,
+            'newest_timestamp': newest_timestamp,
+            'total_available': total_available
+        }
+
+    def _read_messages_from_file(self, log_file: Path) -> List[dict]:
+        """Read and parse all LLM JSONL entries from a log file.
+
+        Args:
+            log_file: Path to the log file
+
+        Returns:
+            List of parsed chat messages
+        """
+        messages = []
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or not line.startswith("{"):
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if "direction" not in entry or "message" not in entry:
+                        continue
+                    messages.extend(self._parse_llm_entry(entry))
+        except Exception:
+            pass
+        return messages
     
     def _iter_current_agent_log_files(self, project_id: str) -> List[Path]:
         """Return the best-effort 'current run' agent log file for each agent.
@@ -589,37 +676,60 @@ class ChatManager:
         # Default to cwd/projects
         return Path.cwd() / "projects" / project_id / "logs"
     
-    def generate_sse_stream(self, project_id: str) -> Generator[str, None, None]:
+    def generate_sse_stream(
+        self,
+        project_id: str,
+        since: Optional[str] = None
+    ) -> Generator[str, None, None]:
         """Generate SSE stream for a project's chat messages.
-        
+
         Streams from the live buffer which is continuously populated by a background watcher.
         The current log file (highest numbered) represents the current tool run.
-        On connection, sends all messages from the current file (persists on refresh).
-        
+
+        When 'since' is provided, only sends messages newer than that timestamp.
+        This enables efficient live-tail mode where historical messages are loaded
+        via the paginated API and only new messages come through SSE.
+
         Args:
             project_id: Project identifier
-            
+            since: Only stream messages with timestamp > since (ISO format)
+
         Yields:
             SSE formatted strings
         """
         # Start background watcher if not already running
         self._start_watching(project_id)
-        
+
         # Subscribe to live updates
         queue = self.subscribe(project_id)
-        
+
         try:
-            # Send accumulated messages from current session (for persistence on refresh)
-            for msg in self.get_buffer(project_id):
-                yield f"data: {json.dumps(msg)}\n\n"
-            
+            # If no 'since' parameter, send accumulated messages (legacy behavior)
+            # If 'since' is provided, skip historical messages - client already has them
+            if not since:
+                for msg in self.get_buffer(project_id):
+                    yield f"data: {json.dumps(msg)}\n\n"
+            else:
+                # Send only messages newer than 'since' from buffer
+                for msg in self.get_buffer(project_id):
+                    msg_ts = msg.get('timestamp', '')
+                    if msg_ts > since:
+                        yield f"data: {json.dumps(msg)}\n\n"
+
             # Continue streaming new messages as they arrive
             keepalive_timeout = 30  # Send keepalive every 30 seconds
-            
+
             while True:
                 try:
                     # Wait for new messages from the live buffer
                     msg = queue.get(timeout=keepalive_timeout)
+
+                    # If 'since' is set, only send messages newer than since
+                    if since:
+                        msg_ts = msg.get('timestamp', '')
+                        if msg_ts <= since:
+                            continue
+
                     yield f"data: {json.dumps(msg)}\n\n"
                 except Empty:
                     # Send keepalive to prevent connection timeout
