@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 from moose.framework.logging.tracing import Span, SpanExporter, register_exporter
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _json_dumps(obj: Any) -> str:
@@ -133,6 +133,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             CREATE TABLE IF NOT EXISTS tool_calls (
               span_id TEXT PRIMARY KEY,
               tool_name TEXT,
+              tool_call_id TEXT,
               args_json TEXT,
               result_json TEXT,
               error TEXT
@@ -140,7 +141,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_name ON tool_calls(tool_name);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id ON tool_calls(tool_call_id);")
 
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
+        conn.commit()
+    elif user_version < 2:
+        # Add tool_call_id for linking tool calls to LLM tool_call_id.
+        try:
+            conn.execute("ALTER TABLE tool_calls ADD COLUMN tool_call_id TEXT;")
+        except Exception:
+            pass
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id ON tool_calls(tool_call_id);")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
         conn.commit()
 
@@ -364,12 +375,13 @@ def _db_tool_call(conn: sqlite3.Connection, payload: Dict[str, Any]) -> None:
         return
     conn.execute(
         """
-        INSERT OR REPLACE INTO tool_calls(span_id, tool_name, args_json, result_json, error)
-        VALUES (?, ?, ?, ?, ?);
+        INSERT OR REPLACE INTO tool_calls(span_id, tool_name, tool_call_id, args_json, result_json, error)
+        VALUES (?, ?, ?, ?, ?, ?);
         """,
         (
             span_id,
             payload.get("tool_name"),
+            payload.get("tool_call_id"),
             payload.get("args_json"),
             payload.get("result_json"),
             payload.get("error"),

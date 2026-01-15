@@ -286,6 +286,7 @@ class CoreWebServer:
             totals_tokens = {"input": 0, "output": 0, "total": 0}
             by_agent: Dict[str, Dict[str, object]] = {}
             per_day_map: Dict[str, Dict[str, Dict[str, object]]] = {}
+            totals_by_provider: Dict[str, Dict[str, object]] = {}
 
             def _bump(bucket: Dict[str, object], *, cost: float, it: int, ot: int, tt: int):
                 bucket["cost"] = float(bucket.get("cost", 0.0) or 0.0) + float(cost or 0.0)
@@ -294,6 +295,41 @@ class CoreWebServer:
                 toks["output"] = int(toks.get("output", 0) or 0) + int(ot or 0)
                 toks["total"] = int(toks.get("total", 0) or 0) + int(tt or 0)
                 bucket["tokens"] = toks
+
+            def _normalize_provider(raw: object, model: object) -> str:
+                """
+                Best-effort provider name normalization for UI grouping.
+
+                We prefer the explicit response_metadata.model_provider field when present.
+                Fallback heuristics use model name prefixes.
+                """
+                p = (str(raw or "").strip() or "").lower()
+                m = (str(model or "").strip() or "").lower()
+                if p:
+                    if p in {"openai"}:
+                        return "OpenAI"
+                    if p in {"google_genai", "google", "gemini"}:
+                        return "Gemini"
+                    if p in {"anthropic"}:
+                        return "Anthropic"
+                    if p in {"xai", "grok"}:
+                        return "xAI"
+                    return str(raw or "Unknown").strip() or "Unknown"
+                # Heuristic from model name
+                if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
+                    return "OpenAI"
+                if m.startswith("gemini"):
+                    return "Gemini"
+                if m.startswith("claude"):
+                    return "Anthropic"
+                return "Unknown"
+
+            def _extract_provider(entry: dict) -> str:
+                # Most logs store provider inside message.response_metadata.model_provider
+                msg = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+                resp_meta = msg.get("response_metadata") if isinstance(msg.get("response_metadata"), dict) else {}
+                raw_provider = resp_meta.get("model_provider") or entry.get("model_provider") or entry.get("provider")
+                return _normalize_provider(raw_provider, entry.get("model"))
 
             for filename in files:
                 fp = log_dir / filename
@@ -322,6 +358,7 @@ class CoreWebServer:
                             agent = str(meta.get("agent_name") or entry.get("agent_name") or "unknown")
                             ts = str(entry.get("timestamp") or "")
                             day = ts[:10] if len(ts) >= 10 else "unknown"
+                            provider = _extract_provider(entry)
 
                             usage = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
                             try:
@@ -341,15 +378,36 @@ class CoreWebServer:
                             totals_tokens["output"] += ot
                             totals_tokens["total"] += tt
 
+                            # Totals by provider
+                            if provider not in totals_by_provider:
+                                totals_by_provider[provider] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                            _bump(totals_by_provider[provider], cost=cost, it=it, ot=ot, tt=tt)
+
                             if agent not in by_agent:
-                                by_agent[agent] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                                by_agent[agent] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}, "by_provider": {}}
                             _bump(by_agent[agent], cost=cost, it=it, ot=ot, tt=tt)
+                            # Agent by provider
+                            bp = by_agent[agent].get("by_provider")
+                            if not isinstance(bp, dict):
+                                bp = {}
+                                by_agent[agent]["by_provider"] = bp
+                            if provider not in bp:
+                                bp[provider] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                            _bump(bp[provider], cost=cost, it=it, ot=ot, tt=tt)
 
                             if day not in per_day_map:
                                 per_day_map[day] = {}
                             if agent not in per_day_map[day]:
-                                per_day_map[day][agent] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                                per_day_map[day][agent] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}, "by_provider": {}}
                             _bump(per_day_map[day][agent], cost=cost, it=it, ot=ot, tt=tt)
+                            # Per-day agent by provider
+                            day_bp = per_day_map[day][agent].get("by_provider")
+                            if not isinstance(day_bp, dict):
+                                day_bp = {}
+                                per_day_map[day][agent]["by_provider"] = day_bp
+                            if provider not in day_bp:
+                                day_bp[provider] = {"cost": 0.0, "tokens": {"input": 0, "output": 0, "total": 0}}
+                            _bump(day_bp[provider], cost=cost, it=it, ot=ot, tt=tt)
                 except Exception:
                     continue
 
@@ -357,7 +415,7 @@ class CoreWebServer:
             return jsonify(
                 {
                     "project_id": project_id,
-                    "totals": {"cost": float(totals_cost), "tokens": totals_tokens},
+                    "totals": {"cost": float(totals_cost), "tokens": totals_tokens, "by_provider": totals_by_provider},
                     "by_agent": by_agent,
                     "per_day": per_day,
                 }
@@ -443,6 +501,7 @@ class CoreWebServer:
                     """
                     SELECT
                       s.request_id AS request_id,
+                      MIN(COALESCE(s.start_ts, 0)) AS first_ts,
                       MAX(COALESCE(s.start_ts, 0)) AS last_ts
                     FROM llm_calls lc
                     JOIN spans s ON s.span_id = lc.span_id
@@ -461,6 +520,7 @@ class CoreWebServer:
 
                 request_ids = [str(r["request_id"] or "") for r in page_rows if str(r["request_id"] or "")]
                 last_ts_map = {str(r["request_id"] or ""): float(r["last_ts"] or 0.0) for r in page_rows if str(r["request_id"] or "")}
+                first_ts_map = {str(r["request_id"] or ""): float(r["first_ts"] or 0.0) for r in page_rows if str(r["request_id"] or "")}
 
                 if not request_ids:
                     return jsonify(_empty(limit=limit, offset=offset))
@@ -493,6 +553,7 @@ class CoreWebServer:
             for rid in request_ids:
                 req_buckets[rid] = {
                     "request_id": rid,
+                    "first_ts": float(first_ts_map.get(rid, 0.0) or 0.0),
                     "last_ts": float(last_ts_map.get(rid, 0.0) or 0.0),
                     "cost": 0.0,
                     "tokens": {"input": 0, "output": 0, "total": 0},
@@ -547,6 +608,7 @@ class CoreWebServer:
                     pass
                 out = {
                     "request_id": rid,
+                    "first_ts": float(b.get("first_ts", 0.0) or 0.0),
                     "last_ts": float(b.get("last_ts", 0.0) or 0.0),
                     "cost": float(b.get("cost", 0.0) or 0.0),
                     "tokens": b.get("tokens") if isinstance(b.get("tokens"), dict) else {"input": 0, "output": 0, "total": 0},
@@ -722,33 +784,73 @@ class CoreWebServer:
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             try:
-                rows = conn.execute(
+                try:
+                    tc_cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(tool_calls);").fetchall()]
+                except Exception:
+                    tc_cols = []
+                has_tool_call_id = "tool_call_id" in tc_cols
+
+                if has_tool_call_id:
+                    query = """
+                        SELECT
+                          s.span_id AS span_id,
+                          s.kind AS span_kind,
+                          s.status AS span_status,
+                          s.start_ts AS span_start_ts,
+                          s.end_ts AS span_end_ts,
+                          s.name AS span_name,
+                          s.agent_name AS agent_name,
+                          p.kind AS parent_kind,
+                          p.name AS parent_name,
+                          m.role AS role,
+                          m.idx AS idx,
+                          m.content AS content,
+                          m.name AS name,
+                          m.tool_call_id AS tool_call_id,
+                          m.tool_calls_json AS tool_calls_json,
+                          tc.tool_name AS tool_call_name,
+                          tc.args_json AS tool_args_json,
+                          tc.result_json AS tool_result_json,
+                          tc.error AS tool_error
+                        FROM spans s
+                        LEFT JOIN spans p ON p.span_id = s.parent_span_id
+                        LEFT JOIN tool_calls tc ON tc.tool_call_id = m.tool_call_id
+                        JOIN llm_messages m ON m.span_id = s.span_id
+                        WHERE s.request_id = ?
+                          AND s.kind = 'llm.call'
+                        ORDER BY s.start_ts ASC, m.idx ASC;
                     """
-                    SELECT
-                      s.span_id AS span_id,
-                      s.kind AS span_kind,
-                      s.status AS span_status,
-                      s.start_ts AS span_start_ts,
-                      s.end_ts AS span_end_ts,
-                      s.name AS span_name,
-                      s.agent_name AS agent_name,
-                      p.kind AS parent_kind,
-                      p.name AS parent_name,
-                      m.role AS role,
-                      m.idx AS idx,
-                      m.content AS content,
-                      m.name AS name,
-                      m.tool_call_id AS tool_call_id,
-                      m.tool_calls_json AS tool_calls_json
-                    FROM spans s
-                    LEFT JOIN spans p ON p.span_id = s.parent_span_id
-                    JOIN llm_messages m ON m.span_id = s.span_id
-                    WHERE s.request_id = ?
-                      AND s.kind = 'llm.call'
-                    ORDER BY s.start_ts ASC, m.idx ASC;
-                    """,
-                    (rid,),
-                ).fetchall()
+                else:
+                    query = """
+                        SELECT
+                          s.span_id AS span_id,
+                          s.kind AS span_kind,
+                          s.status AS span_status,
+                          s.start_ts AS span_start_ts,
+                          s.end_ts AS span_end_ts,
+                          s.name AS span_name,
+                          s.agent_name AS agent_name,
+                          p.kind AS parent_kind,
+                          p.name AS parent_name,
+                          m.role AS role,
+                          m.idx AS idx,
+                          m.content AS content,
+                          m.name AS name,
+                          m.tool_call_id AS tool_call_id,
+                          m.tool_calls_json AS tool_calls_json,
+                          NULL AS tool_call_name,
+                          NULL AS tool_args_json,
+                          NULL AS tool_result_json,
+                          NULL AS tool_error
+                        FROM spans s
+                        LEFT JOIN spans p ON p.span_id = s.parent_span_id
+                        JOIN llm_messages m ON m.span_id = s.span_id
+                        WHERE s.request_id = ?
+                          AND s.kind = 'llm.call'
+                        ORDER BY s.start_ts ASC, m.idx ASC;
+                    """
+
+                rows = conn.execute(query, (rid,)).fetchall()
                 return jsonify([dict(r) for r in rows])
             finally:
                 try:

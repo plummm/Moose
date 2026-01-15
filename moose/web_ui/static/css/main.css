@@ -36,6 +36,7 @@
     /* Layout */
     --chat-panel-width: 400px;
     --header-height: 60px;
+    --v-handle-size: 8px;
 
     /* Transitions */
     --transition-fast: 0.15s ease;
@@ -79,6 +80,105 @@ body {
     display: flex;
     height: 100vh;
     width: 100%;
+}
+
+/* Collapse chat panel (matches the header toggle button) */
+.page-layout.chat-collapsed .chat-panel {
+    width: 44px !important;
+    min-width: 44px !important;
+    max-width: 44px !important;
+    padding: 10px 6px;
+}
+
+.page-layout.chat-collapsed .resize-handle {
+    display: none;
+}
+
+.page-layout.chat-collapsed .chat-panel .section-controls,
+.page-layout.chat-collapsed .chat-panel .chat-info-bar,
+.page-layout.chat-collapsed .chat-panel .chat-container {
+    display: none;
+}
+
+.page-layout.chat-collapsed #connection-status {
+    display: none;
+}
+
+.page-layout.chat-collapsed .chat-header-left h2 {
+    display: none;
+}
+
+.chat-header-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.collapse-btn {
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-radius: 8px;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition-fast);
+}
+
+.collapse-btn:hover {
+    background: var(--accent-blue);
+}
+
+.chat-collapsed-label {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    text-align: center;
+    user-select: none;
+}
+
+/* Vertical split layouts (used in Overview/Costs/Traces) */
+.v-split {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.v-pane {
+    min-height: 0;
+    overflow: hidden; /* panes delegate scrolling to their inner content */
+    display: flex;
+    flex-direction: column;
+}
+
+.v-pane > * {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.v-resize-handle {
+    height: var(--v-handle-size);
+    flex: 0 0 var(--v-handle-size);
+    background: var(--border-color);
+    cursor: row-resize;
+    border-radius: 6px;
+    margin: 8px 0;
+    touch-action: none; /* keep pointer dragging smooth */
+    transition: background var(--transition-fast);
+}
+
+.v-resize-handle:hover,
+.v-resize-handle.dragging {
+    background: var(--accent-blue);
 }
 
 .page-layout.traces-full .chat-panel,
@@ -129,8 +229,9 @@ body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    /* Keep header + tab bar fixed; tab content will be the scroll container */
-    overflow: hidden;
+    /* Make the main page scrollable when stacked blocks exceed viewport */
+    overflow-y: auto;
+    overflow-x: hidden;
     padding: 20px;
     min-width: 400px;
     min-height: 0;
@@ -230,15 +331,15 @@ body {
 
 .tab-content {
     display: none;
-    flex: 1;
+    flex: 0 0 auto;
     min-height: 0;
 }
 
 .tab-content.active {
     display: flex;
     flex-direction: column;
-    /* Make each tab independently scrollable (Overview/Costs/Traces) */
-    overflow-y: auto;
+    /* Let the main page (.right-panel) do the scrolling */
+    overflow: visible;
     min-height: 0;
 }
 
@@ -399,8 +500,11 @@ body {
     background: var(--bg-secondary);
     border-radius: var(--border-radius-lg);
     border: 1px solid var(--border-color);
-    flex-shrink: 0;
-    /* Give the overview more vertical real estate by default */
+    /* Let the Overview vertical splitter control height */
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     min-height: 260px;
 }
 
@@ -411,7 +515,9 @@ body {
 }
 
 .agents-table-container {
-    overflow-x: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
 }
 
 .agents-table {
@@ -478,9 +584,10 @@ body {
     display: flex;
     flex-direction: column;
     flex: 1;
-    /* Keep logs comfortably visible even on larger screens */
-    min-height: 520px;
+    /* Let the Overview vertical splitter control height */
+    min-height: 0;
     overflow: hidden;
+    min-height: 520px;
 }
 
 .log-container {
@@ -846,11 +953,10 @@ body {
     display: flex;
     flex-direction: column;
     flex: 1;
-    /* Make Costs feel “full page” by default; tab itself is scrollable */
-    min-height: 720px;
-    overflow: visible;
+    overflow: hidden;
     /* Allow inner scroll areas to size correctly in flex layouts */
     min-height: 0;
+    min-height: 720px;
 }
 
 .costs-section #costs-main-view,
@@ -865,8 +971,8 @@ body {
     display: grid;
     grid-template-columns: 1fr;
     gap: 16px;
-    /* Let the tab scroll (avoid nested scrollbars in Costs) */
-    overflow: visible;
+    overflow: auto;
+    min-height: 0;
     padding-right: 4px;
 }
 
@@ -913,6 +1019,17 @@ body {
     font-weight: 600;
     font-size: 11px;
     text-transform: uppercase;
+}
+
+.costs-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.costs-table th.sortable .sort-indicator {
+    margin-left: 6px;
+    font-size: 10px;
+    opacity: 0.8;
 }
 
 .cost-link {
@@ -1113,10 +1230,9 @@ body {
     display: flex;
     flex-direction: column;
     flex: 1;
-    /* Make Traces feel “full page” by default; tab itself is scrollable */
-    min-height: 720px;
-    overflow: visible;
+    overflow: hidden;
     min-height: 0;
+    min-height: 720px;
 }
 
 .trace-main {

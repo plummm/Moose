@@ -1180,7 +1180,8 @@ Provide your final combined response:"""
                     role=MessageRole.TOOL,
                     content=f"Error: {error_msg}",
                     name=tool_name,
-                    tool_call_id=tool_call_id
+                    tool_call_id=tool_call_id,
+                    tool_calls=[{"name": tool_name, "args": tool_args}] if tool_name else None
                 ))
                 continue
             
@@ -1188,8 +1189,23 @@ Provide your final combined response:"""
             
             try:
                 self.logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
+                parent_span_id = None
+                try:
+                    from moose.framework.logging.tracing import get_current as _trace_current
+                    _ctx = _trace_current()
+                    parent_span_id = getattr(_ctx, "current_span_id", None) if _ctx is not None else None
+                except Exception:
+                    parent_span_id = None
 
-                result = await self._invoke_one_tool(tool, tool_name, tool_args, runtime=runtime)
+                if runtime is not None:
+                    result = await runtime.call_tool(
+                        tool_name,
+                        tool_args,
+                        parent_span_id=parent_span_id,
+                        tool_call_id=tool_call_id,
+                    )
+                else:
+                    result = await self._invoke_one_tool(tool, tool_name, tool_args, runtime=runtime)
 
                 # Convert result to string
                 if isinstance(result, str):
@@ -1201,7 +1217,8 @@ Provide your final combined response:"""
                     role=MessageRole.TOOL,
                     content=result_str,
                     name=tool_name,
-                    tool_call_id=tool_call_id
+                    tool_call_id=tool_call_id,
+                    tool_calls=[{"name": tool_name, "args": tool_args}]
                 )
                 tool_messages.append(tool_msg)
                 
@@ -1214,7 +1231,8 @@ Provide your final combined response:"""
                     role=MessageRole.TOOL,
                     content=f"Error: {error_msg}",
                     name=tool_name,
-                    tool_call_id=tool_call_id
+                    tool_call_id=tool_call_id,
+                    tool_calls=[{"name": tool_name, "args": tool_args}]
                 ))
         
         return tool_messages

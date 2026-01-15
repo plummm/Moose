@@ -43,7 +43,7 @@ class RunCommand:
         )
 
         parser.add_argument(
-            '--agent-debug',
+            '--local-run',
             action='store_true',
             help='Run enabled agents locally in debug mode (loaded like `moose agent debug`, instead of Docker)'
         )
@@ -102,7 +102,7 @@ class RunCommand:
         debug_agents: list[object] = []
         debug_threads: list[threading.Thread] = []
         if enabled_agents:
-            if getattr(args, "agent_debug", True):
+            if getattr(args, "local_run", True):
                 # Run enabled agents locally in debug mode, mirroring AgentCommand._run_debug
                 # Set project context for BaseAgent init
                 os.environ["MOOSE_PROJECT_ID"] = project_id
@@ -199,7 +199,7 @@ class RunCommand:
                         logger.error(traceback.format_exc())
 
                 if getattr(args, "force_rebuild", False):
-                    logger.info("--force-rebuild ignored in --agent-debug mode (no Docker images are built).")
+                    logger.info("--force-rebuild ignored in --local-run mode (no Docker images are built).")
 
                 for agent_name in enabled_agents:
                     try:

@@ -37,11 +37,15 @@ const state = {
     agentPageOffset: 0,
     agentHasMore: false,
     agentExpanded: {},
+    agentSortKey: 'first_ts',
+    agentSortDir: 'desc',
+    agentCostData: null,
 
     // Buffers (limited size for memory efficiency)
     streamedLogs: [],
     streamedMessages: [],
     maxChatBufferSize: 200,  // Maximum messages to keep in memory
+    maxLogBufferSize: 2000,  // Maximum log entries to keep in memory
 
     // Chat pagination state
     chatHasMore: false,
@@ -59,16 +63,21 @@ const state = {
 
     // Log level filters
     logLevelFilters: {
-        DEBUG: true,
+        DEBUG: false,
         INFO: true,
         WARNING: true,
         ERROR: true,
-        CRITICAL: true
+        CRITICAL: false
     },
 
     // Auto-scroll
     logAutoScroll: true,
     chatAutoScroll: true,
+
+    // Log pagination/windowing (render only recent N unless user loads older)
+    logDisplayStep: 100,
+    logDisplayCount: 100,
+    logLoadingOlder: false,
 
     // Trace state
     selectedTraceId: null,
@@ -89,11 +98,66 @@ const state = {
 
 document.addEventListener('DOMContentLoaded', function() {
     readUrlParams();
+    initChatCollapse();
     loadProjects();
     initResizeHandle();
+    initVerticalSplitters();
+    initLogWindowing();
     initVisibilityHandler();
     initLogLevelFilters();
+    initAgentCostSorting();
 });
+
+function _lsGet(key, fallbackValue) {
+    try {
+        const v = window.localStorage ? window.localStorage.getItem(key) : null;
+        return (v === null || v === undefined) ? fallbackValue : v;
+    } catch (e) {
+        return fallbackValue;
+    }
+}
+
+function _lsSet(key, value) {
+    try {
+        if (!window.localStorage) return;
+        window.localStorage.setItem(key, String(value));
+    } catch (e) {}
+}
+
+function initChatCollapse() {
+    // Default: collapsed (saves space). User can expand via chevron.
+    const raw = String(_lsGet('moose_chat_collapsed', '1')).toLowerCase().trim();
+    state.chatCollapsed = !(raw === '0' || raw === 'false' || raw === 'no');
+    applyChatCollapsed();
+}
+
+function applyChatCollapsed() {
+    const pageLayout = document.querySelector('.page-layout');
+    if (!pageLayout) return;
+    const btn = document.getElementById('chat-collapse-btn');
+    const label = document.getElementById('chat-collapsed-label');
+    if (state.chatCollapsed) {
+        pageLayout.classList.add('chat-collapsed');
+        if (btn) {
+            btn.textContent = '▶';
+            btn.title = 'Expand chat';
+        }
+        if (label) label.style.display = '';
+    } else {
+        pageLayout.classList.remove('chat-collapsed');
+        if (btn) {
+            btn.textContent = '◀';
+            btn.title = 'Collapse chat';
+        }
+        if (label) label.style.display = 'none';
+    }
+}
+
+function toggleChatCollapse() {
+    state.chatCollapsed = !state.chatCollapsed;
+    _lsSet('moose_chat_collapsed', state.chatCollapsed ? '1' : '0');
+    applyChatCollapsed();
+}
 
 function readUrlParams() {
     try {
@@ -195,8 +259,20 @@ function initLogLevelFilters() {
             checkbox.checked = state.logLevelFilters[level];
             checkbox.addEventListener('change', () => {
                 state.logLevelFilters[level] = checkbox.checked;
+                // When filters change, reset to recent window.
+                state.logDisplayCount = state.logDisplayStep;
                 reRenderLogs();
             });
+        }
+    });
+}
+
+function initLogWindowing() {
+    const container = document.getElementById('log-container');
+    if (!container) return;
+    container.addEventListener('scroll', () => {
+        if (container.scrollTop <= 0) {
+            loadOlderLogs();
         }
     });
 }
@@ -210,15 +286,64 @@ function reRenderLogs() {
     if (state.logViewMode === 'live') {
         const container = document.getElementById('log-entries');
         if (!container) return;
-        container.innerHTML = '';
-        state.streamedLogs.forEach(entry => {
-            if (shouldShowLogEntry(entry)) {
-                appendLogEntry(entry, false);
-            }
-        });
-        if (state.logAutoScroll) {
-            scrollToBottom('log-container');
-        }
+        renderLogWindow(container, state.streamedLogs);
+    }
+}
+
+function loadOlderLogs() {
+    if (state.logLoadingOlder) return;
+    const logContainer = document.getElementById('log-container');
+    const entriesEl = document.getElementById('log-entries');
+    if (!logContainer || !entriesEl) return;
+
+    const filtered = state.streamedLogs.filter(shouldShowLogEntry);
+    if (filtered.length <= state.logDisplayCount) return;
+
+    state.logLoadingOlder = true;
+
+    const prevScrollHeight = logContainer.scrollHeight;
+    const prevScrollTop = logContainer.scrollTop;
+
+    state.logDisplayCount = Math.min(filtered.length, state.logDisplayCount + state.logDisplayStep);
+    renderLogWindow(entriesEl, state.streamedLogs);
+
+    // Maintain viewport position (avoid jump)
+    const newScrollHeight = logContainer.scrollHeight;
+    logContainer.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+
+    state.logLoadingOlder = false;
+}
+
+function renderLogWindow(entriesEl, allLogs) {
+    const logContainer = document.getElementById('log-container');
+    if (!entriesEl) return;
+
+    const wasAtBottom = !!(logContainer && (logContainer.scrollTop + logContainer.clientHeight >= logContainer.scrollHeight - 4));
+
+    const filtered = (allLogs || []).filter(shouldShowLogEntry);
+    const total = filtered.length;
+    const count = Math.max(state.logDisplayStep, state.logDisplayCount || state.logDisplayStep);
+    const hasMore = total > count;
+    const slice = hasMore ? filtered.slice(total - count) : filtered;
+
+    entriesEl.innerHTML = '';
+
+    if (hasMore) {
+        const btn = document.createElement('button');
+        btn.id = 'load-older-logs-btn';
+        btn.className = 'load-older-btn';
+        btn.textContent = 'Load older logs...';
+        btn.onclick = () => loadOlderLogs();
+        entriesEl.appendChild(btn);
+    }
+
+    for (const entry of slice) {
+        const div = createLogEntryElement(entry);
+        entriesEl.appendChild(div);
+    }
+
+    if (logContainer && (state.logAutoScroll || wasAtBottom)) {
+        scrollToBottom('log-container');
     }
 }
 
@@ -266,7 +391,9 @@ function filterDataByTimeRange(perDay, timeRange) {
 function renderCostCharts() {
     if (!state.costData) return;
 
-    const filteredData = filterDataByTimeRange(state.costData.per_day, state.chartTimeRange);
+    let filteredData = filterDataByTimeRange(state.costData.per_day, state.chartTimeRange);
+    // Ensure charts keep a stable x-axis window (avoids single-bar centering).
+    filteredData = fillMissingDays(filteredData, state.chartTimeRange);
 
     renderChart('chart-cost-canvas', filteredData, 'cost', 'Daily Cost ($)');
     renderChart('chart-tokens-canvas', filteredData, 'tokens', 'Daily Tokens');
@@ -295,25 +422,31 @@ function renderChart(canvasId, perDay, kind, title) {
     }
     const agents = Array.from(agentSet).sort();
 
+    // If cost data includes provider breakdown, render one bar per agent stacked by provider.
+    const providers = collectProviders(perDay);
+    const providerMode = (kind === 'cost') && (providers.length > 0);
+
     // Prepare datasets
-    const datasets = agents.map(agent => {
-        const color = agentColor(agent);
-        return {
-            label: agent,
-            data: perDay.map(d => {
-                const by = (d && d.by_agent) ? d.by_agent : {};
-                const rec = by[agent] || {};
-                if (kind === 'cost') {
-                    return Number(rec.cost || 0);
-                } else {
-                    return Number((rec.tokens || {}).total || 0);
-                }
-            }),
-            backgroundColor: color,
-            borderColor: color,
-            borderWidth: 1
-        };
-    });
+    const datasets = providerMode
+        ? buildProviderStackDatasets(perDay, agents, providers)
+        : agents.map(agent => {
+            const color = agentColor(agent);
+            return {
+                label: agent,
+                data: perDay.map(d => {
+                    const by = (d && d.by_agent) ? d.by_agent : {};
+                    const rec = by[agent] || {};
+                    if (kind === 'cost') {
+                        return Number(rec.cost || 0);
+                    } else {
+                        return Number((rec.tokens || {}).total || 0);
+                    }
+                }),
+                backgroundColor: color,
+                borderColor: color,
+                borderWidth: 1
+            };
+        });
 
     const labels = perDay.map(d => d.date || 'unknown');
 
@@ -328,34 +461,84 @@ function renderChart(canvasId, perDay, kind, title) {
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            animation: { duration: 0 },
+            interaction: { mode: 'nearest', intersect: true },
+            datasets: {
+                bar: {
+                    maxBarThickness: 80,
+                    categoryPercentage: 0.8,
+                    barPercentage: 0.9
+                }
+            },
             plugins: {
                 title: {
                     display: true,
                     text: title,
-                    color: '#eaeaea',
+                    color: '#ffffff',
                     font: { size: 14, weight: 'bold' }
                 },
                 legend: {
                     display: true,
                     position: 'bottom',
                     labels: {
-                        color: '#a0a0a0',
+                        color: '#ffffff',
                         font: { size: 11 },
                         boxWidth: 12,
                         padding: 10
-                    }
+                    },
+                    // In provider mode, show only one legend item per provider (toggle all stacks).
+                    ...(providerMode ? {
+                        labels: {
+                            generateLabels: function(chart) {
+                                const out = [];
+                                for (const p of providers) {
+                                    out.push({
+                                        text: p,
+                                        fillStyle: providerColor(p),
+                                        strokeStyle: providerColor(p),
+                                        lineWidth: 1,
+                                        hidden: false,
+                                        datasetIndex: -1
+                                    });
+                                }
+                                return out;
+                            }
+                        },
+                        onClick: function(e, legendItem, legend) {
+                            const p = legendItem && legendItem.text ? String(legendItem.text) : '';
+                            if (!p) return;
+                            const chart = legend.chart;
+                            const metas = chart.getSortedVisibleDatasetMetas();
+                            // Toggle visibility for datasets that match this provider.
+                            let anyVisible = false;
+                            for (const meta of metas) {
+                                const ds = chart.data.datasets[meta.index];
+                                if (ds && ds.__provider === p && meta.visible) {
+                                    anyVisible = true;
+                                    break;
+                                }
+                            }
+                            for (const meta of metas) {
+                                const ds = chart.data.datasets[meta.index];
+                                if (ds && ds.__provider === p) {
+                                    chart.setDatasetVisibility(meta.index, !anyVisible);
+                                }
+                            }
+                            chart.update();
+                        }
+                    } : {})
                 },
                 tooltip: {
                     backgroundColor: '#16213e',
-                    titleColor: '#eaeaea',
-                    bodyColor: '#eaeaea',
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
                     borderColor: '#2a2a4a',
                     borderWidth: 1,
                     callbacks: {
                         label: function(context) {
                             const value = context.parsed.y;
                             if (kind === 'cost') {
-                                return `${context.dataset.label}: $${value.toFixed(4)}`;
+                                return `${context.dataset.label}: $${fmtCost(value, 4)}`;
                             } else {
                                 return `${context.dataset.label}: ${Math.round(value).toLocaleString()} tokens`;
                             }
@@ -370,7 +553,7 @@ function renderChart(canvasId, perDay, kind, title) {
                         color: '#2a2a4a'
                     },
                     ticks: {
-                        color: '#a0a0a0',
+                        color: '#ffffff',
                         font: { size: 10 }
                     }
                 },
@@ -380,11 +563,11 @@ function renderChart(canvasId, perDay, kind, title) {
                         color: '#2a2a4a'
                     },
                     ticks: {
-                        color: '#a0a0a0',
+                        color: '#ffffff',
                         font: { size: 10 },
                         callback: function(value) {
                             if (kind === 'cost') {
-                                return '$' + value.toFixed(2);
+                                return '$' + fmtCost(value, 2);
                             } else {
                                 return value >= 1000 ? (value / 1000).toFixed(1) + 'k' : value;
                             }
@@ -403,6 +586,90 @@ function agentColor(agent) {
     }
     const hue = h % 360;
     return `hsl(${hue}, 70%, 55%)`;
+}
+
+function collectProviders(perDay) {
+    const set = new Set();
+    for (const d of (perDay || [])) {
+        const by = (d && d.by_agent) ? d.by_agent : {};
+        for (const a of Object.keys(by || {})) {
+            const rec = by[a] || {};
+            const bp = rec && rec.by_provider ? rec.by_provider : null;
+            if (bp && typeof bp === 'object') {
+                for (const p of Object.keys(bp)) set.add(String(p));
+            }
+        }
+    }
+    return Array.from(set).filter(Boolean).sort();
+}
+
+function providerColor(provider) {
+    const p = String(provider || '').toLowerCase();
+    if (p === 'openai') return 'rgba(6, 182, 212, 0.85)';     // cyan
+    if (p === 'gemini') return 'rgba(74, 144, 217, 0.85)';    // blue
+    if (p === 'anthropic') return 'rgba(156, 39, 176, 0.85)'; // purple
+    if (p === 'xai') return 'rgba(255, 152, 0, 0.85)';        // orange
+    // Stable hash fallback
+    let h = 0;
+    for (let i = 0; i < p.length; i++) h = (h * 31 + p.charCodeAt(i)) >>> 0;
+    const hue = h % 360;
+    return `hsla(${hue}, 70%, 55%, 0.85)`;
+}
+
+function buildProviderStackDatasets(perDay, agents, providers) {
+    const out = [];
+    for (const agent of (agents || [])) {
+        for (const provider of (providers || [])) {
+            const color = providerColor(provider);
+            const data = (perDay || []).map(d => {
+                const by = (d && d.by_agent) ? d.by_agent : {};
+                const rec = by[agent] || {};
+                const bp = (rec && rec.by_provider && typeof rec.by_provider === 'object') ? rec.by_provider : {};
+                const prow = bp[provider] || {};
+                return Number(prow.cost || 0);
+            });
+            // Skip datasets that are all zeros to keep hover/tooltip fast.
+            const hasAny = data.some(v => Number(v || 0) !== 0);
+            if (!hasAny) continue;
+
+            out.push({
+                label: `${agent} • ${provider}`,
+                stack: agent, // separate bar per agent per day
+                __provider: provider,
+                data,
+                backgroundColor: color,
+                borderColor: color,
+                borderWidth: 1
+            });
+        }
+    }
+    return out;
+}
+
+function fillMissingDays(perDay, timeRange) {
+    const arr = Array.isArray(perDay) ? perDay : [];
+    if (!arr.length) return arr;
+
+    // Only pad fixed windows to avoid huge "all time" expansions.
+    const now = new Date();
+    let days = 0;
+    if (timeRange === '7d') days = 7;
+    else if (timeRange === '30d') days = 30;
+    else if (timeRange === '24h') days = 2; // show today + yesterday for better context
+    else return arr;
+
+    const map = new Map();
+    for (const d of arr) {
+        if (d && d.date) map.set(String(d.date), d);
+    }
+
+    const out = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const dt = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+        const ds = dt.toISOString().split('T')[0];
+        out.push(map.get(ds) || { date: ds, by_agent: {} });
+    }
+    return out;
 }
 
 // Fallback DOM-based stacked chart
@@ -476,7 +743,7 @@ function renderStackedChart(containerId, legendId, perDay, kind) {
 
         const valueEl = document.createElement('div');
         valueEl.className = 'chart-value';
-        valueEl.textContent = kind === 'cost' ? `$${total.toFixed(3)}` : `${Math.round(total)}`;
+        valueEl.textContent = kind === 'cost' ? `$${fmtCost(total, 3)}` : `${fmtInt(Math.round(total))}`;
 
         row.appendChild(dateEl);
         row.appendChild(bar);
@@ -736,6 +1003,148 @@ function initResizeHandle() {
 }
 
 // ============================================================================
+// Vertical Splitters (Overview / Costs / Traces)
+// ============================================================================
+
+function initVerticalSplitters() {
+    initVerticalSplitter({
+        containerId: 'overview-vsplit',
+        topId: 'overview-top',
+        bottomId: 'overview-bottom',
+        handleId: 'overview-splitter',
+        storageKey: 'moose.vsplit.overview.topPx',
+        minTop: 140,
+        minBottom: 180
+    });
+
+    initVerticalSplitter({
+        containerId: 'costs-vsplit',
+        topId: 'costs-top',
+        bottomId: 'costs-bottom',
+        handleId: 'costs-splitter',
+        storageKey: 'moose.vsplit.costs.topPx',
+        minTop: 180,
+        minBottom: 240
+    });
+
+    // Traces: only allow resizing when Advanced panel is visible
+    initVerticalSplitter({
+        containerId: 'trace-main',
+        topId: 'trace-chat',
+        bottomId: 'trace-advanced',
+        handleId: 'traces-splitter',
+        storageKey: 'moose.vsplit.traces.topPx',
+        minTop: 180,
+        minBottom: 180,
+        isEnabled: () => {
+            const adv = document.getElementById('trace-advanced');
+            return !!adv && adv.style.display !== 'none';
+        }
+    });
+}
+
+function initVerticalSplitter({ containerId, topId, bottomId, handleId, storageKey, minTop, minBottom, isEnabled }) {
+    const container = document.getElementById(containerId);
+    const top = document.getElementById(topId);
+    const bottom = document.getElementById(bottomId);
+    const handle = document.getElementById(handleId);
+    if (!container || !top || !bottom || !handle) return;
+
+    function applyTopPx(px, persist) {
+        top.style.flex = `0 0 ${px}px`;
+        top.style.height = `${px}px`;
+        bottom.style.flex = '1 1 auto';
+        if (persist) {
+            _lsSet(storageKey, String(Math.round(px)));
+        }
+    }
+
+    function autoSizeTopPane() {
+        const containerH = container.getBoundingClientRect().height;
+        const handleH = handle.getBoundingClientRect().height || 0;
+        const maxTop = Math.max(minTop, containerH - handleH - minBottom);
+        const desired = Math.min(maxTop, Math.max(minTop, top.scrollHeight || minTop));
+        applyTopPx(desired, false);
+    }
+
+    const hadSaved = (() => {
+        const raw = _lsGet(storageKey, '');
+        return !!(raw && String(raw).trim());
+    })();
+
+    // Apply saved top height (if any)
+    try {
+        const saved = _lsGet(storageKey, '');
+        if (saved) {
+            const px = parseInt(saved, 10);
+            if (Number.isFinite(px) && px > 0) {
+                applyTopPx(px, false);
+            }
+        }
+    } catch (e) {}
+
+    // If the user hasn't resized yet, auto-size top so it shows "completely" by default.
+    if (!hadSaved) {
+        requestAnimationFrame(() => requestAnimationFrame(autoSizeTopPane));
+        // One more pass for async content (agents/cost summaries render after fetch)
+        setTimeout(() => {
+            if (!_lsGet(storageKey, '')) autoSizeTopPane();
+        }, 700);
+    }
+
+    let dragging = false;
+    let startY = 0;
+    let startTopHeight = 0;
+
+    function canResizeNow() {
+        try {
+            return typeof isEnabled === 'function' ? !!isEnabled() : true;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function onDown(ev) {
+        if (!canResizeNow()) return;
+        dragging = true;
+        startY = ev.clientY;
+        startTopHeight = top.getBoundingClientRect().height;
+        handle.classList.add('dragging');
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+        try { handle.setPointerCapture(ev.pointerId); } catch (e) {}
+        ev.preventDefault();
+    }
+
+    function onMove(ev) {
+        if (!dragging) return;
+        if (!canResizeNow()) return;
+
+        const diff = ev.clientY - startY;
+        const containerH = container.getBoundingClientRect().height;
+        const handleH = handle.getBoundingClientRect().height || 0;
+
+        const maxTop = Math.max(minTop, containerH - handleH - minBottom);
+        const nextTop = Math.max(minTop, Math.min(maxTop, startTopHeight + diff));
+
+        applyTopPx(nextTop, true);
+    }
+
+    function onUp() {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    }
+
+    handle.addEventListener('pointerdown', onDown);
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
+}
+
+// ============================================================================
 // Agents
 // ============================================================================
 
@@ -770,6 +1179,26 @@ async function loadAgents() {
             `;
             tbody.appendChild(row);
         });
+
+        // If the overview splitter hasn't been customized, auto-size the top pane to fit agents.
+        try {
+            const saved = _lsGet('moose.vsplit.overview.topPx', '');
+            if (!saved) {
+                const container = document.getElementById('overview-vsplit');
+                const top = document.getElementById('overview-top');
+                const handle = document.getElementById('overview-splitter');
+                const bottomMin = 180;
+                const topMin = 140;
+                if (container && top && handle) {
+                    const containerH = container.getBoundingClientRect().height;
+                    const handleH = handle.getBoundingClientRect().height || 0;
+                    const maxTop = Math.max(topMin, containerH - handleH - bottomMin);
+                    const desired = Math.min(maxTop, Math.max(topMin, top.scrollHeight || topMin));
+                    top.style.flex = `0 0 ${desired}px`;
+                    top.style.height = `${desired}px`;
+                }
+            }
+        } catch (e) {}
     } catch (error) {
         console.error('Failed to load agents:', error);
         tbody.innerHTML = '<tr><td colspan="5" class="loading">Error loading agents</td></tr>';
@@ -843,21 +1272,13 @@ function onChatFileChange() {
 function switchToLiveLogs() {
     state.logViewMode = 'live';
     document.getElementById('log-file-dropdown').value = 'live';
+    state.logDisplayCount = state.logDisplayStep;
 
     const container = document.getElementById('log-entries');
-    container.innerHTML = '';
-    state.streamedLogs.forEach(entry => {
-        if (shouldShowLogEntry(entry)) {
-            appendLogEntry(entry, false);
-        }
-    });
+    renderLogWindow(container, state.streamedLogs);
 
     if (!state.ssesPaused && (!state.logEventSource || state.logEventSource.readyState === EventSource.CLOSED)) {
         connectLogStream();
-    }
-
-    if (state.logAutoScroll) {
-        scrollToBottom('log-container');
     }
 }
 
@@ -1053,7 +1474,9 @@ function updateChatInfoBar(displayed, total, loading) {
     if (loading) {
         infoBar.innerHTML = '<span>Loading messages...</span>';
     } else if (total > 0) {
-        infoBar.innerHTML = `<span class="message-count">${displayed} messages</span><span class="muted">${total > displayed ? `(${total} total available)` : ''}</span>`;
+        const d = fmtInt(displayed);
+        const t = fmtInt(total);
+        infoBar.innerHTML = `<span class="message-count">${d} messages</span><span class="muted">${total > displayed ? `(${t} total available)` : ''}</span>`;
     } else {
         infoBar.innerHTML = '<span class="muted">No messages yet</span>';
     }
@@ -1061,22 +1484,16 @@ function updateChatInfoBar(displayed, total, loading) {
 
 async function loadHistoricalLogs(filename) {
     state.logViewMode = 'historical';
+    state.logDisplayCount = state.logDisplayStep;
 
     try {
         const response = await fetch(`/api/projects/${state.currentProject}/logs?file=${filename}`);
         const logs = await response.json();
 
         const container = document.getElementById('log-entries');
-        container.innerHTML = '';
-
-        logs.forEach(entry => {
-            if (shouldShowLogEntry(entry)) {
-                const div = createLogEntryElement(entry);
-                container.appendChild(div);
-            }
-        });
-
-        scrollToBottom('log-container');
+        // Store for windowing/filtering (and enable "load older" within the fetched set).
+        state.streamedLogs = Array.isArray(logs) ? logs : [];
+        renderLogWindow(container, state.streamedLogs);
     } catch (error) {
         console.error('Failed to load historical logs:', error);
     }
@@ -1129,12 +1546,13 @@ function connectLogStream() {
         state.streamedLogs.push(entry);
 
         // Limit buffer size
-        if (state.streamedLogs.length > 2000) {
-            state.streamedLogs = state.streamedLogs.slice(-1000);
+        if (state.streamedLogs.length > state.maxLogBufferSize) {
+            state.streamedLogs = state.streamedLogs.slice(-state.maxLogBufferSize);
         }
 
-        if (state.logViewMode === 'live' && shouldShowLogEntry(entry)) {
-            appendLogEntry(entry);
+        if (state.logViewMode === 'live') {
+            const entriesEl = document.getElementById('log-entries');
+            if (entriesEl) renderLogWindow(entriesEl, state.streamedLogs);
         }
     };
 
@@ -1499,8 +1917,8 @@ function createChatMessageElement(message) {
         const footer = document.createElement('div');
         footer.className = 'message-footer';
         const parts = [];
-        if (cost !== null) parts.push(`Cost: $${cost.toFixed(6)}`);
-        if (usage) parts.push(`Tokens: in ${it || 0}, out ${ot || 0} (${tt || 0})`);
+        if (cost !== null) parts.push(`Cost: $${fmtCost(cost, 6)}`);
+        if (usage) parts.push(`Tokens: in ${fmtInt(it || 0)}, out ${fmtInt(ot || 0)} (${fmtInt(tt || 0)})`);
         footer.textContent = parts.join(' | ');
         contentDiv.appendChild(footer);
     }
@@ -1539,8 +1957,8 @@ function renderCostSummary(data) {
 
     const totals = (data && data.totals) ? data.totals : { cost: 0, tokens: { input: 0, output: 0, total: 0 } };
     const tokens = totals.tokens || { input: 0, output: 0, total: 0 };
-    totalsEl.textContent = `Total cost: $${Number(totals.cost || 0).toFixed(6)}\n` +
-                           `Tokens: in ${tokens.input || 0}, out ${tokens.output || 0} (total ${tokens.total || 0})`;
+    totalsEl.textContent = `Total cost: $${fmtCost(Number(totals.cost || 0), 6)}\n` +
+                           `Tokens: in ${fmtInt(tokens.input || 0)}, out ${fmtInt(tokens.output || 0)} (total ${fmtInt(tokens.total || 0)})`;
 
     const byAgent = (data && data.by_agent) ? data.by_agent : {};
     const agents = Object.keys(byAgent).sort();
@@ -1556,16 +1974,36 @@ function renderCostSummary(data) {
             const href = `/?project=${encodeURIComponent(state.currentProject || '')}&tab=costs&agent=${encodeURIComponent(agent)}`;
             row.innerHTML = `
                 <td><a class="cost-link" href="${href}">${escapeHtml(agent)}</a></td>
-                <td>$${Number(a.cost || 0).toFixed(6)}</td>
-                <td>${t.input || 0}</td>
-                <td>${t.output || 0}</td>
-                <td>${t.total || 0}</td>
+                <td>$${fmtCost(Number(a.cost || 0), 6)}</td>
+                <td>${fmtInt(t.input || 0)}</td>
+                <td>${fmtInt(t.output || 0)}</td>
+                <td>${fmtInt(t.total || 0)}</td>
             `;
             tbody.appendChild(row);
         }
     }
 
     renderCostCharts();
+
+    // If the costs splitter hasn't been customized, auto-size the top pane to fit totals + table.
+    try {
+        const saved = _lsGet('moose.vsplit.costs.topPx', '');
+        if (!saved) {
+            const container = document.getElementById('costs-vsplit');
+            const top = document.getElementById('costs-top');
+            const handle = document.getElementById('costs-splitter');
+            const bottomMin = 240;
+            const topMin = 180;
+            if (container && top && handle) {
+                const containerH = container.getBoundingClientRect().height;
+                const handleH = handle.getBoundingClientRect().height || 0;
+                const maxTop = Math.max(topMin, containerH - handleH - bottomMin);
+                const desired = Math.min(maxTop, Math.max(topMin, top.scrollHeight || topMin));
+                top.style.flex = `0 0 ${desired}px`;
+                top.style.height = `${desired}px`;
+            }
+        }
+    } catch (e) {}
 }
 
 // ============================================================================
@@ -1634,6 +2072,70 @@ function onAgentLimitChange() {
     loadAgentCostBreakdown();
 }
 
+function initAgentCostSorting() {
+    const table = document.querySelector('#costs-agent-view .costs-table');
+    if (!table) return;
+    const headers = table.querySelectorAll('th[data-sort]');
+    headers.forEach(th => {
+        if (!th.title) th.title = 'Click to sort';
+        th.addEventListener('click', () => {
+            const key = th.getAttribute('data-sort') || '';
+            if (!key) return;
+            if (state.agentSortKey === key) {
+                state.agentSortDir = (state.agentSortDir === 'asc') ? 'desc' : 'asc';
+            } else {
+                state.agentSortKey = key;
+                state.agentSortDir = 'desc';
+            }
+            updateAgentSortHeaders();
+            if (state.agentCostData) renderAgentCostBreakdown(state.agentCostData);
+        });
+    });
+    updateAgentSortHeaders();
+}
+
+function updateAgentSortHeaders() {
+    const headers = document.querySelectorAll('#costs-agent-view .costs-table th[data-sort]');
+    headers.forEach(th => {
+        const key = th.getAttribute('data-sort') || '';
+        const indicator = th.querySelector('.sort-indicator');
+        if (!indicator) return;
+        if (key && key === state.agentSortKey) {
+            indicator.textContent = state.agentSortDir === 'asc' ? '▲' : '▼';
+        } else {
+            indicator.textContent = '↕';
+        }
+    });
+}
+
+function sortAgentRequests(reqs) {
+    const out = Array.isArray(reqs) ? reqs.slice() : [];
+    const key = state.agentSortKey || '';
+    if (!key) return out;
+    const dir = state.agentSortDir === 'asc' ? 1 : -1;
+    const getVal = (r) => {
+        if (!r) return 0;
+        const tokens = (r.tokens && typeof r.tokens === 'object') ? r.tokens : {};
+        if (key === 'first_ts') return Number(r.first_ts || 0);
+        if (key === 'cost') return Number(r.cost || 0);
+        if (key === 'input_tokens') return Number(tokens.input || 0);
+        if (key === 'output_tokens') return Number(tokens.output || 0);
+        if (key === 'total_tokens') return Number(tokens.total || 0);
+        return 0;
+    };
+    out.sort((a, b) => {
+        const av = getVal(a);
+        const bv = getVal(b);
+        if (av === bv) {
+            const ar = (a && a.request_id) ? String(a.request_id) : '';
+            const br = (b && b.request_id) ? String(b.request_id) : '';
+            return ar.localeCompare(br);
+        }
+        return (av < bv ? -1 : 1) * dir;
+    });
+    return out;
+}
+
 function agentPrevPage() {
     state.agentPageOffset = Math.max(0, state.agentPageOffset - state.agentPageLimit);
     loadAgentCostBreakdown();
@@ -1648,7 +2150,7 @@ function agentNextPage() {
 async function loadAgentCostBreakdown() {
     if (!state.currentProject || !state.costAgent) return;
     const tbody = document.getElementById('cost-agent-requests-tbody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading…</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading…</td></tr>';
     try {
         const url =
             `/api/projects/${encodeURIComponent(state.currentProject)}` +
@@ -1658,7 +2160,7 @@ async function loadAgentCostBreakdown() {
         const data = await resp.json();
         renderAgentCostBreakdown(data);
     } catch (e) {
-        if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="loading">Failed to load agent breakdown.</td></tr>';
+        if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="loading">Failed to load agent breakdown.</td></tr>';
     }
 }
 
@@ -1680,6 +2182,8 @@ function renderAgentCostBreakdown(data) {
     const tbody = document.getElementById('cost-agent-requests-tbody');
     if (!tbody) return;
 
+    state.agentCostData = data || null;
+
     const agentName = (data && data.agent_name) ? String(data.agent_name) : (state.costAgent || '');
     const nameEl = document.getElementById('cost-agent-name');
     if (nameEl) nameEl.textContent = agentName;
@@ -1694,14 +2198,17 @@ function renderAgentCostBreakdown(data) {
 
     tbody.innerHTML = '';
     if (!reqs || reqs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">No requests found for this agent.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No requests found for this agent.</td></tr>';
         return;
     }
 
-    for (const r of reqs) {
+    const sortedReqs = sortAgentRequests(reqs);
+
+    for (const r of sortedReqs) {
         const rid = (r && r.request_id) ? String(r.request_id) : '';
         if (!rid) continue;
         const expanded = !!state.agentExpanded[rid];
+        const firstTs = (r && (r.first_ts !== undefined) && (r.first_ts !== null)) ? r.first_ts : '';
         const tokens = (r && r.tokens && typeof r.tokens === 'object') ? r.tokens : {};
         const it = Number(tokens.input || 0);
         const ot = Number(tokens.output || 0);
@@ -1728,17 +2235,22 @@ function renderAgentCostBreakdown(data) {
         });
         ridTd.appendChild(ridLink);
 
+        const tsTd = document.createElement('td');
+        tsTd.className = 'mono muted';
+        tsTd.textContent = fmtTs(firstTs);
+
         const costTd = document.createElement('td');
-        costTd.textContent = `$${cost.toFixed(6)}`;
+        costTd.textContent = `$${fmtCost(cost, 6)}`;
         const itTd = document.createElement('td');
-        itTd.textContent = String(Math.round(it));
+        itTd.textContent = fmtInt(Math.round(it));
         const otTd = document.createElement('td');
-        otTd.textContent = String(Math.round(ot));
+        otTd.textContent = fmtInt(Math.round(ot));
         const ttTd = document.createElement('td');
-        ttTd.textContent = String(Math.round(tt));
+        ttTd.textContent = fmtInt(Math.round(tt));
 
         mainRow.appendChild(toggleTd);
         mainRow.appendChild(ridTd);
+        mainRow.appendChild(tsTd);
         mainRow.appendChild(costTd);
         mainRow.appendChild(itTd);
         mainRow.appendChild(otTd);
@@ -1748,7 +2260,7 @@ function renderAgentCostBreakdown(data) {
         detailRow.className = 'cost-agent-detail-row';
         detailRow.style.display = expanded ? '' : 'none';
         const detailTd = document.createElement('td');
-        detailTd.colSpan = 6;
+        detailTd.colSpan = 7;
 
         const byModel = Array.isArray(r && r.by_model) ? r.by_model : [];
         if (byModel.length === 0) {
@@ -1782,10 +2294,10 @@ function renderAgentCostBreakdown(data) {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td class="mono">${escapeHtml(modelName)}</td>
-                    <td>$${mc.toFixed(6)}</td>
-                    <td>${Math.round(mit)}</td>
-                    <td>${Math.round(mot)}</td>
-                    <td>${Math.round(mtt)}</td>
+                    <td>$${fmtCost(mc, 6)}</td>
+                    <td>${fmtInt(Math.round(mit))}</td>
+                    <td>${fmtInt(Math.round(mot))}</td>
+                    <td>${fmtInt(Math.round(mtt))}</td>
                 `;
                 if (subBody) subBody.appendChild(tr);
             }
@@ -1824,6 +2336,32 @@ function onTraceAdvancedToggle() {
     state.traceAdvanced = !!(cb && cb.checked);
     const adv = document.getElementById('trace-advanced');
     if (adv) adv.style.display = state.traceAdvanced ? '' : 'none';
+    const splitter = document.getElementById('traces-splitter');
+    if (splitter) splitter.style.display = state.traceAdvanced ? '' : 'none';
+
+    // When advanced is hidden, ensure chat expands to full height (clear any fixed split sizing)
+    const chat = document.getElementById('trace-chat');
+    if (!state.traceAdvanced && chat) {
+        chat.style.flex = '1 1 auto';
+        chat.style.height = '';
+    }
+
+    // When advanced becomes visible, re-apply saved split height (if any), otherwise keep a sensible default.
+    if (state.traceAdvanced && chat && adv) {
+        try {
+            const saved = localStorage.getItem('moose.vsplit.traces.topPx');
+            const px = saved ? parseInt(saved, 10) : NaN;
+            if (Number.isFinite(px) && px > 0) {
+                chat.style.flex = `0 0 ${px}px`;
+                chat.style.height = `${px}px`;
+                adv.style.flex = '1 1 auto';
+            } else {
+                // Default: give chat most of the space
+                chat.style.flex = '1 1 auto';
+                adv.style.flex = '1 1 auto';
+            }
+        } catch (e) {}
+    }
     if (state.selectedTraceId) {
         if (!state.traceChatPollInterval) {
             state.traceChatLastCount = 0;
@@ -2028,6 +2566,64 @@ function fmtDurMs(startTs, endTs) {
     return `${ms.toFixed(1)}ms`;
 }
 
+function safeJsonStringify(val) {
+    try {
+        return JSON.stringify(val, null, 2);
+    } catch (e) {
+        try {
+            return String(val);
+        } catch (e2) {
+            return '[unserializable]';
+        }
+    }
+}
+
+function extractToolCallsFromTraceItem(it) {
+    if (it && it.tool_args_json) {
+        let args = null;
+        const rawArgs = String(it.tool_args_json);
+        try {
+            args = JSON.parse(rawArgs);
+        } catch (e) {
+            args = rawArgs;
+        }
+        return [{
+            name: it.tool_call_name || it.name || 'tool',
+            args: args
+        }];
+    }
+    if (it && Array.isArray(it.tool_calls)) return it.tool_calls;
+    const raw = it && it.tool_calls_json ? String(it.tool_calls_json) : '';
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function renderTraceToolCalls(toolCalls) {
+    if (!toolCalls || toolCalls.length === 0) return '';
+    const blocks = toolCalls.map(tc => {
+        const name = tc && (tc.name || tc.tool) ? String(tc.name || tc.tool) : 'tool';
+        const args = tc && (tc.args ?? tc.input) ? (tc.args ?? tc.input) : null;
+        const argsText = args !== null
+            ? (typeof args === 'string' ? args : safeJsonStringify(args))
+            : '';
+        const argsHtml = args !== null
+            ? `<pre class="tool-use-args">${escapeHtmlSimple(argsText)}</pre>`
+            : '';
+        return `
+            <div class="tool-use-block">
+                <div class="tool-use-header">🔧 ${escapeHtmlSimple(name)}</div>
+                ${argsHtml}
+            </div>
+        `;
+    });
+    return blocks.join('');
+}
+
 function renderTraceChat(items) {
     const chatEl = document.getElementById('trace-chat');
     if (!chatEl) return;
@@ -2067,6 +2663,8 @@ function renderTraceChat(items) {
         const expand = trunc.truncated
             ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
             : '';
+        const toolCalls = extractToolCallsFromTraceItem(it);
+        const toolBlocks = renderTraceToolCalls(toolCalls);
         blocks.push(`
           <div class="trace-bubble ${cls}">
             <div class="trace-bubble-header muted">
@@ -2085,6 +2683,7 @@ function renderTraceChat(items) {
             </div>
             ${body}
             ${expand}
+            ${toolBlocks}
           </div>
         `);
     });
@@ -2144,6 +2743,8 @@ function appendTraceChat(items) {
         const expand = trunc.truncated
             ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
             : '';
+        const toolCalls = extractToolCallsFromTraceItem(it);
+        const toolBlocks = renderTraceToolCalls(toolCalls);
         blocks.push(`
           <div class="trace-bubble ${cls}">
             <div class="trace-bubble-header muted">
@@ -2162,6 +2763,7 @@ function appendTraceChat(items) {
             </div>
             ${body}
             ${expand}
+            ${toolBlocks}
           </div>
         `);
     });
@@ -2307,6 +2909,29 @@ function selectSpan(spanId) {
 // Utilities
 // ============================================================================
 
+function fmtInt(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v ?? '');
+    try {
+        return Math.round(n).toLocaleString();
+    } catch (e) {
+        return String(Math.round(n));
+    }
+}
+
+function fmtCost(v, decimals = 6) {
+    const n = Number(v);
+    const d = (typeof decimals === 'number' && Number.isFinite(decimals))
+        ? Math.max(0, Math.min(12, Math.floor(decimals)))
+        : 6;
+    if (!Number.isFinite(n)) return String(v ?? '');
+    try {
+        return new Intl.NumberFormat(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }).format(n);
+    } catch (e) {
+        return n.toFixed(d);
+    }
+}
+
 function parseMessageContent(content) {
     let textContent = '';
     let toolUses = [];
@@ -2422,6 +3047,7 @@ window.startChat = startChat;
 window.resetChatOverlay = resetChatOverlay;
 window.onHideToolMessagesToggle = onHideToolMessagesToggle;
 window.loadOlderMessages = loadOlderMessages;
+window.loadOlderLogs = loadOlderLogs;
 window.loadCostSummary = loadCostSummary;
 window.backToCostSummary = backToCostSummary;
 window.onAgentLimitChange = onAgentLimitChange;
@@ -2436,3 +3062,4 @@ window.selectSpan = selectSpan;
 window.toggleLogAutoScroll = toggleLogAutoScroll;
 window.toggleChatAutoScroll = toggleChatAutoScroll;
 window.onChartTimeRangeChange = onChartTimeRangeChange;
+window.toggleChatCollapse = toggleChatCollapse;

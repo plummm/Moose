@@ -97,6 +97,7 @@ class ToolRuntime:
         args: Optional[Dict[str, Any]] = None,
         *,
         parent_span_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
     ) -> Any:
         """
         Call another tool from within a tool.
@@ -175,6 +176,7 @@ class ToolRuntime:
                         {
                             "span_id": span.span_id,
                             "tool_name": str(tool_name),
+                            "tool_call_id": tool_call_id,
                             "args_json": args_json,
                             "result_json": res_json,
                             "error": None,
@@ -202,6 +204,7 @@ class ToolRuntime:
                     {
                         "span_id": span.span_id,
                         "tool_name": str(tool_name),
+                        "tool_call_id": tool_call_id,
                         "args_json": args_json,
                         "result_json": None,
                         "error": f"{type(e).__name__}: {e}",

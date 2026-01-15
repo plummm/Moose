@@ -29,7 +29,7 @@ MOOSE_ASCII = r"""
 """
 
 # Version for cache busting and verification
-WEB_UI_VERSION = "2.6.0"
+WEB_UI_VERSION = "2.7.5"
 
 
 def get_dashboard_html() -> str:
@@ -54,11 +54,17 @@ def get_dashboard_html() -> str:
         <!-- Left Panel: Chat Section -->
         <section class="chat-panel" id="chat-panel">
             <div class="section-header">
-                <h2>Chat</h2>
+                <div class="chat-header-left">
+                    <button id="chat-collapse-btn" class="collapse-btn" type="button" onclick="toggleChatCollapse()" title="Collapse chat">
+                        ◀
+                    </button>
+                    <h2>Chat</h2>
+                </div>
                 <div id="connection-status" class="connection-status connected">
                     <span class="dot"></span>Connected
                 </div>
             </div>
+            <div id="chat-collapsed-label" class="chat-collapsed-label" style="display:none;">Chat</div>
             <div class="section-controls" style="margin-bottom: 12px;">
                 <label class="chat-toggle">
                     <input type="checkbox" id="hide-tool-messages" onchange="onHideToolMessagesToggle()" />
@@ -122,69 +128,75 @@ def get_dashboard_html() -> str:
 
             <!-- Overview tab content -->
             <div id="tab-content-overview" class="tab-content active">
-                <!-- Online Agents Section -->
-                <section class="agents-section">
-                    <h2>Online Agents</h2>
-                    <div class="agents-table-container">
-                        <table class="agents-table">
-                            <thead>
-                                <tr>
-                                    <th>Agent Name</th>
-                                    <th>Status</th>
-                                    <th>Container</th>
-                                    <th>Interactive Mode</th>
-                                    <th>Link</th>
-                                </tr>
-                            </thead>
-                            <tbody id="agents-tbody">
-                                <tr>
-                                    <td colspan="5" class="loading">Loading agents...</td>
-                                </tr>
-                            </tbody>
-                        </table>
+                <div class="v-split" id="overview-vsplit">
+                    <div class="v-pane" id="overview-top">
+                        <!-- Online Agents Section -->
+                        <section class="agents-section">
+                            <h2>Online Agents</h2>
+                            <div class="agents-table-container">
+                                <table class="agents-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Agent Name</th>
+                                            <th>Status</th>
+                                            <th>Container</th>
+                                            <th>Interactive Mode</th>
+                                            <th>Link</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="agents-tbody">
+                                        <tr>
+                                            <td colspan="5" class="loading">Loading agents...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
                     </div>
-                </section>
-
-                <!-- Logging Section -->
-                <section class="logging-section">
-                    <div class="section-header">
-                        <h2>Logging</h2>
-                        <div class="section-controls">
-                            <select id="log-file-dropdown" onchange="onLogFileChange()">
-                                <option value="live">Live Stream</option>
-                            </select>
-                            <button class="refresh-btn" onclick="switchToLiveLogs()" title="Switch to live stream">
-                                &#x21bb;
-                            </button>
-                        </div>
+                    <div class="v-resize-handle" id="overview-splitter" title="Drag to resize"></div>
+                    <div class="v-pane" id="overview-bottom">
+                        <!-- Logging Section -->
+                        <section class="logging-section">
+                            <div class="section-header">
+                                <h2>Logging</h2>
+                                <div class="section-controls">
+                                    <select id="log-file-dropdown" onchange="onLogFileChange()">
+                                        <option value="live">Live Stream</option>
+                                    </select>
+                                    <button class="refresh-btn" onclick="switchToLiveLogs()" title="Switch to live stream">
+                                        &#x21bb;
+                                    </button>
+                                </div>
+                            </div>
+                            <!-- Log Level Filters -->
+                            <div class="filter-group" style="margin-bottom: 12px;">
+                                <label>Filter:</label>
+                                <div class="log-level-filters">
+                                    <label class="log-level-filter debug">
+                                        <input type="checkbox" id="log-filter-debug" checked /> DEBUG
+                                    </label>
+                                    <label class="log-level-filter info">
+                                        <input type="checkbox" id="log-filter-info" checked /> INFO
+                                    </label>
+                                    <label class="log-level-filter warning">
+                                        <input type="checkbox" id="log-filter-warning" checked /> WARNING
+                                    </label>
+                                    <label class="log-level-filter error">
+                                        <input type="checkbox" id="log-filter-error" checked /> ERROR
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="log-container" id="log-container" style="position: relative;">
+                                <div class="log-entries" id="log-entries">
+                                    <!-- Log entries will be inserted here -->
+                                </div>
+                                <button id="log-auto-scroll-btn" class="auto-scroll-toggle active" onclick="toggleLogAutoScroll()">
+                                    Auto-scroll: ON
+                                </button>
+                            </div>
+                        </section>
                     </div>
-                    <!-- Log Level Filters -->
-                    <div class="filter-group" style="margin-bottom: 12px;">
-                        <label>Filter:</label>
-                        <div class="log-level-filters">
-                            <label class="log-level-filter debug">
-                                <input type="checkbox" id="log-filter-debug" checked /> DEBUG
-                            </label>
-                            <label class="log-level-filter info">
-                                <input type="checkbox" id="log-filter-info" checked /> INFO
-                            </label>
-                            <label class="log-level-filter warning">
-                                <input type="checkbox" id="log-filter-warning" checked /> WARNING
-                            </label>
-                            <label class="log-level-filter error">
-                                <input type="checkbox" id="log-filter-error" checked /> ERROR
-                            </label>
-                        </div>
-                    </div>
-                    <div class="log-container" id="log-container" style="position: relative;">
-                        <div class="log-entries" id="log-entries">
-                            <!-- Log entries will be inserted here -->
-                        </div>
-                        <button id="log-auto-scroll-btn" class="auto-scroll-toggle active" onclick="toggleLogAutoScroll()">
-                            Auto-scroll: ON
-                        </button>
-                    </div>
-                </section>
+                </div>
             </div>
 
             <!-- Costs tab content -->
@@ -200,62 +212,70 @@ def get_dashboard_html() -> str:
                     </div>
 
                     <div id="costs-main-view">
-                        <div class="costs-grid">
-                            <div class="costs-card">
-                                <div class="costs-card-title">Project totals</div>
-                                <div id="cost-totals" class="costs-metrics">Loading…</div>
-                            </div>
+                        <div class="v-split" id="costs-vsplit">
+                            <div class="v-pane" id="costs-top">
+                                <div class="costs-grid">
+                                    <div class="costs-card">
+                                        <div class="costs-card-title">Project totals</div>
+                                        <div id="cost-totals" class="costs-metrics">Loading…</div>
+                                    </div>
 
-                            <div class="costs-card">
-                                <div class="costs-card-title">By agent</div>
-                                <div class="costs-table-container">
-                                    <table class="costs-table">
-                                        <thead>
-                                            <tr>
-                                                <th>Agent</th>
-                                                <th>Cost (USD)</th>
-                                                <th>Input tokens</th>
-                                                <th>Output tokens</th>
-                                                <th>Total tokens</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="cost-by-agent-tbody">
-                                            <tr><td colspan="5" class="loading">Loading…</td></tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-
-                            <!-- Chart Time Range Controls -->
-                            <div class="costs-card">
-                                <div class="costs-card-title">Daily Cost Trends</div>
-                                <div class="chart-controls">
-                                    <div class="chart-control-group">
-                                        <label>Time Range:</label>
-                                        <select id="chart-time-range" onchange="onChartTimeRangeChange()">
-                                            <option value="7d" selected>Last 7 days</option>
-                                            <option value="24h">Last 24 hours</option>
-                                            <option value="30d">Last 30 days</option>
-                                            <option value="all">All time</option>
-                                        </select>
+                                    <div class="costs-card">
+                                        <div class="costs-card-title">By agent</div>
+                                        <div class="costs-table-container">
+                                            <table class="costs-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Agent</th>
+                                                        <th>Cost (USD)</th>
+                                                        <th>Input tokens</th>
+                                                        <th>Output tokens</th>
+                                                        <th>Total tokens</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="cost-by-agent-tbody">
+                                                    <tr><td colspan="5" class="loading">Loading…</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="chart-canvas-container">
-                                    <canvas id="chart-cost-canvas"></canvas>
-                                </div>
-                                <!-- Fallback for non-Chart.js -->
-                                <div id="chart-legend-cost" class="chart-legend" style="display: none;"></div>
-                                <div id="chart-cost" class="stacked-chart" style="display: none;"></div>
                             </div>
+                            <div class="v-resize-handle" id="costs-splitter" title="Drag to resize"></div>
+                            <div class="v-pane" id="costs-bottom">
+                                <div class="costs-grid">
+                                    <!-- Chart Time Range Controls -->
+                                    <div class="costs-card">
+                                        <div class="costs-card-title">Daily Cost Trends</div>
+                                        <div class="chart-controls">
+                                            <div class="chart-control-group">
+                                                <label>Time Range:</label>
+                                                <select id="chart-time-range" onchange="onChartTimeRangeChange()">
+                                                    <option value="7d" selected>Last 7 days</option>
+                                                    <option value="24h">Last 24 hours</option>
+                                                    <option value="30d">Last 30 days</option>
+                                                    <option value="all">All time</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="chart-canvas-container">
+                                            <canvas id="chart-cost-canvas"></canvas>
+                                        </div>
+                                        <!-- Fallback for non-Chart.js -->
+                                        <div id="chart-legend-cost" class="chart-legend" style="display: none;"></div>
+                                        <div id="chart-cost" class="stacked-chart" style="display: none;"></div>
+                                    </div>
 
-                            <div class="costs-card">
-                                <div class="costs-card-title">Daily Token Usage</div>
-                                <div class="chart-canvas-container">
-                                    <canvas id="chart-tokens-canvas"></canvas>
+                                    <div class="costs-card">
+                                        <div class="costs-card-title">Daily Token Usage</div>
+                                        <div class="chart-canvas-container">
+                                            <canvas id="chart-tokens-canvas"></canvas>
+                                        </div>
+                                        <!-- Fallback for non-Chart.js -->
+                                        <div id="chart-legend-tokens" class="chart-legend" style="display: none;"></div>
+                                        <div id="chart-tokens" class="stacked-chart" style="display: none;"></div>
+                                    </div>
                                 </div>
-                                <!-- Fallback for non-Chart.js -->
-                                <div id="chart-legend-tokens" class="chart-legend" style="display: none;"></div>
-                                <div id="chart-tokens" class="stacked-chart" style="display: none;"></div>
                             </div>
                         </div>
                     </div>
@@ -285,14 +305,15 @@ def get_dashboard_html() -> str:
                                         <tr>
                                             <th></th>
                                             <th>Request id</th>
-                                            <th>Cost (USD)</th>
-                                            <th>Input tokens</th>
-                                            <th>Output tokens</th>
-                                            <th>Total tokens</th>
+                                            <th class="sortable" data-sort="first_ts"><span class="th-label">First seen</span><span class="sort-indicator"></span></th>
+                                            <th class="sortable" data-sort="cost"><span class="th-label">Cost (USD)</span><span class="sort-indicator"></span></th>
+                                            <th class="sortable" data-sort="input_tokens"><span class="th-label">Input tokens</span><span class="sort-indicator"></span></th>
+                                            <th class="sortable" data-sort="output_tokens"><span class="th-label">Output tokens</span><span class="sort-indicator"></span></th>
+                                            <th class="sortable" data-sort="total_tokens"><span class="th-label">Total tokens</span><span class="sort-indicator"></span></th>
                                         </tr>
                                     </thead>
                                     <tbody id="cost-agent-requests-tbody">
-                                        <tr><td colspan="6" class="loading">Loading…</td></tr>
+                                        <tr><td colspan="7" class="loading">Loading…</td></tr>
                                     </tbody>
                                 </table>
                             </div>
@@ -326,9 +347,10 @@ def get_dashboard_html() -> str:
                             <button class="refresh-btn" onclick="loadTracesDropdown()" title="Refresh traces">&#x21bb;</button>
                         </div>
                     </div>
-                    <div class="trace-main">
-                        <div id="trace-chat" class="trace-chat muted">Select a request_id to view the chain.</div>
-                        <div id="trace-advanced" class="trace-advanced" style="display:none;">
+                    <div class="trace-main v-split" id="trace-main">
+                        <div id="trace-chat" class="trace-chat v-pane muted">Select a request_id to view the chain.</div>
+                        <div class="v-resize-handle" id="traces-splitter" title="Drag to resize" style="display:none;"></div>
+                        <div id="trace-advanced" class="trace-advanced v-pane" style="display:none;">
                             <div id="trace-detail" class="trace-detail muted">Advanced: span tree</div>
                         </div>
                     </div>
@@ -367,6 +389,7 @@ def get_css() -> str:
     --tool-color: #ff9800;
     --system-color: #607d8b;
     --chat-panel-width: 400px;
+    --v-handle-size: 8px;
 }
 
 * {
@@ -396,6 +419,59 @@ body {
 }
 .page-layout.traces-full .resize-handle {
     display: none;
+}
+
+/* Collapse chat panel */
+.page-layout.chat-collapsed .chat-panel {
+    width: 44px !important;
+    min-width: 44px !important;
+    max-width: 44px !important;
+    padding: 10px 6px;
+}
+.page-layout.chat-collapsed .resize-handle {
+    display: none;
+}
+.page-layout.chat-collapsed .chat-panel .section-controls,
+.page-layout.chat-collapsed .chat-panel .chat-info-bar,
+.page-layout.chat-collapsed .chat-panel .chat-container {
+    display: none;
+}
+.page-layout.chat-collapsed #connection-status {
+    display: none;
+}
+.page-layout.chat-collapsed .chat-header-left h2 {
+    display: none;
+}
+.chat-header-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+.collapse-btn {
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-radius: 8px;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.collapse-btn:hover {
+    background: var(--accent-blue);
+}
+.chat-collapsed-label {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    text-align: center;
+    user-select: none;
 }
 
 /* Left Panel - Chat */
@@ -470,18 +546,55 @@ body {
 .tab-content {
     display: none;
     overflow: hidden;
+    flex: 1;
+    min-height: 0;
 }
 
 .tab-content.active {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* Generic vertical split + handle */
+.v-split {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+.v-pane {
+    min-height: 0;
+    overflow: auto;
+}
+.v-resize-handle {
+    height: var(--v-handle-size);
+    flex: 0 0 var(--v-handle-size);
+    background: var(--border-color);
+    cursor: row-resize;
+    border-radius: 6px;
+    margin: 8px 0;
+    touch-action: none; /* ensure pointer dragging works on mobile */
+}
+.v-resize-handle:hover,
+.v-resize-handle.dragging {
+    background: var(--accent-blue);
 }
 
 /* ------------------------------------------------------------------
    Traces section (minimal styles)
    ------------------------------------------------------------------ */
+.traces-section {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
 .trace-main {
     /* Avoid nested scroll containers; chat should be the primary scroller. */
-    height: calc(100vh - 180px);
+    flex: 1;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -501,9 +614,9 @@ body {
 }
 
 .trace-advanced {
-    margin-top: 12px;
-    flex: 0 0 auto;
-    max-height: 45vh;
+    margin-top: 0;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow: auto;
 }
 
@@ -1448,13 +1561,69 @@ let logViewMode = 'live';  // 'live' or 'historical'
 let chatViewMode = 'live';  // 'live' or 'historical'
 let rightTab = 'overview';
 let hideToolMessages = false; // session-only
+let chatCollapsed = true;
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     readUrlParams();
+    initChatCollapse();
     loadProjects();
     initResizeHandle();
+    initVerticalSplits();
 });
+
+function _lsGet(key, fallbackValue) {
+    try {
+        const v = window.localStorage ? window.localStorage.getItem(key) : null;
+        return (v === null || v === undefined) ? fallbackValue : v;
+    } catch (e) {
+        return fallbackValue;
+    }
+}
+
+function _lsSet(key, value) {
+    try {
+        if (!window.localStorage) return;
+        window.localStorage.setItem(key, String(value));
+    } catch (e) {
+        // ignore
+    }
+}
+
+function initChatCollapse() {
+    // Default: collapsed (saves space on desktop + mobile). User can expand via chevron.
+    const raw = String(_lsGet('moose_chat_collapsed', '1')).toLowerCase().trim();
+    chatCollapsed = !(raw === '0' || raw === 'false' || raw === 'no');
+    applyChatCollapsed();
+}
+
+function applyChatCollapsed() {
+    const pageLayout = document.querySelector('.page-layout');
+    if (!pageLayout) return;
+    const btn = document.getElementById('chat-collapse-btn');
+    const label = document.getElementById('chat-collapsed-label');
+    if (chatCollapsed) {
+        pageLayout.classList.add('chat-collapsed');
+        if (btn) {
+            btn.textContent = '▶';
+            btn.title = 'Expand chat';
+        }
+        if (label) label.style.display = '';
+    } else {
+        pageLayout.classList.remove('chat-collapsed');
+        if (btn) {
+            btn.textContent = '◀';
+            btn.title = 'Collapse chat';
+        }
+        if (label) label.style.display = 'none';
+    }
+}
+
+function toggleChatCollapse() {
+    chatCollapsed = !chatCollapsed;
+    _lsSet('moose_chat_collapsed', chatCollapsed ? '1' : '0');
+    applyChatCollapsed();
+}
 
 function readUrlParams() {
     try {
@@ -1569,36 +1738,175 @@ function switchRightTab(tabName) {
 function initResizeHandle() {
     const resizeHandle = document.getElementById('resize-handle');
     const chatPanel = document.getElementById('chat-panel');
+    if (!resizeHandle || !chatPanel) return;
+
+    // Restore previous width (if any)
+    const saved = parseInt(String(_lsGet('moose_chat_panel_width', '') || ''), 10);
+    if (Number.isFinite(saved) && saved >= 300 && saved <= 800) {
+        chatPanel.style.width = saved + 'px';
+        document.documentElement.style.setProperty('--chat-panel-width', saved + 'px');
+    }
+
     let isResizing = false;
     let startX = 0;
     let startWidth = 0;
-    
-    resizeHandle.addEventListener('mousedown', function(e) {
+
+    function onPointerDown(e) {
+        if (chatCollapsed) return;
         isResizing = true;
         startX = e.clientX;
         startWidth = chatPanel.offsetWidth;
         resizeHandle.classList.add('dragging');
         document.body.style.cursor = 'col-resize';
         document.body.style.userSelect = 'none';
+        try {
+            resizeHandle.setPointerCapture(e.pointerId);
+        } catch (err) {}
         e.preventDefault();
-    });
-    
-    document.addEventListener('mousemove', function(e) {
+    }
+
+    function onPointerMove(e) {
         if (!isResizing) return;
-        
         const diff = e.clientX - startX;
         const newWidth = Math.max(300, Math.min(800, startWidth + diff));
         chatPanel.style.width = newWidth + 'px';
         document.documentElement.style.setProperty('--chat-panel-width', newWidth + 'px');
+        try { e.preventDefault(); } catch (err) {}
+    }
+
+    function onPointerUp() {
+        if (!isResizing) return;
+        isResizing = false;
+        resizeHandle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        const w = chatPanel.offsetWidth;
+        if (w) _lsSet('moose_chat_panel_width', String(w));
+    }
+
+    // Prefer pointer events; attach document-level listeners to be robust if pointer capture fails.
+    resizeHandle.addEventListener('pointerdown', function(e) {
+        onPointerDown(e);
+        document.addEventListener('pointermove', onPointerMove, true);
+        document.addEventListener('pointerup', onPointerUp, true);
+        document.addEventListener('pointercancel', onPointerUp, true);
     });
-    
-    document.addEventListener('mouseup', function() {
-        if (isResizing) {
-            isResizing = false;
-            resizeHandle.classList.remove('dragging');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
-        }
+    resizeHandle.addEventListener('pointerup', function() {
+        document.removeEventListener('pointermove', onPointerMove, true);
+        document.removeEventListener('pointerup', onPointerUp, true);
+        document.removeEventListener('pointercancel', onPointerUp, true);
+        onPointerUp();
+    });
+    resizeHandle.addEventListener('pointercancel', function() {
+        document.removeEventListener('pointermove', onPointerMove, true);
+        document.removeEventListener('pointerup', onPointerUp, true);
+        document.removeEventListener('pointercancel', onPointerUp, true);
+        onPointerUp();
+    });
+}
+
+function initVerticalSplit(opts) {
+    const container = document.getElementById(opts.containerId);
+    const top = document.getElementById(opts.topId);
+    const handle = document.getElementById(opts.handleId);
+    const bottom = document.getElementById(opts.bottomId);
+    if (!container || !top || !handle || !bottom) return;
+
+    const key = String(opts.storageKey || '');
+    const minTop = Number(opts.minTopPx || 120);
+    const minBottom = Number(opts.minBottomPx || 140);
+
+    function applyTopPx(px) {
+        const cH = container.getBoundingClientRect().height || 0;
+        const maxTop = Math.max(minTop, cH - minBottom);
+        const next = Math.max(minTop, Math.min(maxTop, Math.round(px)));
+        top.style.flex = `0 0 ${next}px`;
+        bottom.style.flex = '1 1 auto';
+        return next;
+    }
+
+    // Restore saved top height (or use default)
+    const saved = parseInt(String(_lsGet(key, '') || ''), 10);
+    if (Number.isFinite(saved) && saved > 0) {
+        applyTopPx(saved);
+    } else if (opts.defaultTopPx) {
+        applyTopPx(Number(opts.defaultTopPx));
+    }
+
+    let isResizing = false;
+    let startY = 0;
+    let startTop = 0;
+
+    function onMove(e) {
+        if (!isResizing) return;
+        const dy = e.clientY - startY;
+        const next = applyTopPx(startTop + dy);
+        if (key) _lsSet(key, String(next));
+        try { e.preventDefault(); } catch (err) {}
+    }
+
+    function stop() {
+        if (!isResizing) return;
+        isResizing = false;
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('pointermove', onMove, true);
+        document.removeEventListener('pointerup', stop, true);
+        document.removeEventListener('pointercancel', stop, true);
+    }
+
+    handle.addEventListener('pointerdown', (e) => {
+        isResizing = true;
+        startY = e.clientY;
+        startTop = top.getBoundingClientRect().height || 0;
+        handle.classList.add('dragging');
+        document.body.style.cursor = 'row-resize';
+        document.body.style.userSelect = 'none';
+        // Capture pointer if supported, but also attach document-level listeners as a fallback.
+        try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+        document.addEventListener('pointermove', onMove, true);
+        document.addEventListener('pointerup', stop, true);
+        document.addEventListener('pointercancel', stop, true);
+        e.preventDefault();
+    });
+}
+
+function initVerticalSplits() {
+    // Overview: Agents (top) vs Logging (bottom)
+    initVerticalSplit({
+        containerId: 'overview-vsplit',
+        topId: 'overview-top',
+        handleId: 'overview-splitter',
+        bottomId: 'overview-bottom',
+        storageKey: 'moose_split_overview_top_px',
+        defaultTopPx: 260,
+        minTopPx: 160,
+        minBottomPx: 220,
+    });
+
+    // Costs: summary (top) vs charts (bottom)
+    initVerticalSplit({
+        containerId: 'costs-vsplit',
+        topId: 'costs-top',
+        handleId: 'costs-splitter',
+        bottomId: 'costs-bottom',
+        storageKey: 'moose_split_costs_top_px',
+        defaultTopPx: 240,
+        minTopPx: 160,
+        minBottomPx: 220,
+    });
+
+    // Traces: chain (top) vs advanced (bottom) only when advanced enabled.
+    initVerticalSplit({
+        containerId: 'trace-main',
+        topId: 'trace-chat',
+        handleId: 'traces-splitter',
+        bottomId: 'trace-advanced',
+        storageKey: 'moose_split_traces_top_px',
+        defaultTopPx: 320,
+        minTopPx: 160,
+        minBottomPx: 180,
     });
 }
 
@@ -1746,6 +2054,20 @@ function _fmtTs(ts) {
     }
 }
 
+// Number formatting helpers (commas + stable decimals)
+const _nfInt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+function _fmtInt(x) {
+    const n = Number(x || 0);
+    if (!Number.isFinite(n)) return String(x ?? '');
+    return _nfInt.format(Math.round(n));
+}
+function _fmtUsd(x, decimals = 6) {
+    const n = Number(x || 0);
+    if (!Number.isFinite(n)) return `$${String(x ?? '')}`;
+    const nf = new Intl.NumberFormat(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    return `$${nf.format(n)}`;
+}
+
 function _fmtDurMs(startTs, endTs) {
     const s = Number(startTs);
     if (!Number.isFinite(s)) return '';
@@ -1776,6 +2098,8 @@ function onTraceAdvancedToggle() {
     traceAdvanced = !!(cb && cb.checked);
     const adv = document.getElementById('trace-advanced');
     if (adv) adv.style.display = traceAdvanced ? '' : 'none';
+    const splitter = document.getElementById('traces-splitter');
+    if (splitter) splitter.style.display = traceAdvanced ? '' : 'none';
     // Refresh current trace detail if selected
     if (selectedTraceId) {
         // Only replace if not already polling (to preserve auto-append behavior)
@@ -1972,6 +2296,64 @@ function _truncate(s, n) {
     return {text: t.slice(0, n), truncated: true};
 }
 
+function _safeJsonStringify(val) {
+    try {
+        return JSON.stringify(val, null, 2);
+    } catch (e) {
+        try {
+            return String(val);
+        } catch (e2) {
+            return '[unserializable]';
+        }
+    }
+}
+
+function _extractToolCallsFromTraceItem(it) {
+    if (it && it.tool_args_json) {
+        let args = null;
+        const rawArgs = String(it.tool_args_json);
+        try {
+            args = JSON.parse(rawArgs);
+        } catch (e) {
+            args = rawArgs;
+        }
+        return [{
+            name: it.tool_call_name || it.name || 'tool',
+            args: args
+        }];
+    }
+    if (it && Array.isArray(it.tool_calls)) return it.tool_calls;
+    const raw = it && it.tool_calls_json ? String(it.tool_calls_json) : '';
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function _renderTraceToolCalls(toolCalls) {
+    if (!toolCalls || toolCalls.length === 0) return '';
+    const blocks = toolCalls.map(tc => {
+        const name = tc && (tc.name || tc.tool) ? String(tc.name || tc.tool) : 'tool';
+        const args = tc && (tc.args ?? tc.input) ? (tc.args ?? tc.input) : null;
+        const argsText = args !== null
+            ? (typeof args === 'string' ? args : _safeJsonStringify(args))
+            : '';
+        const argsHtml = args !== null
+            ? `<pre class="tool-use-args">${_escapeHtml(argsText)}</pre>`
+            : '';
+        return `
+            <div class="tool-use-block">
+                <div class="tool-use-header">🔧 ${_escapeHtml(name)}</div>
+                ${argsHtml}
+            </div>
+        `;
+    });
+    return blocks.join('');
+}
+
 function renderTraceChat(items) {
     const chatEl = document.getElementById('trace-chat');
     if (!chatEl) return;
@@ -2012,6 +2394,8 @@ function renderTraceChat(items) {
         const expand = trunc.truncated
             ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
             : '';
+        const toolCalls = _extractToolCallsFromTraceItem(it);
+        const toolBlocks = _renderTraceToolCalls(toolCalls);
         blocks.push(`
           <div class="trace-bubble ${cls}">
             <div class="trace-bubble-header muted">
@@ -2030,6 +2414,7 @@ function renderTraceChat(items) {
             </div>
             ${body}
             ${expand}
+            ${toolBlocks}
           </div>
         `);
     });
@@ -2100,6 +2485,8 @@ function appendTraceChat(items) {
         const expand = trunc.truncated
             ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
             : '';
+        const toolCalls = _extractToolCallsFromTraceItem(it);
+        const toolBlocks = _renderTraceToolCalls(toolCalls);
         blocks.push(`
           <div class="trace-bubble ${cls}">
             <div class="trace-bubble-header muted">
@@ -2118,6 +2505,7 @@ function appendTraceChat(items) {
             </div>
             ${body}
             ${expand}
+            ${toolBlocks}
           </div>
         `);
     });
@@ -2817,8 +3205,8 @@ function createChatMessageElement(message) {
         const footer = document.createElement('div');
         footer.className = 'message-footer';
         const parts = [];
-        if (cost !== null) parts.push(`Cost: $${cost.toFixed(6)}`);
-        if (usage) parts.push(`Tokens: in ${it || 0}, out ${ot || 0} (${tt || 0})`);
+        if (cost !== null) parts.push(`Cost: ${_fmtUsd(cost, 6)}`);
+        if (usage) parts.push(`Tokens: in ${_fmtInt(it || 0)}, out ${_fmtInt(ot || 0)} (${_fmtInt(tt || 0)})`);
         footer.textContent = parts.join(' | ');
         contentDiv.appendChild(footer);
     }
@@ -2921,7 +3309,7 @@ function agentNextPage() {
 async function loadAgentCostBreakdown() {
     if (!currentProject || !costAgent) return;
     const tbody = document.getElementById('cost-agent-requests-tbody');
-    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading…</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="loading">Loading…</td></tr>';
     try {
         const url =
             `/api/projects/${encodeURIComponent(currentProject)}` +
@@ -2931,7 +3319,7 @@ async function loadAgentCostBreakdown() {
         const data = await resp.json();
         renderAgentCostBreakdown(data);
     } catch (e) {
-        if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="loading">Failed to load agent breakdown.</td></tr>';
+        if (tbody) tbody.innerHTML = '<tr><td colspan="7" class="loading">Failed to load agent breakdown.</td></tr>';
     }
 }
 
@@ -2967,7 +3355,7 @@ function renderAgentCostBreakdown(data) {
 
     tbody.innerHTML = '';
     if (!reqs || reqs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">No requests found for this agent.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No requests found for this agent.</td></tr>';
         return;
     }
 
@@ -2975,6 +3363,7 @@ function renderAgentCostBreakdown(data) {
         const rid = (r && r.request_id) ? String(r.request_id) : '';
         if (!rid) continue;
         const expanded = !!agentExpanded[rid];
+        const firstTs = (r && (r.first_ts !== undefined) && (r.first_ts !== null)) ? r.first_ts : '';
         const tokens = (r && r.tokens && typeof r.tokens === 'object') ? r.tokens : {};
         const it = Number(tokens.input || 0);
         const ot = Number(tokens.output || 0);
@@ -3001,17 +3390,22 @@ function renderAgentCostBreakdown(data) {
         });
         ridTd.appendChild(ridLink);
 
+        const tsTd = document.createElement('td');
+        tsTd.className = 'mono muted';
+        tsTd.textContent = _fmtTs(firstTs);
+
         const costTd = document.createElement('td');
-        costTd.textContent = `$${cost.toFixed(6)}`;
+        costTd.textContent = _fmtUsd(cost, 6);
         const itTd = document.createElement('td');
-        itTd.textContent = String(Math.round(it));
+        itTd.textContent = _fmtInt(it);
         const otTd = document.createElement('td');
-        otTd.textContent = String(Math.round(ot));
+        otTd.textContent = _fmtInt(ot);
         const ttTd = document.createElement('td');
-        ttTd.textContent = String(Math.round(tt));
+        ttTd.textContent = _fmtInt(tt);
 
         mainRow.appendChild(toggleTd);
         mainRow.appendChild(ridTd);
+        mainRow.appendChild(tsTd);
         mainRow.appendChild(costTd);
         mainRow.appendChild(itTd);
         mainRow.appendChild(otTd);
@@ -3021,7 +3415,7 @@ function renderAgentCostBreakdown(data) {
         detailRow.className = 'cost-agent-detail-row';
         detailRow.style.display = expanded ? '' : 'none';
         const detailTd = document.createElement('td');
-        detailTd.colSpan = 6;
+        detailTd.colSpan = 7;
 
         const byModel = Array.isArray(r && r.by_model) ? r.by_model : [];
         if (byModel.length === 0) {
@@ -3055,10 +3449,10 @@ function renderAgentCostBreakdown(data) {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td class="mono">${escapeHtml(modelName)}</td>
-                    <td>$${mc.toFixed(6)}</td>
-                    <td>${Math.round(mit)}</td>
-                    <td>${Math.round(mot)}</td>
-                    <td>${Math.round(mtt)}</td>
+                    <td>${_fmtUsd(mc, 6)}</td>
+                    <td>${_fmtInt(mit)}</td>
+                    <td>${_fmtInt(mot)}</td>
+                    <td>${_fmtInt(mtt)}</td>
                 `;
                 if (subBody) subBody.appendChild(tr);
             }
@@ -3095,8 +3489,8 @@ function renderCostSummary(data) {
 
     const totals = (data && data.totals) ? data.totals : { cost: 0, tokens: { input: 0, output: 0, total: 0 } };
     const tokens = totals.tokens || { input: 0, output: 0, total: 0 };
-    totalsEl.textContent = `Total cost: $${Number(totals.cost || 0).toFixed(6)}\n` +
-                           `Tokens: in ${tokens.input || 0}, out ${tokens.output || 0} (total ${tokens.total || 0})`;
+    totalsEl.textContent = `Total cost: ${_fmtUsd(Number(totals.cost || 0), 6)}\n` +
+                           `Tokens: in ${_fmtInt(tokens.input || 0)}, out ${_fmtInt(tokens.output || 0)} (total ${_fmtInt(tokens.total || 0)})`;
 
     const byAgent = (data && data.by_agent) ? data.by_agent : {};
     const agents = Object.keys(byAgent).sort();
@@ -3112,10 +3506,10 @@ function renderCostSummary(data) {
             const href = `/?project=${encodeURIComponent(currentProject || '')}&tab=costs&agent=${encodeURIComponent(agent)}`;
             row.innerHTML = `
                 <td><a class="cost-link" href="${href}">${escapeHtml(agent)}</a></td>
-                <td>$${Number(a.cost || 0).toFixed(6)}</td>
-                <td>${t.input || 0}</td>
-                <td>${t.output || 0}</td>
-                <td>${t.total || 0}</td>
+                <td>${_fmtUsd(Number(a.cost || 0), 6)}</td>
+                <td>${_fmtInt(t.input || 0)}</td>
+                <td>${_fmtInt(t.output || 0)}</td>
+                <td>${_fmtInt(t.total || 0)}</td>
             `;
             tbody.appendChild(row);
         }
@@ -3199,7 +3593,7 @@ function renderStackedChart(containerId, legendId, perDay, kind) {
 
         const valueEl = document.createElement('div');
         valueEl.className = 'chart-value';
-        valueEl.textContent = kind === 'cost' ? `$${total.toFixed(3)}` : `${Math.round(total)}`;
+        valueEl.textContent = kind === 'cost' ? _fmtUsd(total, 3) : _fmtInt(total);
 
         row.appendChild(dateEl);
         row.appendChild(bar);
