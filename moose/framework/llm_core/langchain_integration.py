@@ -22,6 +22,7 @@ try:
     from langchain_openai import ChatOpenAI
     from langchain_anthropic import ChatAnthropic
     from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_azure_ai.chat_models import AzureAIChatCompletionsModel
     from langchain_core.messages import (
         BaseMessage,
         HumanMessage,
@@ -35,6 +36,7 @@ except ImportError:
     ChatOpenAI = None
     ChatAnthropic = None
     ChatGoogleGenerativeAI = None
+    AzureAIChatCompletionsModel = None
     BaseMessage = None
     HumanMessage = None
     SystemMessage = None
@@ -347,6 +349,14 @@ class LangChainLLM:
         
         if provider == LLMProvider.OPENAI:
             return ChatOpenAI(**llm_kwargs)
+        elif provider == LLMProvider.AZURE_AI:
+            azure_model = model
+            if isinstance(azure_model, str) and azure_model.lower().startswith("azure:"):
+                azure_model = azure_model.split(":", 1)[1].strip() or azure_model
+            azure_kwargs = dict(llm_kwargs)
+            azure_kwargs.pop("model_name", None)
+            azure_kwargs["model"] = azure_model
+            return AzureAIChatCompletionsModel(**azure_kwargs)
         elif provider == LLMProvider.ANTHROPIC:
             return ChatAnthropic(**llm_kwargs)
         elif provider == LLMProvider.GEMINI:
@@ -659,7 +669,9 @@ class LangChainLLM:
             except Exception as e:
                 if hasattr(e, 'status_code') and e.status_code == 404:
                     self.logger.error(f"Model {self.model} not found")
-
+                else:
+                    self.logger.error(f"Error invoking model {self.model}: {e}")
+                    
                 if self._is_quota_exhausted_429(e) and attempt < retries:
                     delay = self._backoff_seconds(attempt)
                     attempt += 1

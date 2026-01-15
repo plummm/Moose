@@ -262,6 +262,7 @@ class LLMClient:
             LLMProvider.OPENAI: "OPENAI_API_KEY",
             LLMProvider.ANTHROPIC: "ANTHROPIC_API_KEY",
             LLMProvider.GEMINI: "GOOGLE_API_KEY",
+            LLMProvider.AZURE_AI: "AZURE_AI_CREDENTIAL",
         }
         
         env_var = key_map.get(self.provider)
@@ -278,6 +279,8 @@ class LLMClient:
                 os.environ["ANTHROPIC_API_KEY"] = self.api_key
             elif self.provider == LLMProvider.GEMINI:
                 os.environ["GOOGLE_API_KEY"] = self.api_key
+            elif self.provider == LLMProvider.AZURE_AI:
+                os.environ["AZURE_AI_CREDENTIAL"] = self.api_key
     
     def _get_token_encoder(self):
         """Get appropriate tiktoken encoder for the model."""

@@ -4,7 +4,7 @@ import os
 import pytest
 import tempfile
 from pathlib import Path
-from moose.framework.llm_core import LLMClient, Message, MessageRole, LLMResponse
+from moose.framework.llm_core import LLMClient, Message, MessageRole, LLMResponse, LLMProvider
 from moose.framework.llm_core.cost_tracker import CostTracker
 from moose.framework.logging import init_core_logger, set_global_debug
 
@@ -26,6 +26,9 @@ class TestLLMCore:
         self.has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
         self.has_anthropic_key = bool(os.getenv("ANTHROPIC_API_KEY"))
         self.has_google_key = bool(os.getenv("GOOGLE_API_KEY"))
+        self.has_azure_key = bool(os.getenv("AZURE_AI_CREDENTIAL"))
+        self.has_azure_endpoint = bool(os.getenv("AZURE_AI_ENDPOINT"))
+        self.has_azure_config = bool(self.has_azure_key and self.has_azure_endpoint)
         
         # Create temporary directory for cost tracking
         self.temp_dir = tempfile.mkdtemp()
@@ -60,9 +63,21 @@ class TestLLMCore:
                 assert client.provider.value == "gemini"
             except Exception:
                 pytest.skip("Gemini model not available")
+        
+        # Test with Azure AI (requires credential + endpoint)
+        if self.has_azure_config:
+            try:
+                client = LLMClient(
+                    model="azure:gpt-4o",
+                    provider=LLMProvider.AZURE_AI,
+                )
+                assert client.provider.value == "azure_ai"
+            except Exception as e:
+                pytest.skip(f"Azure AI model not available: {e}")
     
     @pytest.mark.llm
-    def test_gpt4o_authentication_and_message(self):
+    @pytest.mark.asyncio
+    async def test_gpt4o_authentication_and_message(self):
         """Test GPT-4o authentication and message sending."""
         if not self.has_openai_key:
             pytest.skip("OPENAI_API_KEY not set")
@@ -70,7 +85,7 @@ class TestLLMCore:
         client = LLMClient(model="gpt-4o")
         
         # Test simple message
-        response = client.send_message("Say 'Hello' and nothing else.")
+        response = await client.send_message("Say 'Hello' and nothing else.")
         assert isinstance(response, LLMResponse)
         assert response.content is not None
         assert len(response.content) > 0
@@ -80,7 +95,8 @@ class TestLLMCore:
         assert "output_tokens" in response.usage
     
     @pytest.mark.llm
-    def test_claude_sonnet_authentication_and_message(self):
+    @pytest.mark.asyncio
+    async def test_claude_sonnet_authentication_and_message(self):
         """Test Claude Sonnet authentication and message sending."""
         if not self.has_anthropic_key:
             pytest.skip("ANTHROPIC_API_KEY not set")
@@ -92,14 +108,15 @@ class TestLLMCore:
             pytest.skip(f"Claude model not available: {e}")
         
         # Test simple message
-        response = client.send_message("Say 'Hello' and nothing else.")
+        response = await client.send_message("Say 'Hello' and nothing else.")
         assert isinstance(response, LLMResponse)
         assert response.content == 'Hello'
         assert len(response.content) > 0
         assert response.usage is not None
     
     @pytest.mark.llm
-    def test_gemini_pro_authentication_and_message(self):
+    @pytest.mark.asyncio
+    async def test_gemini_pro_authentication_and_message(self):
         """Test Gemini authentication and message sending."""
         if not self.has_google_key:
             pytest.skip("GOOGLE_API_KEY not set")
@@ -110,27 +127,48 @@ class TestLLMCore:
             pytest.skip(f"Gemini model not available: {e}")
         
         # Test simple message
-        response = client.send_message("Say 'Hello' and nothing else.")
+        response = await client.send_message("Say 'Hello' and nothing else.")
         assert isinstance(response, LLMResponse)
         assert response.content == 'Hello'
         assert len(response.content) > 0
         assert response.usage is not None
+
+    @pytest.mark.llm
+    @pytest.mark.asyncio
+    async def test_azure_ai_authentication_and_message(self):
+        """Test Azure AI authentication and message sending."""
+        if not self.has_azure_config:
+            pytest.skip("Azure AI env vars not set")
+        
+        client = LLMClient(
+            model="azure:gpt-4o",
+            provider=LLMProvider.AZURE_AI,
+        )
+        
+        # Test simple message
+        response = await client.send_message("Say 'Hello' and nothing else.")
+        assert isinstance(response, LLMResponse)
+        assert response.content is not None
+        assert len(response.content) > 0
+        assert response.usage is not None
     
-    def test_message_with_system_prompt(self):
+    @pytest.mark.asyncio
+    async def test_message_with_system_prompt(self):
         """Test sending message with system prompt."""
         if not self.has_openai_key:
             pytest.skip("OPENAI_API_KEY not set")
         
         client = LLMClient(model="gpt-4o")
         
-        response = client.send_message(
+        response = await client.send_message(
             message="What is 2+2?",
             system_message="You are a helpful math assistant. Always respond with just the number."
         )
         assert isinstance(response, LLMResponse)
         assert response.content == '4'
     
-    def test_conversation_history(self):
+    @pytest.mark.asyncio
+    async def test_conversation_history(self):
         """Test conversation with message history."""
         if not self.has_openai_key:
             pytest.skip("OPENAI_API_KEY not set")
@@ -138,7 +176,7 @@ class TestLLMCore:
         client = LLMClient(model="gpt-4o")
         
         # First message
-        response1 = client.send_message("My name is Alice")
+        response1 = await client.send_message("My name is Alice")
         assert response1.content is not None
         
         # Continue conversation
@@ -147,7 +185,7 @@ class TestLLMCore:
             Message(role=MessageRole.ASSISTANT, content=response1.content)
         ]
         
-        response2 = client.send_message(
+        response2 = await client.send_message(
             message="What's my name?",
             messages=messages
         )
@@ -168,7 +206,8 @@ class TestLLMCore:
         full_response = "".join(chunks)
         assert len(full_response) > 0
     
-    def test_cost_tracking(self):
+    @pytest.mark.asyncio
+    async def test_cost_tracking(self):
         """Test cost tracking functionality."""
         if not self.has_openai_key:
             pytest.skip("OPENAI_API_KEY not set")
@@ -178,7 +217,7 @@ class TestLLMCore:
         
         # Make a call
         client = LLMClient(model="gpt-4o")
-        response = client.send_message("Hello")
+        response = await client.send_message("Hello")
         
         # Check if cost is tracked
         if response.cost is not None:
@@ -196,14 +235,15 @@ class TestLLMCore:
             daily_total = cost_tracker.get_daily_total()
             assert daily_total >= 0
     
-    def test_multiple_providers_same_api(self):
+    @pytest.mark.asyncio
+    async def test_multiple_providers_same_api(self):
         """Test that different providers use the same API interface."""
         providers_tested = 0
         
         if self.has_openai_key:
             try:
                 client1 = LLMClient(model="gpt-4o")
-                response1 = client1.send_message("Hi")
+                response1 = await client1.send_message("Hi")
                 assert isinstance(response1, LLMResponse)
                 providers_tested += 1
             except Exception as e:
@@ -212,7 +252,7 @@ class TestLLMCore:
         if self.has_anthropic_key:
             try:
                 client2 = LLMClient(model="claude-sonnet-4-5-20250929")
-                response2 = client2.send_message("Hi")
+                response2 = await client2.send_message("Hi")
                 assert isinstance(response2, LLMResponse)
                 providers_tested += 1
             except Exception as e:
@@ -221,11 +261,23 @@ class TestLLMCore:
         if self.has_google_key:
             try:
                 client3 = LLMClient(model="gemini-2.5-flash")
-                response3 = client3.send_message("Hi")
+                response3 = await client3.send_message("Hi")
                 assert isinstance(response3, LLMResponse)
                 providers_tested += 1
             except Exception as e:
                 pytest.skip(f"Gemini test failed: {e}")
+
+        if self.has_azure_config:
+            try:
+                client4 = LLMClient(
+                    model="azure:gpt-4o",
+                    provider=LLMProvider.AZURE_AI,
+                )
+                response4 = await client4.send_message("Hi")
+                assert isinstance(response4, LLMResponse)
+                providers_tested += 1
+            except Exception as e:
+                pytest.skip(f"Azure AI test failed: {e}")
         
         assert providers_tested > 0, "At least one provider should be tested"
     
@@ -240,13 +292,14 @@ class TestLLMCore:
         with pytest.raises(ValueError, match="Cannot determine provider|Unsupported provider"):
             LLMClient(model="invalid-model-xyz")
     
-    def test_response_structure(self):
+    @pytest.mark.asyncio
+    async def test_response_structure(self):
         """Test that LLMResponse has correct structure."""
         if not self.has_openai_key:
             pytest.skip("OPENAI_API_KEY not set")
         
         client = LLMClient(model="gpt-4o")
-        response = client.send_message("Test")
+        response = await client.send_message("Test")
         
         # Check response structure
         assert hasattr(response, 'content')
@@ -341,7 +394,8 @@ startxref
         except Exception as e:
             pytest.skip(f"PDF extraction may not work: {e}")
     
-    def test_pdf_extraction_with_llm(self):
+    @pytest.mark.asyncio
+    async def test_pdf_extraction_with_llm(self):
         """Test using PDF text extraction with LLM."""
         try:
             from moose.framework.llm_core.pdf_utils import extract_pdf_text
@@ -421,7 +475,7 @@ startxref
             
             # Use extracted text with LLM
             client = LLMClient(model="gpt-4o")
-            response = client.send_message(
+            response = await client.send_message(
                 message=f"Analyze this document: {extracted_text}\n\nWhat is the revenue mentioned?",
                 system_message="You are a financial analyst."
             )
@@ -506,7 +560,8 @@ startxref
                 pytest.skip(f"Model {model_name} ({provider}) not available: {e}")
     
     @pytest.mark.llm
-    def test_llmclient_uses_langchain(self):
+    @pytest.mark.asyncio
+    async def test_llmclient_uses_langchain(self):
         """Test that LLMClient uses LangChain."""
         try:
             from moose.framework.llm_core.langchain_integration import LangChainLLM
@@ -524,12 +579,13 @@ startxref
         assert isinstance(client.langchain_llm, LangChainLLM)
         
         # Test that it works
-        response = client.send_message("Say 'Hello' and nothing else.")
+        response = await client.send_message("Say 'Hello' and nothing else.")
         assert isinstance(response, LLMResponse)
         assert response.content is not None
         assert len(response.content) > 0
     
-    def test_cost_calculation_from_config(self):
+    @pytest.mark.asyncio
+    async def test_cost_calculation_from_config(self):
         """Test that cost is calculated from config when not in response."""
         try:
             from moose.framework.llm_core.config import ModelConfig
@@ -546,7 +602,7 @@ startxref
         client = LLMClient(model="gpt-4o", config=config)
         
         # Send message
-        response = client.send_message("Hello")
+        response = await client.send_message("Hello")
         
         # Cost should be calculated from token usage
         if response.usage and response.cost is not None:
