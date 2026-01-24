@@ -21,3 +21,6 @@
 [submodule "moose/agents/alpaca_trader"]
 	path = moose/agents/alpaca_trader
 	url = git@github.com:plummm/moose-alpaca-trader.git
+[submodule "moose/agents/ha_agent_core"]
+	path = moose/agents/ha_agent_core
+	url = https://github.com/plummm/moose-HA-agent.git

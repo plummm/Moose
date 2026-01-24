@@ -802,6 +802,8 @@ class CoreWebServer:
                           s.agent_name AS agent_name,
                           p.kind AS parent_kind,
                           p.name AS parent_name,
+                          lc.cost AS llm_cost,
+                          lc.usage_json AS llm_usage_json,
                           m.role AS role,
                           m.idx AS idx,
                           m.content AS content,
@@ -814,8 +816,9 @@ class CoreWebServer:
                           tc.error AS tool_error
                         FROM spans s
                         LEFT JOIN spans p ON p.span_id = s.parent_span_id
-                        LEFT JOIN tool_calls tc ON tc.tool_call_id = m.tool_call_id
                         JOIN llm_messages m ON m.span_id = s.span_id
+                        LEFT JOIN llm_calls lc ON lc.span_id = s.span_id
+                        LEFT JOIN tool_calls tc ON tc.tool_call_id = m.tool_call_id
                         WHERE s.request_id = ?
                           AND s.kind = 'llm.call'
                         ORDER BY s.start_ts ASC, m.idx ASC;
@@ -832,6 +835,8 @@ class CoreWebServer:
                           s.agent_name AS agent_name,
                           p.kind AS parent_kind,
                           p.name AS parent_name,
+                          lc.cost AS llm_cost,
+                          lc.usage_json AS llm_usage_json,
                           m.role AS role,
                           m.idx AS idx,
                           m.content AS content,
@@ -845,13 +850,30 @@ class CoreWebServer:
                         FROM spans s
                         LEFT JOIN spans p ON p.span_id = s.parent_span_id
                         JOIN llm_messages m ON m.span_id = s.span_id
+                        LEFT JOIN llm_calls lc ON lc.span_id = s.span_id
                         WHERE s.request_id = ?
                           AND s.kind = 'llm.call'
                         ORDER BY s.start_ts ASC, m.idx ASC;
                     """
 
                 rows = conn.execute(query, (rid,)).fetchall()
-                return jsonify([dict(r) for r in rows])
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    content = d.get("content")
+                    if isinstance(content, str):
+                        s = content.strip()
+                        if s and s[0] in "[{":
+                            try:
+                                parsed = json.loads(s)
+                                if isinstance(parsed, list) and any(isinstance(b, dict) and b.get("type") for b in parsed):
+                                    d["content"] = parsed
+                                elif isinstance(parsed, dict) and parsed.get("type"):
+                                    d["content"] = parsed
+                            except Exception:
+                                pass
+                    out.append(d)
+                return jsonify(out)
             finally:
                 try:
                     conn.close()
@@ -919,7 +941,50 @@ class CoreWebServer:
                     """,
                     (sid,),
                 ).fetchall()
-                return jsonify([dict(r) for r in rows])
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    content = d.get("content")
+                    if isinstance(content, str):
+                        s = content.strip()
+                        if s and s[0] in "[{":
+                            try:
+                                parsed = json.loads(s)
+                                if isinstance(parsed, list) and any(isinstance(b, dict) and b.get("type") for b in parsed):
+                                    d["content"] = parsed
+                                elif isinstance(parsed, dict) and parsed.get("type"):
+                                    d["content"] = parsed
+                            except Exception:
+                                pass
+                    out.append(d)
+                return jsonify(out)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        @self.app.route('/api/projects/<project_id>/llm_media/<media_id>')
+        def get_llm_media(project_id: str, media_id: str):
+            """Fetch an LLM media attachment by ID."""
+            db_path = _get_trace_db_path(project_id)
+            if not db_path:
+                return Response("not_found", status=404, mimetype="text/plain")
+            mid = str(media_id or "").strip()
+            if not mid:
+                return Response("missing_media_id", status=400, mimetype="text/plain")
+
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    "SELECT mime_type, data FROM llm_media WHERE media_id = ?;",
+                    (mid,),
+                ).fetchone()
+                if not row:
+                    return Response("not_found", status=404, mimetype="text/plain")
+                mime = row["mime_type"] or "application/octet-stream"
+                return Response(row["data"], mimetype=mime)
             finally:
                 try:
                     conn.close()

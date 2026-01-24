@@ -1161,6 +1161,48 @@ body {
     margin-bottom: 12px;
 }
 
+.costs-model-chart {
+    margin-bottom: 12px;
+    display: grid;
+    gap: 8px;
+}
+
+.costs-model-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 220px) 1fr minmax(72px, 120px);
+    gap: 10px;
+    align-items: center;
+    font-size: 12px;
+}
+
+.costs-model-name {
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.costs-model-bar {
+    height: 10px;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.costs-model-bar-fill {
+    height: 100%;
+    background: var(--accent-blue);
+    border-radius: 6px;
+}
+
+.costs-model-cost {
+    text-align: right;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
 .costs-agent-controls {
     display: inline-flex;
     align-items: center;
@@ -1317,6 +1359,15 @@ body {
 .trace-bubble-subheader .v {
     color: var(--text-primary);
     opacity: 0.9;
+}
+
+.trace-bubble-subheader .trace-meta-metric {
+    color: var(--text-primary);
+    opacity: 0.95;
+}
+
+.trace-bubble-subheader .trace-meta-metric.tool {
+    color: #f5a623;
 }
 
 .trace-bubble-body {

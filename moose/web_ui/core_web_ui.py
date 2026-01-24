@@ -29,7 +29,7 @@ MOOSE_ASCII = r"""
 """
 
 # Version for cache busting and verification
-WEB_UI_VERSION = "2.7.5"
+WEB_UI_VERSION = "2.8.0"
 
 
 def get_dashboard_html() -> str:
@@ -298,6 +298,8 @@ def get_dashboard_html() -> str:
                                     <button id="cost-agent-next" class="mini-btn" onclick="agentNextPage()">Next</button>
                                 </div>
                             </div>
+
+                            <div id="cost-agent-model-chart" class="costs-model-chart"></div>
 
                             <div class="costs-table-container">
                                 <table class="costs-table">
@@ -677,6 +679,19 @@ body {
     font-size: 12px;
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+.trace-bubble-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.trace-bubble-images img {
+    max-width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
 }
 
 /* Divider between different agents in a trace chat stream */
@@ -1149,6 +1164,19 @@ body {
 
 .message-text {
     white-space: pre-wrap;
+}
+
+.message-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.message-images img {
+    max-width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
 }
 
 .message-footer {
@@ -2367,7 +2395,8 @@ function renderTraceChat(items) {
     items.forEach((it, idx) => {
         const role = (it.role || 'unknown').toLowerCase();
         const cls = role === 'user' ? 'user' : (role === 'tool' ? 'tool' : 'assistant');
-        const content = it.content === null || it.content === undefined ? '' : String(it.content);
+        const parsed = parseMessageContent(it.content);
+        const content = parsed.textContent || '';
         const spanId = it.span_id || '';
         const spanName = it.span_name || '';
         const agent = it.agent_name || '';
@@ -2390,7 +2419,20 @@ function renderTraceChat(items) {
         }
         const trunc = _truncate(content, 500);
         const id = `trace_msg_${idx}`;
-        const body = `<div class="trace-bubble-body" id="${id}">${_escapeHtml(trunc.text)}${trunc.truncated ? '…' : ''}</div>`;
+        let imagesHtml = '';
+        if (parsed.images && parsed.images.length > 0) {
+            const imgs = parsed.images.map(img => {
+                if (!img || !img.src) return '';
+                const src = _escapeHtml(String(img.src));
+                const cap = img.caption ? _escapeHtml(String(img.caption)) : '';
+                const capAttrs = cap ? ` title="${cap}" alt="${cap}"` : '';
+                return `<img src="${src}" loading="lazy"${capAttrs}/>`;
+            }).join('');
+            if (imgs) {
+                imagesHtml = `<div class="trace-bubble-images">${imgs}</div>`;
+            }
+        }
+        const body = `<div class="trace-bubble-body" id="${id}">${_escapeHtml(trunc.text)}${trunc.truncated ? '…' : ''}</div>${imagesHtml}`;
         const expand = trunc.truncated
             ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
             : '';
@@ -2456,7 +2498,8 @@ function appendTraceChat(items) {
         const idx = traceChatLastCount + relativeIdx;
         const role = (it.role || 'unknown').toLowerCase();
         const cls = role === 'user' ? 'user' : (role === 'tool' ? 'tool' : 'assistant');
-        const content = it.content === null || it.content === undefined ? '' : String(it.content);
+        const parsed = parseMessageContent(it.content);
+        const content = parsed.textContent || '';
         const spanId = it.span_id || '';
         const spanName = it.span_name || '';
         const agent = it.agent_name || '';
@@ -2481,7 +2524,20 @@ function appendTraceChat(items) {
         
         const trunc = _truncate(content, 500);
         const id = `trace_msg_${idx}`;
-        const body = `<div class="trace-bubble-body" id="${id}">${_escapeHtml(trunc.text)}${trunc.truncated ? '…' : ''}</div>`;
+        let imagesHtml = '';
+        if (parsed.images && parsed.images.length > 0) {
+            const imgs = parsed.images.map(img => {
+                if (!img || !img.src) return '';
+                const src = _escapeHtml(String(img.src));
+                const cap = img.caption ? _escapeHtml(String(img.caption)) : '';
+                const capAttrs = cap ? ` title="${cap}" alt="${cap}"` : '';
+                return `<img src="${src}" loading="lazy"${capAttrs}/>`;
+            }).join('');
+            if (imgs) {
+                imagesHtml = `<div class="trace-bubble-images">${imgs}</div>`;
+            }
+        }
+        const body = `<div class="trace-bubble-body" id="${id}">${_escapeHtml(trunc.text)}${trunc.truncated ? '…' : ''}</div>${imagesHtml}`;
         const expand = trunc.truncated
             ? `<div class="trace-expand" onclick="toggleTraceMsg('${id}', ${idx})">Expand</div>`
             : '';
@@ -2635,18 +2691,38 @@ async function selectLlmSpan(spanId) {
         const msgs = await resp.json();
         const out = [];
         for (const m of (msgs || [])) {
-            const role = (m && m.role) ? String(m.role) : '';
-            const nm = (m && m.name) ? (' (' + String(m.name) + ')') : '';
-            const content = (m && (m.content !== null && m.content !== undefined)) ? String(m.content) : '';
-            out.push('=== ' + role + nm + ' ===\\n' + content + '\\n');
+            const role = (m && m.role) ? String(m.role) : 'unknown';
+            const nm = (m && m.name) ? String(m.name) : '';
+            const parsed = parseMessageContent(m && m.content);
+            const content = parsed.textContent || '';
+            const cls = role === 'user' ? 'user' : (role === 'tool' ? 'tool' : 'assistant');
+            let imagesHtml = '';
+            if (parsed.images && parsed.images.length > 0) {
+                const imgs = parsed.images.map(img => {
+                    if (!img || !img.src) return '';
+                    const src = _escapeHtml(String(img.src));
+                    const cap = img.caption ? _escapeHtml(String(img.caption)) : '';
+                    const capAttrs = cap ? ` title="${cap}" alt="${cap}"` : '';
+                    return `<img src="${src}" loading="lazy"${capAttrs}/>`;
+                }).join('');
+                if (imgs) {
+                    imagesHtml = `<div class="trace-bubble-images">${imgs}</div>`;
+                }
+            }
+            out.push(
+                `<div class="trace-bubble ${cls}">` +
+                `<div class="trace-bubble-header muted"><span class="mono">${_escapeHtml(role)}</span>` +
+                `${nm ? `<span>${_escapeHtml(nm)}</span>` : ''}</div>` +
+                `<div class="trace-bubble-body">${_escapeHtml(content)}</div>` +
+                imagesHtml +
+                `</div>`
+            );
         }
-        const joined = out.join('\\n');
         llmEl.innerHTML =
             '<div class="trace-subtitle">LLM messages for span <span class="mono">' +
             _escapeHtml(spanId) +
-            '</span></div><pre class="mono pre-wrap">' +
-            _escapeHtml(joined) +
-            '</pre>';
+            '</span></div>' +
+            out.join('');
         scrollToBottom('trace-chat');
     } catch (e) {
         llmEl.innerHTML = '<div class="error">Failed to load LLM messages: ' + _escapeHtml(e) + '</div>';
@@ -3077,7 +3153,7 @@ function createChatMessageElement(message) {
     }
     
     // Parse and display content
-    const { textContent, toolUses } = parseMessageContent(rawContent);
+    const { textContent, toolUses, images } = parseMessageContent(rawContent);
     
     // Display text content (truncate to first 150 words with expand/collapse)
     if (textContent) {
@@ -3185,6 +3261,23 @@ function createChatMessageElement(message) {
             
             contentDiv.appendChild(toolBlock);
         });
+    }
+
+    if (images && images.length > 0) {
+        const imgWrap = document.createElement('div');
+        imgWrap.className = 'message-images';
+        images.forEach(img => {
+            if (!img || !img.src) return;
+            const el = document.createElement('img');
+            el.src = img.src;
+            el.loading = 'lazy';
+            if (img.caption) {
+                el.alt = img.caption;
+                el.title = img.caption;
+            }
+            imgWrap.appendChild(el);
+        });
+        contentDiv.appendChild(imgWrap);
     }
     
     // Tool call ID (for tool messages)
@@ -3606,6 +3699,7 @@ function renderStackedChart(containerId, legendId, perDay, kind) {
 function parseMessageContent(content) {
     let textContent = '';
     let toolUses = [];
+    let images = [];
     
     if (!content) {
         return { textContent: '', toolUses: [] };
@@ -3613,7 +3707,21 @@ function parseMessageContent(content) {
     
     // If content is a string
     if (typeof content === 'string') {
-        return { textContent: content, toolUses: [] };
+        const s = content.trim();
+        if (s && (s[0] === '[' || s[0] === '{')) {
+            try {
+                const parsed = JSON.parse(s);
+                if (Array.isArray(parsed)) {
+                    return parseMessageContent(parsed);
+                }
+                if (parsed && typeof parsed === 'object' && parsed.type) {
+                    return parseMessageContent([parsed]);
+                }
+            } catch (e) {
+                // fall through
+            }
+        }
+        return { textContent: content, toolUses: [], images: [] };
     }
     
     // If content is an array (e.g., Anthropic format with text and tool_use)
@@ -3629,6 +3737,27 @@ function parseMessageContent(content) {
                     name: item.name,
                     input: item.input
                 });
+            } else if (item.type === 'image_ref' && item.media_id) {
+                const src = currentProject
+                    ? `/api/projects/${encodeURIComponent(currentProject)}/llm_media/${encodeURIComponent(item.media_id)}`
+                    : '';
+                if (src) {
+                    images.push({ src: src, caption: item.caption || '' });
+                }
+            } else if (item.type === 'image_url') {
+                let url = '';
+                if (item.image_url && item.image_url.url) {
+                    url = String(item.image_url.url);
+                } else if (typeof item.image_url === 'string') {
+                    url = item.image_url;
+                }
+                if (url) {
+                    images.push({ src: url, caption: item.caption || '' });
+                }
+            } else if (item.type === 'image' && item.source && item.source.data) {
+                const mt = item.source.media_type || 'application/octet-stream';
+                const dataUrl = `data:${mt};base64,${item.source.data}`;
+                images.push({ src: dataUrl, caption: item.caption || '' });
             }
         }
         
@@ -3640,7 +3769,7 @@ function parseMessageContent(content) {
         textContent = JSON.stringify(content, null, 2);
     }
     
-    return { textContent, toolUses };
+    return { textContent, toolUses, images };
 }
 
 // Parse markdown content to extract code blocks
@@ -3711,4 +3840,3 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 '''
-

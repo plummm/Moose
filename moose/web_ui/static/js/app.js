@@ -947,6 +947,8 @@ function switchRightTab(tabName) {
         const t = todayIso();
         if (sinceEl && !sinceEl.value) sinceEl.value = t;
         if (untilEl && !untilEl.value) untilEl.value = t;
+        // Ensure trace layout matches current Advanced toggle on first load.
+        onTraceAdvancedToggle();
         loadTracesDropdown();
     } else {
         pageLayout?.classList.remove('traces-full');
@@ -2197,6 +2199,39 @@ function renderAgentCostBreakdown(data) {
     if (nextBtn) nextBtn.disabled = !state.agentHasMore;
 
     tbody.innerHTML = '';
+
+    const chartEl = document.getElementById('cost-agent-model-chart');
+    if (chartEl) {
+        const modelTotals = {};
+        for (const r of reqs) {
+            const byModel = Array.isArray(r && r.by_model) ? r.by_model : [];
+            for (const m of byModel) {
+                const modelName = (m && m.model) ? String(m.model) : 'unknown';
+                const mc = Number((m && m.cost) ? m.cost : 0);
+                modelTotals[modelName] = (modelTotals[modelName] || 0) + (Number.isFinite(mc) ? mc : 0);
+            }
+        }
+        const models = Object.keys(modelTotals).map(name => ({ name, cost: modelTotals[name] }));
+        models.sort((a, b) => b.cost - a.cost);
+        if (models.length === 0) {
+            chartEl.innerHTML = '';
+        } else {
+            const maxCost = Math.max(...models.map(m => m.cost), 0.000001);
+            chartEl.innerHTML = models.map(m => {
+                const pct = Math.max(2, Math.round((m.cost / maxCost) * 100));
+                return `
+                    <div class="costs-model-row">
+                        <div class="costs-model-name" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</div>
+                        <div class="costs-model-bar">
+                            <div class="costs-model-bar-fill" style="width:${pct}%"></div>
+                        </div>
+                        <div class="costs-model-cost">$${fmtCost(m.cost, 6)}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+    }
+
     if (!reqs || reqs.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7" class="loading">No requests found for this agent.</td></tr>';
         return;
@@ -2523,7 +2558,16 @@ async function loadTraceChat(requestId, replaceAll = false) {
 
     try {
         const resp = await fetch(`/api/projects/${state.currentProject}/traces/${encodeURIComponent(requestId)}/llm_chat`);
-        const items = await resp.json();
+        const text = await resp.text();
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+        }
+        let items = [];
+        try {
+            items = JSON.parse(text);
+        } catch (e) {
+            throw new Error(`Invalid JSON: ${text.slice(0, 200)}`);
+        }
         if (replaceAll) {
             renderTraceChat(items || []);
         } else {
@@ -2551,6 +2595,48 @@ function fmtTs(ts) {
     } catch {
         return String(ts);
     }
+}
+
+function parseUsageJson(raw) {
+    if (!raw) return null;
+    if (typeof raw === 'object') return raw;
+    if (typeof raw !== 'string') return null;
+    const s = raw.trim();
+    if (!s) return null;
+    try {
+        return JSON.parse(s);
+    } catch (e) {
+        return null;
+    }
+}
+
+function extractLlmUsage(it) {
+    const usage = parseUsageJson(it && it.llm_usage_json);
+    if (!usage || typeof usage !== 'object') return null;
+    const itoks = Number(usage.input_tokens ?? usage.input ?? 0);
+    const otoks = Number(usage.output_tokens ?? usage.output ?? 0);
+    const ttoks = Number(usage.total_tokens ?? usage.total ?? (itoks + otoks));
+    return {
+        input: Number.isFinite(itoks) ? itoks : 0,
+        output: Number.isFinite(otoks) ? otoks : 0,
+        total: Number.isFinite(ttoks) ? ttoks : 0
+    };
+}
+
+function formatLlmMeta(it, role) {
+    const costRaw = (it && it.llm_cost !== undefined && it.llm_cost !== null) ? Number(it.llm_cost) : null;
+    const usage = extractLlmUsage(it);
+    if (costRaw === null && !usage) return '';
+    const cls = role === 'tool' ? 'trace-meta-metric tool' : 'trace-meta-metric';
+    const parts = [];
+    if (costRaw !== null && Number.isFinite(costRaw)) {
+        parts.push(`Cost ${fmtCost(costRaw, 6)}`);
+    }
+    if (usage) {
+        parts.push(`Tokens in ${fmtInt(usage.input)} out ${fmtInt(usage.output)} (${fmtInt(usage.total)})`);
+    }
+    if (parts.length === 0) return '';
+    return `<span class="${cls}">${escapeHtmlSimple(parts.join(' | '))}</span>`;
 }
 
 function fmtDurMs(startTs, endTs) {
@@ -2651,6 +2737,7 @@ function renderTraceChat(items) {
         const parentName = it.parent_name || '';
         const owner = (parentKind || parentName) ? `${parentKind}${parentName ? ' ' + parentName : ''}` : '';
         const model = (kind === 'llm.call') ? (spanName || '') : '';
+        const meta = formatLlmMeta(it, role);
         if (agent && agent !== lastAgent) {
             blocks.push(
                 `<div class="trace-agent-divider"><span class="label">Agent: ${escapeHtmlSimple(agent)}</span></div>`
@@ -2677,6 +2764,7 @@ function renderTraceChat(items) {
               <span class="k">Kind</span><span class="v mono">${escapeHtmlSimple(kind)}</span>
               <span class="k">Name</span><span class="v">${escapeHtmlSimple(parentName || '')}</span>
               ${model ? `<span class="k">Model</span><span class="v mono">${escapeHtmlSimple(model)}</span>` : ''}
+              ${meta ? `<span class="k">Usage</span>${meta}` : ''}
               <span class="k">Start</span><span class="v mono">${escapeHtmlSimple(startFmt)}</span>
               <span class="k">Dur</span><span class="v mono">${escapeHtmlSimple(dur)}</span>
               <span class="k">Status</span><span class="v mono">${escapeHtmlSimple(status)}</span>
@@ -2729,6 +2817,7 @@ function appendTraceChat(items) {
         const parentName = it.parent_name || '';
         const owner = (parentKind || parentName) ? `${parentKind}${parentName ? ' ' + parentName : ''}` : '';
         const model = (kind === 'llm.call') ? (spanName || '') : '';
+        const meta = formatLlmMeta(it, role);
 
         if (agent && agent !== lastAgent) {
             blocks.push(
@@ -2757,6 +2846,7 @@ function appendTraceChat(items) {
               <span class="k">Kind</span><span class="v mono">${escapeHtmlSimple(kind)}</span>
               <span class="k">Name</span><span class="v">${escapeHtmlSimple(parentName || '')}</span>
               ${model ? `<span class="k">Model</span><span class="v mono">${escapeHtmlSimple(model)}</span>` : ''}
+              ${meta ? `<span class="k">Usage</span>${meta}` : ''}
               <span class="k">Start</span><span class="v mono">${escapeHtmlSimple(startFmt)}</span>
               <span class="k">Dur</span><span class="v mono">${escapeHtmlSimple(dur)}</span>
               <span class="k">Status</span><span class="v mono">${escapeHtmlSimple(status)}</span>
@@ -2790,7 +2880,7 @@ function toggleTraceMsg(domId, idx) {
     const isExpanded = !!window.__traceChatExpanded[domId];
     if (isExpanded) {
         const trunc = truncateText(full, 500);
-        el.textContent = trunc.text + '…';
+        el.textContent = trunc.text + (trunc.truncated ? '…' : '');
         window.__traceChatExpanded[domId] = false;
         const link = el.parentElement && el.parentElement.querySelector('.trace-expand');
         if (link) link.textContent = 'Expand';
@@ -2799,6 +2889,15 @@ function toggleTraceMsg(domId, idx) {
         window.__traceChatExpanded[domId] = true;
         const link = el.parentElement && el.parentElement.querySelector('.trace-expand');
         if (link) link.textContent = 'Collapse';
+    }
+
+    // Re-apply trace layout when content size changes (prevents overlap glitches).
+    if (!state.traceAdvanced) {
+        const chat = document.getElementById('trace-chat');
+        if (chat) {
+            chat.style.flex = '1 1 auto';
+            chat.style.height = '';
+        }
     }
 }
 

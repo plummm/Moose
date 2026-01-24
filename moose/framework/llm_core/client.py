@@ -320,6 +320,47 @@ class LLMClient:
         except Exception as e:
             self.logger.warning(f"Error counting tokens: {e}, using fallback estimate")
             return len(text) // 4
+
+    def _content_text_for_token_count(self, content: Any) -> str:
+        """
+        Best-effort text extraction for token counting from multimodal content blocks.
+
+        Non-text blocks (e.g., images) contribute 0 tokens.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            # Common format: {"type":"text","text":"..."}
+            if content.get("type") == "text" and content.get("text") is not None:
+                return str(content.get("text") or "")
+            if content.get("text") is not None:
+                return str(content.get("text") or "")
+            return ""
+        if isinstance(content, list):
+            parts = [self._content_text_for_token_count(b) for b in content]
+            return " ".join([p for p in parts if p])
+        return str(content)
+
+    def _has_multimodal_content(
+        self,
+        message: Union[str, Message],
+        system_message: Optional[Union[str, Message]] = None,
+        messages: Optional[List[Message]] = None,
+    ) -> bool:
+        def _is_multimodal(c: Any) -> bool:
+            return isinstance(c, (list, dict))
+
+        if isinstance(message, Message) and _is_multimodal(message.content):
+            return True
+        if isinstance(system_message, Message) and _is_multimodal(system_message.content):
+            return True
+        if messages:
+            for msg in messages:
+                if isinstance(msg, Message) and _is_multimodal(msg.content):
+                    return True
+        return False
     
     def _count_message_tokens(
         self,
@@ -345,7 +386,7 @@ class LLMClient:
             if isinstance(system_message, str):
                 total += self._count_tokens(system_message)
             else:
-                total += self._count_tokens(system_message.content or "")
+                total += self._count_tokens(self._content_text_for_token_count(system_message.content))
         
         # Count conversation history
         if messages:
@@ -353,13 +394,13 @@ class LLMClient:
                 if isinstance(msg, str):
                     total += self._count_tokens(msg)
                 else:
-                    total += self._count_tokens(msg.content or "")
+                    total += self._count_tokens(self._content_text_for_token_count(msg.content))
         
         # Count current message
         if isinstance(message, str):
             total += self._count_tokens(message)
         else:
-            total += self._count_tokens(message.content or "")
+            total += self._count_tokens(self._content_text_for_token_count(message.content))
         
         # Add overhead for message formatting (rough estimate)
         total += len(messages) if messages else 0
@@ -872,7 +913,7 @@ Provide your final combined response:"""
             if isinstance(message, str):
                 message_content = message
             else:
-                message_content = message.content or ""
+                message_content = self._content_text_for_token_count(message.content)
             
             # Extract system message content
             system_message_content = None
@@ -880,7 +921,7 @@ Provide your final combined response:"""
                 if isinstance(system_message, str):
                     system_message_content = system_message
                 else:
-                    system_message_content = system_message.content or ""
+                    system_message_content = self._content_text_for_token_count(system_message.content)
             
             # Count total input tokens
             total_tokens = self._count_message_tokens(
@@ -888,6 +929,16 @@ Provide your final combined response:"""
                 system_message=system_message,
                 messages=messages
             )
+
+            # Multimodal requests can't be chunked safely; send directly.
+            if self._has_multimodal_content(message=message, system_message=system_message, messages=messages):
+                return await self._send_message_direct(
+                    message=message,
+                    messages=messages,
+                    system_message=system_message,
+                    request_id=request_id,
+                    **kwargs
+                )
             
             # Check if chunking is needed (90% threshold)
             chunk_threshold = int(self.max_input_tokens * 0.9)

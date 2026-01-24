@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional, Tuple
 from moose.framework.logging.tracing import Span, SpanExporter, register_exporter
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _json_dumps(obj: Any) -> str:
@@ -114,6 +114,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS llm_media (
+              media_id TEXT PRIMARY KEY,
+              span_id TEXT,
+              mime_type TEXT,
+              data BLOB,
+              created_at REAL
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_media_span ON llm_media(span_id);")
+
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS http_calls (
               span_id TEXT PRIMARY KEY,
               method TEXT,
@@ -152,6 +165,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         except Exception:
             pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_call_id ON tool_calls(tool_call_id);")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
+        conn.commit()
+    elif user_version < 3:
+        # Media attachments for multimodal messages.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_media (
+              media_id TEXT PRIMARY KEY,
+              span_id TEXT,
+              mime_type TEXT,
+              data BLOB,
+              created_at REAL
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_media_span ON llm_media(span_id);")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
         conn.commit()
 
@@ -201,6 +230,8 @@ class _TraceDbWriter(threading.Thread):
                     _db_span_end(conn, payload)
                 elif kind == "llm_message":
                     _db_llm_message(conn, payload, next_idx_map=self._llm_next_idx)
+                elif kind == "llm_media":
+                    _db_llm_media(conn, payload)
                 elif kind == "llm_call_update":
                     _db_llm_call_update(conn, payload)
                 elif kind == "tool_call":
@@ -303,6 +334,9 @@ def _db_llm_message(conn: sqlite3.Connection, payload: Dict[str, Any], *, next_i
         return
     idx = int(next_idx_map.get(span_id, 0) or 0)
     next_idx_map[span_id] = idx + 1
+    content = payload.get("content")
+    if isinstance(content, (list, dict)):
+        content = _json_dumps(content)
 
     conn.execute(
         """
@@ -313,7 +347,7 @@ def _db_llm_message(conn: sqlite3.Connection, payload: Dict[str, Any], *, next_i
             span_id,
             payload.get("role"),
             idx,
-            payload.get("content"),
+            content,
             payload.get("name"),
             payload.get("tool_call_id"),
             payload.get("tool_calls_json"),
@@ -364,6 +398,30 @@ def _db_llm_call_update(conn: sqlite3.Connection, payload: Dict[str, Any]) -> No
             payload.get("cost"),
             payload.get("error"),
             span_id,
+        ),
+    )
+    conn.commit()
+
+
+def _db_llm_media(conn: sqlite3.Connection, payload: Dict[str, Any]) -> None:
+    media_id = str(payload.get("media_id") or "").strip()
+    if not media_id:
+        return
+    data = payload.get("data")
+    if data is None:
+        return
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO llm_media(media_id, span_id, mime_type, data, created_at)
+        VALUES (?, ?, ?, ?, ?);
+        """,
+        (
+            media_id,
+            payload.get("span_id"),
+            payload.get("mime_type"),
+            data,
+            payload.get("created_at"),
         ),
     )
     conn.commit()
@@ -467,5 +525,3 @@ def enqueue_event(kind: str, payload: Dict[str, Any]) -> None:
         ex._writer.enqueue(str(kind), payload if isinstance(payload, dict) else {})  # type: ignore[attr-defined]
     except Exception:
         return
-
-

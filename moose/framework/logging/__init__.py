@@ -15,10 +15,14 @@ Environment Variables:
 - MOOSE_PROJECTS_DIR: Override the base directory for projects (higher priority than local arguments)
 """
 
+import base64
 import logging
 import sys
 import os
 import json
+import mimetypes
+import time
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
@@ -363,6 +367,137 @@ class LLMLogger:
     def _serialize_messages(self, messages: List[Any]) -> List[Dict[str, Any]]:
         """Serialize a list of messages."""
         return [self._serialize_message(msg) for msg in messages]
+
+    def _parse_data_url(self, url: str) -> Optional[tuple[str, bytes]]:
+        try:
+            u = str(url or "")
+        except Exception:
+            return None
+        if not u.startswith("data:"):
+            return None
+        try:
+            header, data = u.split(",", 1)
+        except ValueError:
+            return None
+        mime = header[5:].split(";")[0].strip() if header else ""
+        if not mime:
+            mime = "application/octet-stream"
+        if ";base64" in header:
+            try:
+                return mime, base64.b64decode(data)
+            except Exception:
+                return None
+        return mime, data.encode("utf-8", errors="ignore")
+
+    def _read_local_image(self, path: str, mime_type: Optional[str]) -> Optional[tuple[str, bytes]]:
+        try:
+            p = Path(str(path or "")).expanduser()
+            if not p.exists() or not p.is_file():
+                return None
+            if mime_type:
+                mt = str(mime_type)
+            else:
+                mt = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+            data = p.read_bytes()
+            return mt, data
+        except Exception:
+            return None
+
+    def _extract_media_from_content(
+        self,
+        content: Any,
+        *,
+        span_id: Optional[str],
+    ) -> tuple[Any, List[Dict[str, Any]], List[str]]:
+        """
+        Replace inline image blocks with image_ref blocks and return media payloads.
+
+        Returns: (new_content, media_payloads, delete_paths)
+        """
+        if not isinstance(content, list):
+            return content, [], []
+
+        new_blocks: List[Any] = []
+        media_payloads: List[Dict[str, Any]] = []
+        delete_paths: List[str] = []
+
+        for block in content:
+            if not isinstance(block, dict):
+                new_blocks.append(block)
+                continue
+            btype = str(block.get("type") or "")
+            media = None
+            delete_after = False
+
+            if btype == "image_url":
+                img = block.get("image_url") if isinstance(block.get("image_url"), dict) else {}
+                url = str((img or {}).get("url") or "").strip()
+                media = self._parse_data_url(url)
+                if media is None and url.startswith("file://"):
+                    media = self._read_local_image(url[len("file://") :], None)
+                    delete_after = True
+            elif btype == "image":
+                src = block.get("source") if isinstance(block.get("source"), dict) else {}
+                if str(src.get("type") or "") == "base64":
+                    mt = str(src.get("media_type") or "application/octet-stream")
+                    data = src.get("data")
+                    try:
+                        media = (mt, base64.b64decode(str(data or "")))
+                    except Exception:
+                        media = None
+            elif btype == "image_file":
+                path = str(block.get("path") or "").strip()
+                if path:
+                    media = self._read_local_image(path, block.get("mime_type"))
+                    delete_after = bool(block.get("delete_after_store", True))
+
+            if media and span_id:
+                mime_type, data = media
+                media_id = str(uuid.uuid4())
+                media_payloads.append(
+                    {
+                        "media_id": media_id,
+                        "span_id": span_id,
+                        "mime_type": mime_type,
+                        "data": data,
+                        "created_at": float(time.time()),
+                    }
+                )
+                new_block = {
+                    "type": "image_ref",
+                    "media_id": media_id,
+                    "mime_type": mime_type,
+                }
+                caption = block.get("caption") or block.get("alt") or block.get("text")
+                if caption:
+                    new_block["caption"] = caption
+                new_blocks.append(new_block)
+
+                if delete_after and btype in ("image_url", "image_file"):
+                    if btype == "image_file":
+                        delete_paths.append(str(block.get("path") or ""))
+                    else:
+                        img = block.get("image_url") if isinstance(block.get("image_url"), dict) else {}
+                        url = str((img or {}).get("url") or "").strip()
+                        if url.startswith("file://"):
+                            delete_paths.append(url[len("file://") :])
+                continue
+
+            new_blocks.append(block)
+
+        return new_blocks, media_payloads, delete_paths
+
+    def _prepare_message_for_logging(
+        self,
+        message: Any,
+        *,
+        span_id: Optional[str],
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
+        msg = self._serialize_message(message)
+        content = msg.get("content")
+        new_content, media_payloads, delete_paths = self._extract_media_from_content(content, span_id=span_id)
+        msg["content"] = new_content
+        return msg, media_payloads, delete_paths
     
     def log_message(
         self,
@@ -399,12 +534,26 @@ class LLMLogger:
         except Exception:
             span_id = None
 
+        # Best-effort: persist to trace DB (SQLite).
+        try:
+            from moose.framework.logging.trace_db import enqueue_event as _enqueue
+        except Exception:
+            _enqueue = None  # type: ignore
+
+        store_media = bool(_enqueue is not None and span_id)
+        if store_media:
+            msg, media_payloads, delete_paths = self._prepare_message_for_logging(message, span_id=span_id)
+        else:
+            msg = self._serialize_message(message)
+            media_payloads = []
+            delete_paths = []
+
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "request_id": request_id,
             "direction": direction,
             "model": model,
-            "message": self._serialize_message(message),
+            "message": msg,
         }
 
         if span_id:
@@ -425,11 +574,6 @@ class LLMLogger:
         # Also write to dedicated LLM log file in JSON format
         self._write_to_llm_log(log_entry)
 
-        # Best-effort: persist to trace DB (SQLite).
-        try:
-            from moose.framework.logging.trace_db import enqueue_event as _enqueue
-        except Exception:
-            _enqueue = None  # type: ignore
         if _enqueue is not None and span_id:
             try:
                 msg = log_entry.get("message") if isinstance(log_entry.get("message"), dict) else {}
@@ -459,6 +603,14 @@ class LLMLogger:
                         else None,
                     },
                 )
+                for media_payload in media_payloads:
+                    _enqueue("llm_media", media_payload)
+                for p in delete_paths:
+                    try:
+                        if p:
+                            Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
                 if direction == "response":
                     agent_name = None
@@ -509,12 +661,24 @@ class LLMLogger:
         except Exception:
             span_id = None
 
+        try:
+            from moose.framework.logging.trace_db import enqueue_event as _enqueue
+        except Exception:
+            _enqueue = None  # type: ignore
+
+        store_media = bool(_enqueue is not None and span_id)
+        if store_media:
+            msg, media_payloads, delete_paths = self._prepare_message_for_logging(tool_message, span_id=span_id)
+        else:
+            msg = self._serialize_message(tool_message)
+            media_payloads = []
+            delete_paths = []
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "request_id": request_id,
             "direction": "tool_result",
             "model": model,
-            "message": self._serialize_message(tool_message),
+            "message": msg,
         }
 
         if span_id:
@@ -532,10 +696,6 @@ class LLMLogger:
         # Also write to dedicated LLM log file in JSON format
         self._write_to_llm_log(log_entry)
 
-        try:
-            from moose.framework.logging.trace_db import enqueue_event as _enqueue
-        except Exception:
-            _enqueue = None  # type: ignore
         if _enqueue is not None and span_id:
             try:
                 msg = log_entry.get("message") if isinstance(log_entry.get("message"), dict) else {}
@@ -552,6 +712,14 @@ class LLMLogger:
                         else None,
                     },
                 )
+                for media_payload in media_payloads:
+                    _enqueue("llm_media", media_payload)
+                for p in delete_paths:
+                    try:
+                        if p:
+                            Path(p).unlink(missing_ok=True)
+                    except Exception:
+                        pass
             except Exception:
                 pass
     
@@ -1179,5 +1347,3 @@ def disable_webui_logging():
     core_logger.logger.removeHandler(_webui_handler)
     
     _webui_handler = None
-
-
