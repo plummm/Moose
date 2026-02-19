@@ -1,10 +1,10 @@
 """Agent discovery and configuration loading."""
 
 import os
-import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from moose.framework.logging import get_core_logger
+from moose.framework.agent_core.config_loader import load_agent_config
 
 
 class AgentLoader:
@@ -93,17 +93,12 @@ class AgentLoader:
             )
         
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            
+            config = load_agent_config(config_path)
             # Validate required fields
             if "name" not in config:
                 config["name"] = agent_name
-            
             self.logger.debug(f"Loaded config for agent: {agent_name}")
             return config
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in agent config {config_path}: {e}")
         except Exception as e:
             raise ValueError(f"Failed to load agent config: {e}")
     
@@ -169,4 +164,3 @@ class AgentLoader:
             return file_path if file_path.exists() else None
         except ValueError:
             return None
-

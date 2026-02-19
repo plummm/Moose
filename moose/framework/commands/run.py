@@ -227,7 +227,7 @@ class RunCommand:
                     manager = ContainerManager()
                 except Exception as e:
                     logger.error(f"Failed to initialize Docker container manager: {e}")
-                    logger.error("Make sure Docker is installed, running, and python 'docker' package is available.")
+                    logger.error("Make sure Docker is installed/running and install with: pip install 'moose[docker]'")
                     return 1
 
                 # Propagate project context to containers

@@ -237,7 +237,7 @@ class AgentCommand:
                 manager = ContainerManager()
             except Exception as e:
                 logger.error(f"Failed to initialize container manager: {e}")
-                logger.error("Make sure Docker is installed and running")
+                logger.error("Make sure Docker is installed/running and install with: pip install 'moose[docker]'")
                 sys.exit(1)
             
             # Validate agent exists

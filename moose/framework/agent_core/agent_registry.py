@@ -133,9 +133,7 @@ class AgentRegistry:
             entry_point = entry_point[:-3]
         
         code = f"""import os
-import json
 import sys
-import os
 import {entry_point}
 
 if __name__ == "__main__":
@@ -146,11 +144,14 @@ if __name__ == "__main__":
         os.makedirs(projects_parent_dir)
     
     os.symlink("/app/projects", projects_base_dir)
-    
-    with open("./agent_config.json", 'r', encoding='utf-8') as f:
-        config = json.load(f)
-        
-    interactive_mode = config.get("interactive_mode", {{}})
+"""
+
+        if entry_class is not None and entry_class != "":
+            code += f"""
+    from {entry_point} import {entry_class}
+    agent = {entry_class}(config_path="./agent_config.json", debug=debug)
+
+    interactive_mode = agent.config.get("interactive_mode", {{}})
     mode = interactive_mode.get("mode", "http")
     if mode == "http":
         http_server = interactive_mode.get("http_server", {{}})
@@ -158,13 +159,7 @@ if __name__ == "__main__":
     if mode == "file":
         file_config = interactive_mode.get("file", {{}})
         watch_dir = file_config.get("watch_dir", "/project/agent_io")
-"""
 
-        if entry_class is not None and entry_class != "":
-            code += f"""
-    from {entry_point} import {entry_class}
-    agent = {entry_class}(config_path="./agent_config.json", debug=debug)
-    
     if mode == "http":
         agent.run(mode="http", port=port)
     elif mode == "stdin":
@@ -189,7 +184,16 @@ if __name__ == "__main__":
         sys.exit(1)
 
     agent = agent_class(config_path="./agent_config.json", debug=debug)
-    
+
+    interactive_mode = agent.config.get("interactive_mode", {{}})
+    mode = interactive_mode.get("mode", "http")
+    if mode == "http":
+        http_server = interactive_mode.get("http_server", {{}})
+        port = http_server.get("port", 8000)
+    if mode == "file":
+        file_config = interactive_mode.get("file", {{}})
+        watch_dir = file_config.get("watch_dir", "/project/agent_io")
+
     if mode == "http":
         agent.run(mode="http", port=port)
     elif mode == "stdin":
@@ -205,4 +209,3 @@ if __name__ == "__main__":
 
         return
     
-

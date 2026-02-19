@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
 from abc import abstractmethod
 from moose.framework.logging import get_agent_logger, set_project, set_global_debug
+from moose.framework.agent_core.config_loader import load_agent_config
 
 try:
     from flask import Flask, request, jsonify, Response, stream_with_context
@@ -152,20 +153,7 @@ class BaseAgent():
             FileNotFoundError: If config file doesn't exist
             ValueError: If config is invalid
         """
-        if not self.config_path.exists():
-            raise FileNotFoundError(
-                f"Agent config not found: {self.config_path}. "
-                f"Each agent must have an agent_config.json file."
-            )
-        
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            return config
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in agent config {self.config_path}: {e}")
-        except Exception as e:
-            raise ValueError(f"Failed to load agent config: {e}")
+        return load_agent_config(self.config_path)
     
     def load_config(self) -> Dict[str, Any]:
         """
@@ -178,22 +166,9 @@ class BaseAgent():
             FileNotFoundError: If config file doesn't exist
             ValueError: If config is invalid
         """
-        if not self.config_path.exists():
-            raise FileNotFoundError(
-                f"Agent config not found: {self.config_path}. "
-                f"Each agent must have an agent_config.json file."
-            )
-        
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            
-            self.logger.debug(f"Loaded config from {self.config_path}")
-            return config
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in agent config {self.config_path}: {e}")
-        except Exception as e:
-            raise ValueError(f"Failed to load agent config: {e}")
+        config = load_agent_config(self.config_path)
+        self.logger.debug(f"Loaded config from {self.config_path}")
+        return config
     
     def _format_input(self, raw_input: Any) -> Dict[str, Any]:
         """
@@ -922,4 +897,3 @@ class BaseAgent():
         self.logger.info(f"Received signal {signum}, shutting down...")
         self.shutdown_requested = True
         self.running = False
-

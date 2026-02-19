@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, Dict, Optional
 
 from moose.framework import BaseAgent
+from moose.framework.agent_core.prompt_loader import load_system_prompt
 from moose.framework.llm_core import LLMClient, LLMResponse
 
 
@@ -29,8 +30,12 @@ class TemplateAgent(BaseAgent):
         self.temperature = float(llm_cfg.get("temperature", 0.3))
         self.max_output_tokens = llm_cfg.get("max_output_tokens")
         self.enable_web_search = bool(llm_cfg.get("enable_web_search", False))
-        self.system_prompt = str(
-            custom.get("system_prompt", "You are a helpful assistant for the Moose template agent.")
+        self.system_prompt = load_system_prompt(
+            system_prompt_path=str(llm_cfg.get("system_prompt_path") or ""),
+            skills_dir=str(llm_cfg.get("skills_dir") or ""),
+            logger=self.logger,
+            label="template_agent.llm.system_prompt_path",
+            required=True,
         )
 
         self.llm = LLMClient(

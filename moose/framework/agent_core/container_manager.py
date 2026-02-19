@@ -40,7 +40,7 @@ class ContainerManager:
         """
         if not DOCKER_AVAILABLE:
             raise ImportError(
-                "docker library is required. Install with: pip install docker"
+                "Docker support is not installed. Install with: pip install 'moose[docker]'"
             )
         
         self.logger = get_core_logger()
