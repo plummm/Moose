@@ -51,7 +51,7 @@ class Message:
 @dataclass
 class LLMResponse:
     """Response from an LLM call."""
-    content: str
+    content: Union[str, List[Dict[str, Any]], Dict[str, Any]]
     model: str
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, int]] = None

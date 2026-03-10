@@ -40,7 +40,7 @@ dev_requires = [req for req in requirements if _req_name(req) in dev_deps]
 
 setup(
     name="moose",
-    version="0.1.2",
+    version="0.1.3",
     description="A modular agent framework built on LangGraph",
     long_description=long_description,
     long_description_content_type="text/markdown",

@@ -1,12 +1,15 @@
 """Universal LLM client for interacting with multiple LLM providers using LangChain."""
 
 import os
+import copy
 import inspect
 import uuid
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union, Tuple, TYPE_CHECKING
+from typing import AsyncIterator, List, Optional, Dict, Any, Union, Tuple, TYPE_CHECKING
+from collections.abc import Sequence
 from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
+from moose.framework.llm_core.agent_loop import AgentLoopEvent, AgentLoopOptions, AgentLoopResult, AgentLoopRunner
 from moose.framework.llm_core.providers import LLMProvider, get_provider
 from moose.framework.llm_core.cost_tracker import CostTracker
 from moose.framework.llm_core.langchain_integration import LangChainLLM
@@ -75,8 +78,9 @@ class LLMClient:
         enable_web_search: bool = False,
         enable_multi_stage_reasoning: bool = False,
         multi_stage_marker: str = "<FINAL_ANSWER>",
-        max_tool_iterations: int = 4,
+        max_tool_iterations: int = 12,
         agent_name: Optional[str] = None,
+        default_call_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         """
@@ -94,7 +98,7 @@ class LLMClient:
             tools: Optional list of LangChain tools to bind to the LLM
             enable_multi_stage_reasoning: Enable planner/executor loop for iterative tool calling
             multi_stage_marker: Marker text that signals completion in multi-stage mode
-            max_tool_iterations: Maximum number of tool call iterations (default: 4)
+            max_tool_iterations: Maximum number of tool call iterations (default: 12)
             **kwargs: Additional provider-specific parameters
         """
         self.logger = get_core_logger()
@@ -117,6 +121,19 @@ class LLMClient:
         self.max_output_tokens = max_output_tokens
         self.max_input_tokens = max_input_tokens  # may be filled from config below
         self.timeout = timeout
+        # Default request kwargs come from config at client creation time.
+        # Per-call send_message(**kwargs) are merged on top and override defaults.
+        base_default_call_kwargs = (
+            copy.deepcopy(default_call_kwargs) if isinstance(default_call_kwargs, dict) else {}
+        )
+        # Backward compatibility: allow direct ctor request kwargs.
+        if "reasoning" in kwargs and "reasoning" not in base_default_call_kwargs:
+            base_default_call_kwargs["reasoning"] = copy.deepcopy(kwargs.pop("reasoning"))
+        if "thinking" in kwargs and "thinking" not in base_default_call_kwargs:
+            base_default_call_kwargs["thinking"] = copy.deepcopy(kwargs.pop("thinking"))
+        if "output_config" in kwargs and "output_config" not in base_default_call_kwargs:
+            base_default_call_kwargs["output_config"] = copy.deepcopy(kwargs.pop("output_config"))
+        self.default_call_kwargs = base_default_call_kwargs
         self.extra_params = kwargs
         # Main-agent attribution for cost tracking + UI rollups
         # Order of precedence:
@@ -210,6 +227,227 @@ class LLMClient:
             raise
         
         self.logger.debug(f"Initialized LLM client: {self.provider.value}/{model}")
+
+    @staticmethod
+    def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deep merge two dicts, with override values winning.
+
+        If both values for a key are dicts, merge recursively; otherwise use override.
+        """
+        out: Dict[str, Any] = dict(base or {})
+        for k, v in (override or {}).items():
+            existing = out.get(k)
+            if isinstance(existing, dict) and isinstance(v, dict):
+                out[k] = LLMClient._deep_merge_dicts(existing, v)
+            else:
+                out[k] = v
+        return out
+
+    def _merge_default_and_call_kwargs(self, call_kwargs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Merge default constructor kwargs with per-call kwargs.
+
+        Per-call kwargs override defaults; nested dicts are deep merged.
+        """
+        defaults = copy.deepcopy(self.default_call_kwargs or {})
+        provided = dict(call_kwargs or {})
+        return self._deep_merge_dicts(defaults, provided)
+
+    @staticmethod
+    def _normalize_loop_callbacks(callbacks: Optional[Any]) -> List[Any]:
+        if callbacks is None:
+            return []
+        if isinstance(callbacks, Sequence) and not isinstance(callbacks, (str, bytes, bytearray, dict)):
+            return [cb for cb in callbacks if cb is not None]
+        return [callbacks]
+
+    def _build_agent_loop_options(
+        self,
+        *,
+        callbacks: Optional[Any] = None,
+        loop_options: Optional[AgentLoopOptions] = None,
+        request_id: Optional[str] = None,
+        call_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> tuple[AgentLoopOptions, Dict[str, Any]]:
+        raw_kwargs = dict(call_kwargs or {})
+        loop_max_tool_iterations = raw_kwargs.pop("max_tool_iterations", None)
+        allow_chunking = raw_kwargs.pop("allow_chunking", None)
+        emit_nested_tool_events = raw_kwargs.pop("emit_nested_tool_events", None)
+        run_id = raw_kwargs.pop("run_id", None)
+
+        request_kwargs = self._merge_default_and_call_kwargs(raw_kwargs)
+        base_options = loop_options or AgentLoopOptions()
+        merged_callbacks = list(self._normalize_loop_callbacks(getattr(base_options, "callbacks", ())))
+        merged_callbacks.extend(self._normalize_loop_callbacks(callbacks))
+
+        resolved_options = AgentLoopOptions(
+            callbacks=tuple(merged_callbacks),
+            max_tool_iterations=(
+                int(loop_max_tool_iterations)
+                if loop_max_tool_iterations is not None
+                else base_options.max_tool_iterations
+            ),
+            allow_chunking=(
+                bool(allow_chunking)
+                if allow_chunking is not None
+                else bool(base_options.allow_chunking)
+            ),
+            emit_nested_tool_events=(
+                bool(emit_nested_tool_events)
+                if emit_nested_tool_events is not None
+                else bool(base_options.emit_nested_tool_events)
+            ),
+            run_id=str(run_id or base_options.run_id or "") or None,
+            request_id=str(request_id or base_options.request_id or "") or None,
+            metadata=copy.deepcopy(getattr(base_options, "metadata", {}) or {}),
+        )
+        return resolved_options, request_kwargs
+
+    @staticmethod
+    def _reasoning_enabled_for_kwargs(call_kwargs: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Standardized reasoning detection across provider-specific request kwargs.
+        """
+        merged: Dict[str, Any] = dict(call_kwargs or {})
+        return (
+            isinstance(merged.get("reasoning"), dict)
+            or isinstance(merged.get("thinking"), dict)
+            or isinstance(merged.get("output_config"), dict)
+        )
+
+    @staticmethod
+    def _extract_actual_response_text(content: Any) -> str:
+        """
+        Extract only the user-visible response text, ignoring reasoning/thinking blocks.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            block_type = str(content.get("type") or "").strip().lower()
+            if block_type in {"thinking", "reasoning"}:
+                return ""
+            if content.get("text") is not None:
+                return str(content.get("text") or "")
+            return ""
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                text = LLMClient._extract_actual_response_text(block)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts)
+        return str(content)
+
+    @staticmethod
+    def _extract_raw_assistant_content(response: Any) -> Any:
+        """
+        Preserve provider-native assistant content blocks when available.
+
+        This is required for providers such as Anthropic thinking blocks where
+        previous assistant content must be sent back unmodified.
+        """
+        direct_content = getattr(response, "content", None)
+        if isinstance(direct_content, (list, dict)):
+            try:
+                return copy.deepcopy(direct_content)
+            except Exception:
+                return direct_content
+        raw = getattr(response, "raw_response", None)
+        if raw is None:
+            return getattr(response, "content", "")
+        raw_content = getattr(raw, "content", None)
+        if raw_content is None:
+            return getattr(response, "content", "")
+        try:
+            return copy.deepcopy(raw_content)
+        except Exception:
+            return raw_content
+
+    async def run_agent_loop(
+        self,
+        message: Union[str, Message],
+        messages: Optional[List[Message]] = None,
+        system_message: Optional[Union[str, Message]] = None,
+        callbacks: Optional[Any] = None,
+        loop_options: Optional[AgentLoopOptions] = None,
+        **kwargs,
+    ) -> AsyncIterator[AgentLoopEvent]:
+        """
+        Run the full LLM/tool loop and yield typed lifecycle events.
+
+        This is the low-level event-streaming API for advanced callers.
+        """
+        try:
+            from moose.framework.logging.tracing import ensure_trace
+            from moose.framework.logging import get_project_id
+            project_id = get_project_id()
+        except Exception:
+            from moose.framework.logging.tracing import ensure_trace
+            project_id = None
+
+        ctx = ensure_trace(project_id=project_id, agent_name=self.agent_name)
+        resolved_options, request_kwargs = self._build_agent_loop_options(
+            callbacks=callbacks,
+            loop_options=loop_options,
+            request_id=ctx.request_id,
+            call_kwargs=kwargs,
+        )
+        runner = AgentLoopRunner(
+            client=self,
+            message=message,
+            messages=messages,
+            system_message=system_message,
+            call_kwargs=request_kwargs,
+            options=resolved_options,
+            request_id=ctx.request_id,
+        )
+        async for event in runner.run():
+            yield event
+
+    async def collect_agent_loop(
+        self,
+        message: Union[str, Message],
+        messages: Optional[List[Message]] = None,
+        system_message: Optional[Union[str, Message]] = None,
+        callbacks: Optional[Any] = None,
+        loop_options: Optional[AgentLoopOptions] = None,
+        *,
+        raise_on_error: bool = False,
+        **kwargs,
+    ) -> AgentLoopResult:
+        """
+        Run the full LLM/tool loop and collect a structured result.
+
+        Set `raise_on_error=True` to re-raise fatal loop failures after collection.
+        """
+        try:
+            from moose.framework.logging.tracing import ensure_trace
+            from moose.framework.logging import get_project_id
+            project_id = get_project_id()
+        except Exception:
+            from moose.framework.logging.tracing import ensure_trace
+            project_id = None
+
+        ctx = ensure_trace(project_id=project_id, agent_name=self.agent_name)
+        resolved_options, request_kwargs = self._build_agent_loop_options(
+            callbacks=callbacks,
+            loop_options=loop_options,
+            request_id=ctx.request_id,
+            call_kwargs=kwargs,
+        )
+        runner = AgentLoopRunner(
+            client=self,
+            message=message,
+            messages=messages,
+            system_message=system_message,
+            call_kwargs=request_kwargs,
+            options=resolved_options,
+            request_id=ctx.request_id,
+        )
+        return await runner.collect(raise_on_error=raise_on_error)
     
     def send_message_sync(
         self,
@@ -335,6 +573,17 @@ class LLMClient:
             # Common format: {"type":"text","text":"..."}
             if content.get("type") == "text" and content.get("text") is not None:
                 return str(content.get("text") or "")
+            if content.get("type") == "thinking" and content.get("thinking") is not None:
+                return str(content.get("thinking") or "")
+            if content.get("type") == "reasoning":
+                summary = content.get("summary")
+                if isinstance(summary, list):
+                    summary_parts: List[str] = []
+                    for item in summary:
+                        if isinstance(item, dict) and item.get("text") is not None:
+                            summary_parts.append(str(item.get("text") or ""))
+                    if summary_parts:
+                        return " ".join([s for s in summary_parts if s])
             if content.get("text") is not None:
                 return str(content.get("text") or "")
             return ""
@@ -876,94 +1125,29 @@ Provide your final combined response:"""
         message: Union[str, Message],
         messages: Optional[List[Message]] = None,
         system_message: Optional[Union[str, Message]] = None,
+        callbacks: Optional[Any] = None,
+        loop_options: Optional[AgentLoopOptions] = None,
         **kwargs
     ) -> LLMResponse:
         """
         Send a message to the LLM and receive a response.
-        
-        Uses LangChain native provider classes internally.
-        Automatically chunks input if it exceeds 90% of max_input_tokens.
-        
-        Args:
-            message: User message (string or Message object)
-            messages: Optional list of previous messages for conversation context
-            system_message: Optional system message to set behavior
-            **kwargs: Additional parameters to override defaults
-        
-        Returns:
-            LLMResponse object containing the response
-        
-        Example:
-            >>> client = LLMClient(model="gpt-4")
-            >>> response = client.send_message("Hello, how are you?")
-            >>> print(response.content)
+
+        This remains the backward-compatible high-level API. Internally it now
+        runs the event loop and returns only the final `LLMResponse`.
         """
         try:
-            from moose.framework.logging.tracing import ensure_trace
-            from moose.framework.logging import get_project_id
-        except Exception:
-            pass
-
-        ctx = ensure_trace(project_id=get_project_id(), agent_name=self.agent_name)
-        request_id = ctx.request_id
-        self.logger.debug(f"Sending message via LangChain to {self.model} (request_id: {request_id})")
-        
-        try:
-            # Extract message content for token counting
-            if isinstance(message, str):
-                message_content = message
-            else:
-                message_content = self._content_text_for_token_count(message.content)
-            
-            # Extract system message content
-            system_message_content = None
-            if system_message:
-                if isinstance(system_message, str):
-                    system_message_content = system_message
-                else:
-                    system_message_content = self._content_text_for_token_count(system_message.content)
-            
-            # Count total input tokens
-            total_tokens = self._count_message_tokens(
+            result = await self.collect_agent_loop(
                 message=message,
+                messages=messages,
                 system_message=system_message,
-                messages=messages
+                callbacks=callbacks,
+                loop_options=loop_options,
+                raise_on_error=True,
+                **kwargs,
             )
-
-            # Multimodal requests can't be chunked safely; send directly.
-            if self._has_multimodal_content(message=message, system_message=system_message, messages=messages):
-                return await self._send_message_direct(
-                    message=message,
-                    messages=messages,
-                    system_message=system_message,
-                    request_id=request_id,
-                    **kwargs
-                )
-            
-            # Check if chunking is needed (90% threshold)
-            chunk_threshold = int(self.max_input_tokens * 0.9)
-            
-            if total_tokens > chunk_threshold:
-                return await self._send_message_chunked(
-                    message=message,
-                    total_tokens=total_tokens,
-                    chunk_threshold=chunk_threshold,
-                    message_content=message_content,
-                    system_message_content=system_message_content,
-                    messages=messages,
-                    system_message=system_message,
-                    request_id=request_id,
-                    **kwargs
-                )
-            else:
-                return await self._send_message_direct(
-                    message=message,
-                    messages=messages,
-                    system_message=system_message,
-                    request_id=request_id,
-                    **kwargs
-                )
-            
+            if result.final_response is None:
+                raise RuntimeError("Agent loop completed without a final response")
+            return result.final_response
         except Exception as e:
             self.logger.error(f"Error calling LLM: {e}")
             raise
@@ -1471,8 +1655,7 @@ Provide your final combined response:"""
                 total_usage["output_tokens"] += response.usage.get("output_tokens", 0)
                 total_usage["total_tokens"] += response.usage.get("total_tokens", 0)
             
-            # Content is normalized in LangChainLLM.(a)invoke; keep a cheap cast for safety.
-            response_text = str(getattr(response, "content", "") or "")
+            response_text = self._extract_actual_response_text(getattr(response, "content", ""))
 
             # Check for termination marker FIRST (multi-stage reasoning mode)
             if self.enable_multi_stage_reasoning and self._has_final_answer_marker(response_text):
@@ -1492,9 +1675,10 @@ Provide your final combined response:"""
                 break
             
             # Add assistant response to conversation
+            assistant_content_for_history = self._extract_raw_assistant_content(response)
             conversation_messages.append(Message(
                 role=MessageRole.ASSISTANT,
-                content=response_text,
+                content=assistant_content_for_history,
                 tool_calls=response.tool_calls
             ))
             
@@ -1543,7 +1727,6 @@ Provide your final combined response:"""
                     continue
                 else:
                     # Standard mode - return response
-                    # Ensure we never return list-typed content to callers (breaks JSON extraction).
                     final_response = LLMResponse(
                         content=response_text,
                         model=response.model,
@@ -1607,16 +1790,7 @@ Provide your final combined response:"""
 
             # Normalize forced content and strip marker if present
             forced_content = getattr(forced, "content", "") if forced is not None else ""
-            if isinstance(forced_content, list):
-                text_parts: List[str] = []
-                for block in forced_content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(str(block.get("text", "")))
-                forced_text = "\n".join([t for t in text_parts if t])
-            elif isinstance(forced_content, str):
-                forced_text = forced_content
-            else:
-                forced_text = "" if forced_content is None else str(forced_content)
+            forced_text = self._extract_actual_response_text(forced_content)
 
             if self.enable_multi_stage_reasoning and self._has_final_answer_marker(forced_text):
                 forced_text = self._extract_final_answer(forced_text)

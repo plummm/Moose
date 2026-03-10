@@ -1,5 +1,6 @@
 """Base agent class with common functionality for all Moose agents."""
 
+import asyncio
 import json
 import os
 import sys
@@ -331,7 +332,7 @@ class BaseAgent():
         return None, None
     
     @abstractmethod
-    def process(self, input_data: Any) -> Any:
+    async def process(self, input_data: Any) -> Any:
         """
         Process input data and return result.
         
@@ -364,8 +365,20 @@ class BaseAgent():
         self._current_model_used = None
         
         try:
-            # Process the input
-            result = self.process(input_data)
+            # Process the input (supports both async and sync implementations)
+            maybe_result = self.process(input_data)
+            if inspect.isawaitable(maybe_result):
+                try:
+                    result = asyncio.run(maybe_result)
+                except RuntimeError as run_error:
+                    # asyncio.run cannot be called if a loop is already running in this thread.
+                    # This path is primarily used by stdin/file modes, where no loop should exist.
+                    raise RuntimeError(
+                        "Async process() cannot run because an event loop is already running. "
+                        "Use an async-capable entrypoint (e.g. HTTP async handler) or provide a sync wrapper."
+                    ) from run_error
+            else:
+                result = maybe_result
             
             # Calculate processing time
             processing_time_ms = (time.time() - start_time) * 1000

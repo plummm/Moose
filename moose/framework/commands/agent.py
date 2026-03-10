@@ -221,8 +221,7 @@ class AgentCommand:
                 logger.info("Agent stopped.")
         
         except Exception as e:
-            logger.error(f"Failed to run agent in debug mode: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Failed to run agent in debug mode: {e}", exc_info=True)
             sys.exit(1)
     
     def _run_deploy(self, agent_name: str, port: Optional[int], force_rebuild: bool, debug: bool):

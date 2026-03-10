@@ -379,6 +379,9 @@ class LangChainLLM:
             else:
                 return HumanMessage(content=message.content)
         elif message.role == MessageRole.ASSISTANT:
+            assistant_content = message.content
+            if not isinstance(assistant_content, (str, list, dict)):
+                assistant_content = str(assistant_content)
             # For ASSISTANT messages with tool calls, need to preserve them
             if message.tool_calls:
                 # Convert tool_calls to LangChain format
@@ -390,11 +393,8 @@ class LangChainLLM:
                     else:
                         # If it's already a LangChain tool call object, use as-is
                         langchain_tool_calls.append(tc)
-                return AIMessage(
-                    content=message.content if isinstance(message.content, str) else str(message.content),
-                    tool_calls=langchain_tool_calls
-                )
-            return AIMessage(content=message.content if isinstance(message.content, str) else str(message.content))
+                return AIMessage(content=assistant_content, tool_calls=langchain_tool_calls)
+            return AIMessage(content=assistant_content)
         elif message.role == MessageRole.TOOL:
             # Carry tool name through ToolMessage when available so logs/UI can display it.
             # Different LangChain versions may or may not accept `name=` in the constructor,
@@ -438,6 +438,21 @@ class LangChainLLM:
                         parts.append(b)
                     continue
                 if isinstance(b, dict):
+                    if b.get("type") == "reasoning":
+                        # OpenAI reasoning summaries are returned as a separate item.
+                        # Keep summary text in output to preserve user-visible context.
+                        summary = b.get("summary")
+                        if isinstance(summary, list):
+                            summary_parts: List[str] = []
+                            for item in summary:
+                                if isinstance(item, dict) and item.get("text") is not None:
+                                    summary_parts.append(str(item.get("text") or ""))
+                            if summary_parts:
+                                parts.append("\n".join([s for s in summary_parts if s]))
+                                continue
+                    if b.get("type") == "thinking" and b.get("thinking") is not None:
+                        parts.append(str(b.get("thinking") or ""))
+                        continue
                     # Most common: {"type":"text","text":"..."}
                     if b.get("type") == "text" and b.get("text") is not None:
                         parts.append(str(b.get("text") or ""))
@@ -480,13 +495,7 @@ class LangChainLLM:
         except Exception:
             raw = None
         text = self._normalize_content_to_text(raw)
-        # Best-effort: mutate in-place so all loggers see the normalized content.
-        try:
-            setattr(response, "content", text)
-            return response
-        except Exception:
-            pass
-        # Fallback: construct a new AIMessage preserving tool_calls/metadata if possible.
+        # Construct a logging-safe copy so the original provider response remains untouched.
         try:
             tc = getattr(response, "tool_calls", None)
             nm = AIMessage(content=text, tool_calls=tc) if tc else AIMessage(content=text)
@@ -498,7 +507,34 @@ class LangChainLLM:
                         pass
             return nm
         except Exception:
-            return response
+            return {"content": text, "type": type(response).__name__}
+
+    @staticmethod
+    def _reasoning_enabled_for_call(kwargs: Dict[str, Any]) -> bool:
+        """
+        Standardized detection for reasoning/thinking mode regardless of provider naming.
+        """
+        if not isinstance(kwargs, dict):
+            return False
+        reasoning = kwargs.get("reasoning")
+        if isinstance(reasoning, dict) and bool(reasoning):
+            return True
+        thinking = kwargs.get("thinking")
+        if isinstance(thinking, dict) and bool(thinking):
+            return True
+        output_config = kwargs.get("output_config")
+        if isinstance(output_config, dict) and bool(output_config):
+            return True
+        return False
+
+    @staticmethod
+    def _response_content_for_call(content: Any, *, reasoning_enabled: bool) -> Any:
+        """
+        Return provider-structured content when reasoning is enabled; otherwise plain text.
+        """
+        if reasoning_enabled and isinstance(content, list):
+            return content
+        return LangChainLLM._normalize_content_to_text(content)
     
     def _langchain_to_message(self, langchain_msg: BaseMessage) -> Message:
         """Convert LangChain message to our Message model."""
@@ -713,6 +749,7 @@ class LangChainLLM:
         
         # Extract content
         content = response.content if hasattr(response, 'content') else str(response)
+        reasoning_enabled = self._reasoning_enabled_for_call(kwargs)
         
         # Extract tool calls if present
         tool_calls = None
@@ -755,7 +792,7 @@ class LangChainLLM:
         )
         
         return LLMResponse(
-            content=self._normalize_content_to_text(content),
+            content=self._response_content_for_call(content, reasoning_enabled=reasoning_enabled),
             model=self.model,
             finish_reason=finish_reason,
             usage=usage,
@@ -863,6 +900,7 @@ class LangChainLLM:
         
         # Extract content
         content = response.content if hasattr(response, 'content') else str(response)
+        reasoning_enabled = self._reasoning_enabled_for_call(kwargs)
         
         # Extract tool calls if present
         tool_calls = None
@@ -905,7 +943,7 @@ class LangChainLLM:
         )
         
         return LLMResponse(
-            content=self._normalize_content_to_text(content),
+            content=self._response_content_for_call(content, reasoning_enabled=reasoning_enabled),
             model=self.model,
             finish_reason=finish_reason,
             usage=usage,

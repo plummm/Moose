@@ -118,6 +118,145 @@ sequenceDiagram
     Note over ToolRuntime: Nested tool calls are internal<br/>Only top-level results become ToolMessages
 ```
 
+### Event Loop
+
+`LLMClient` now exposes a first-class event loop API in addition to the existing
+high-level `send_message()` wrapper.
+
+Primary APIs:
+
+- `run_agent_loop(...)` - async iterator of typed lifecycle events
+- `collect_agent_loop(...)` - runs the loop and returns an `AgentLoopResult`
+- `send_message(...)` - backward-compatible wrapper that internally uses the collector and returns only `LLMResponse`
+
+Key properties:
+
+- Covers both direct and chunked execution paths
+- Emits top-level LLM/tool lifecycle events
+- Emits nested internal tool events from `ToolRuntime`
+- Preserves provider-native assistant content blocks in events
+- Reuses existing tracing/request IDs so events can be correlated with spans and trace DB records
+
+#### Event Taxonomy
+
+Main lifecycle:
+
+- `run_start`
+- `iteration_start`
+- `context_trim`
+- `llm_call_start`
+- `llm_response`
+- `tool_batch_start`
+- `tool_call_start`
+- `tool_call_success`
+- `tool_call_error`
+- `continuation_prompt_added`
+- `forced_finalization_start`
+- `forced_finalization_complete`
+- `run_end`
+- `run_error`
+
+Chunked path:
+
+- `chunking_start`
+- `chunking_fallback`
+- `chunk_start`
+- `chunk_complete`
+- `chunk_summary_start`
+- `chunk_summary_complete`
+
+Scopes:
+
+- `main` - normal top-level loop execution
+- `chunk` - per-chunk work during automatic chunking
+- `summary` - final chunk aggregation call
+- `forced_final` - tool-budget-exhausted finalization
+- `nested_tool` - internal tool-to-tool calls via `ToolRuntime`
+
+#### Consume the Event Stream
+
+```python
+from moose.framework.llm_core import LLMClient, AgentLoopEventType
+
+client = LLMClient(model="gpt-4o", tools=[...])
+
+async for event in client.run_agent_loop(
+    "Find the download URL on this website and explain the steps you took."
+):
+    if event.event_type == AgentLoopEventType.LLM_RESPONSE:
+        print("assistant:", event.assistant_text)
+    elif event.event_type == AgentLoopEventType.TOOL_CALL_START:
+        print("tool start:", event.tool_name, event.tool_args)
+    elif event.event_type == AgentLoopEventType.TOOL_CALL_SUCCESS:
+        print("tool success:", event.tool_name)
+```
+
+#### Collect a Structured Result
+
+```python
+from moose.framework.llm_core import LLMClient
+
+client = LLMClient(model="gpt-4o", tools=[...])
+
+result = await client.collect_agent_loop(
+    "Investigate this page and summarize what happened.",
+    raise_on_error=True,
+)
+
+print(result.final_response.content)
+print(result.stop_reason)
+print(len(result.events))
+print(result.total_usage)
+print(result.total_cost)
+```
+
+`AgentLoopResult` includes:
+
+- `final_response`
+- `events`
+- `final_conversation_messages`
+- `stop_reason`
+- `iteration_count`
+- `total_usage`
+- `total_cost`
+- `error_type` / `error_message`
+- `callback_errors`
+
+#### Use Callbacks
+
+Callbacks are observational in v1. They do not control tool execution.
+
+```python
+class AuditCallback:
+    def on_event(self, event):
+        print(event.event_type.value, event.scope.value)
+
+    def on_tool_call_error(self, event):
+        print("tool failed:", event.tool_name, event.error_message)
+
+client = LLMClient(model="gpt-4o", tools=[...])
+
+result = await client.collect_agent_loop(
+    "Inspect this workflow",
+    callbacks=[AuditCallback()],
+    raise_on_error=True,
+)
+```
+
+If a callback raises, the loop keeps running. Errors are recorded in
+`AgentLoopResult.callback_errors`.
+
+#### Compatibility With Existing Callers
+
+Existing code can keep using:
+
+```python
+response = await client.send_message("Hello")
+```
+
+This still returns `LLMResponse`, but it now runs through the same event-driven
+runtime as `run_agent_loop()` / `collect_agent_loop()`.
+
 ## Supported Providers
 
 - **OpenAI** (GPT-4, GPT-4 Turbo, GPT-3.5, GPT-4o, etc.)

@@ -1,5 +1,16 @@
 """Universal LLM interaction layer for Moose Framework."""
 
+from moose.framework.llm_core.agent_loop import (
+    AgentLoopCallback,
+    AgentLoopEvent,
+    AgentLoopEventType,
+    AgentLoopOptions,
+    AgentLoopResult,
+    AgentLoopRunner,
+    AgentLoopScope,
+    AgentLoopStopReason,
+    collect_agent_loop,
+)
 from moose.framework.llm_core.client import LLMClient
 from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
 from moose.framework.llm_core.providers import LLMProvider, get_provider
@@ -24,6 +35,15 @@ except ImportError:
 
 __all__ = [
     'LLMClient',
+    'AgentLoopCallback',
+    'AgentLoopEvent',
+    'AgentLoopEventType',
+    'AgentLoopOptions',
+    'AgentLoopResult',
+    'AgentLoopRunner',
+    'AgentLoopScope',
+    'AgentLoopStopReason',
+    'collect_agent_loop',
     'Message',
     'MessageRole',
     'LLMResponse',

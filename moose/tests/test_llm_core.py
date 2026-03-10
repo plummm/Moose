@@ -672,6 +672,126 @@ class TestMultiStageReasoning:
         assert extracted == "The result"
 
 
+class TestProviderReasoningThinking:
+    """Tests for provider-specific reasoning/thinking request handling."""
+
+    def test_reasoning_detection_is_standardized(self):
+        assert LLMClient._reasoning_enabled_for_kwargs({"reasoning": {"effort": "medium"}}) is True
+        assert LLMClient._reasoning_enabled_for_kwargs({"thinking": {"type": "adaptive"}}) is True
+        assert LLMClient._reasoning_enabled_for_kwargs({"output_config": {"effort": "high"}}) is True
+        assert LLMClient._reasoning_enabled_for_kwargs({}) is False
+
+    def test_assistant_content_blocks_preserved_across_tool_turns(self):
+        import asyncio
+        from unittest.mock import MagicMock, AsyncMock
+
+        thinking_blocks = [
+            {"type": "thinking", "thinking": "Need to call tool first", "signature": "sig_123"},
+            {"type": "text", "text": "Calling tool now."},
+        ]
+
+        first_raw = MagicMock()
+        first_raw.content = thinking_blocks
+
+        mock_responses = [
+            MagicMock(
+                content=thinking_blocks,
+                tool_calls=[{"name": "test_tool", "id": "call_1", "args": {}}],
+                cost=0.001,
+                usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                model="gpt-4o",
+                finish_reason="tool_calls",
+                raw_response=first_raw,
+                request_id="test_1",
+            ),
+            MagicMock(
+                content="Done.",
+                tool_calls=None,
+                cost=0.001,
+                usage={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+                model="gpt-4o",
+                finish_reason="stop",
+                raw_response=None,
+                request_id="test_2",
+            ),
+        ]
+
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+        mock_tool.ainvoke = AsyncMock(return_value="Tool result")
+
+        client = LLMClient(
+            model="gpt-4o",
+            tools=[mock_tool],
+            default_call_kwargs={"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}},
+        )
+        client.langchain_llm = MagicMock()
+        client.langchain_llm.ainvoke = AsyncMock(side_effect=mock_responses)
+
+        asyncio.run(client.send_message("Analyze this with tools"))
+
+        assert client.langchain_llm.ainvoke.call_count == 2
+        second_call_kwargs = client.langchain_llm.ainvoke.call_args_list[1].kwargs
+        second_call_messages = second_call_kwargs["messages"]
+        assistant_msgs = [m for m in second_call_messages if getattr(m, "role", None) == MessageRole.ASSISTANT]
+        assert assistant_msgs, "Expected assistant message in second turn"
+        assert isinstance(assistant_msgs[0].content, list)
+        assert assistant_msgs[0].content[0].get("type") == "thinking"
+        assert assistant_msgs[0].content[0].get("signature") == "sig_123"
+
+    def test_default_kwargs_merged_with_call_kwargs(self):
+        client = object.__new__(LLMClient)
+        client.default_call_kwargs = {
+            "response_format": {"type": "json_schema", "strict": True},
+            "foo": 1,
+        }
+
+        merged = client._merge_default_and_call_kwargs(
+            {
+                "response_format": {"strict": False},
+                "bar": 2,
+            }
+        )
+
+        assert merged["foo"] == 1
+        assert merged["bar"] == 2
+        assert merged["response_format"]["type"] == "json_schema"
+        assert merged["response_format"]["strict"] is False
+
+    def test_extract_actual_response_text_ignores_reasoning_blocks(self):
+        content = [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "internal summary"}]},
+            {"type": "thinking", "thinking": "internal thinking"},
+            {"type": "text", "text": "actual answer"},
+        ]
+        assert LLMClient._extract_actual_response_text(content) == "actual answer"
+
+    def test_final_response_content_omits_reasoning_blocks(self):
+        import asyncio
+        from unittest.mock import MagicMock, AsyncMock
+
+        content = [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "summary text"}]},
+            {"type": "text", "text": "answer text"},
+        ]
+
+        client = LLMClient(
+            model="gpt-4o",
+            default_call_kwargs={"reasoning": {"effort": "medium", "summary": "auto"}},
+        )
+        client.langchain_llm = MagicMock()
+        client.langchain_llm.ainvoke = AsyncMock(
+            return_value=LLMResponse(
+                content=content,
+                model="gpt-4o",
+                usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+        )
+
+        response = asyncio.run(client.send_message("hello"))
+        assert response.content == "answer text"
+
+
 @pytest.mark.asyncio
 class TestMultiStageReasoningIntegration:
     """Integration tests for multi-stage reasoning workflow."""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
 import time
 import uuid
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ class ToolRuntime:
         logger: Any,
         max_depth: int = 6,
         per_call_timeout_s: Optional[float] = 60.0,
+        event_emitter: Optional[Callable[[str, Dict[str, Any]], Awaitable[None] | None]] = None,
     ) -> None:
         self.tool_map = tool_map
         self._invoke_tool = invoke_tool
@@ -56,6 +58,9 @@ class ToolRuntime:
 
         self._active: set[str] = set()
         self._depth: int = 0
+        self._event_emitter = event_emitter
+        self._event_iteration: Optional[int] = None
+        self._event_scope: str = "main"
 
         # Accumulates LLM usage/cost incurred "externally" during this request (e.g., meeting-room helper calls).
         self.external_cost: float = 0.0
@@ -90,6 +95,21 @@ class ToolRuntime:
     def current() -> "ToolRuntime | None":
         """Return the current runtime if running inside a tool execution context."""
         return _CURRENT_RUNTIME.get()
+
+    def set_event_context(self, *, iteration: Optional[int], scope: str = "main") -> None:
+        """Set contextual metadata used by the optional event emitter."""
+        self._event_iteration = iteration
+        self._event_scope = str(scope or "main")
+
+    async def _emit_runtime_event(self, kind: str, payload: Dict[str, Any]) -> None:
+        if self._event_emitter is None:
+            return
+        try:
+            out = self._event_emitter(kind, payload)
+            if inspect.isawaitable(out):
+                await out
+        except Exception:
+            pass
 
     async def call_tool(
         self,
@@ -143,6 +163,21 @@ class ToolRuntime:
                     f"depth={span.depth} tool={tool_name} args_keys={sorted(tool_args.keys())}"
                 )
 
+            if span.depth > 1:
+                await self._emit_runtime_event(
+                    "tool_call_start",
+                    {
+                        "scope": "nested_tool",
+                        "iteration": self._event_iteration,
+                        "tool_name": str(tool_name),
+                        "tool_call_id": tool_call_id,
+                        "tool_args": dict(tool_args),
+                        "depth": int(span.depth),
+                        "span_id": span.span_id,
+                        "parent_span_id": span.parent_span_id,
+                    },
+                )
+
             with trace_span(
                 kind="tool.call",
                 name=str(tool_name),
@@ -191,6 +226,22 @@ class ToolRuntime:
                     f"[tool_runtime] end span={span.span_id} depth={span.depth} tool={tool_name} "
                     f"ms={dt_ms:.1f}"
                 )
+            if span.depth > 1:
+                await self._emit_runtime_event(
+                    "tool_call_success",
+                    {
+                        "scope": "nested_tool",
+                        "iteration": self._event_iteration,
+                        "tool_name": str(tool_name),
+                        "tool_call_id": tool_call_id,
+                        "tool_args": dict(tool_args),
+                        "result": result,
+                        "depth": int(span.depth),
+                        "duration_ms": (time.perf_counter() - t0) * 1000.0,
+                        "span_id": span.span_id,
+                        "parent_span_id": span.parent_span_id,
+                    },
+                )
             return result
         except Exception as e:
             try:
@@ -217,6 +268,23 @@ class ToolRuntime:
                 self.logger.warning(
                     f"[tool_runtime] error span={span.span_id} depth={span.depth} tool={tool_name} "
                     f"ms={dt_ms:.1f} err={e}"
+                )
+            if span.depth > 1:
+                await self._emit_runtime_event(
+                    "tool_call_error",
+                    {
+                        "scope": "nested_tool",
+                        "iteration": self._event_iteration,
+                        "tool_name": str(tool_name),
+                        "tool_call_id": tool_call_id,
+                        "tool_args": dict(tool_args),
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "depth": int(span.depth),
+                        "duration_ms": (time.perf_counter() - t0) * 1000.0,
+                        "span_id": span.span_id,
+                        "parent_span_id": span.parent_span_id,
+                    },
                 )
             raise
         finally:
