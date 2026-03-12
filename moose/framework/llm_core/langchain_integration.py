@@ -399,7 +399,11 @@ class LangChainLLM:
             # Carry tool name through ToolMessage when available so logs/UI can display it.
             # Different LangChain versions may or may not accept `name=` in the constructor,
             # so we attempt it and fall back to attribute assignment.
-            tm_content = message.content if isinstance(message.content, str) else str(message.content)
+            tm_content = (
+                message.content
+                if isinstance(message.content, (str, list))
+                else str(message.content)
+            )
             tm_tool_call_id = message.tool_call_id or ""
             if message.name:
                 try:

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+import moose.agents.playwright_agent.browser.loop_runtime as loop_runtime_module
+import moose.agents.playwright_agent.browser.ref_page_actions as ref_page_actions_module
 from moose.agents.playwright_agent.single_loop_agent import PlaywrightAgent
 from moose.agents.playwright_agent.browser.controller import BrowserController
 from moose.agents.playwright_agent.browser.event_logger import BrowserEventLogger
 from moose.agents.playwright_agent.browser.loop_runtime import BrowserAutomation
 from moose.agents.playwright_agent.browser.models import RunConfig, RunState
+from moose.agents.playwright_agent.browser.network_inspector import NetworkInspectorFeature
 from moose.agents.playwright_agent.browser.ref_page_actions import PageActionsFeature
 from moose.agents.playwright_agent.browser.session import BrowserSessionManager
 
@@ -208,7 +212,15 @@ class FakeLoopResult:
         return {
             "run_id": self.run_id,
             "request_id": self.request_id,
-            "events": [{"event_type": "run_start"}, {"event_type": "run_end"}],
+            "final_response": {
+                "content": "completed",
+                "model": "fake-model",
+                "raw_response": object(),
+            },
+            "events": [
+                {"event_type": "run_start", "response": {"raw_response": object(), "content": "started"}},
+                {"event_type": "run_end"},
+            ],
             "total_usage": self.total_usage,
             "total_cost": self.total_cost,
         }
@@ -242,6 +254,28 @@ class FakeTextLLM:
     async def send_message(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(content=self.content, model="fake-summary-model")
+
+
+class FakeVisionLLM:
+    def __init__(self, content: str):
+        self.content = content
+        self.message_calls: list[dict] = []
+
+    async def send_message(self, message, messages=None, system_message=None, **kwargs):
+        self.message_calls.append(
+            {
+                "message": message,
+                "messages": messages,
+                "system_message": system_message,
+                "kwargs": kwargs,
+            }
+        )
+        return SimpleNamespace(
+            content=self.content,
+            model="fake-vision-model",
+            usage={"input_tokens": 13, "output_tokens": 5, "total_tokens": 18},
+            cost=0.0123,
+        )
 
 
 def test_page_actions_exposes_ref_based_tools(tmp_path):
@@ -294,7 +328,7 @@ def test_session_manager_tracks_tabs_and_snapshot_ids():
     assert manager.next_snapshot_id(run_state) == "snapshot_2"
 
 
-def test_controller_screenshot_returns_base64_payload(tmp_path):
+def test_controller_screenshot_returns_internal_capture_metadata(tmp_path):
     page = FakePage("https://shot.example", "Shot")
     run_state = RunState(
         run_id="shot-run",
@@ -313,10 +347,111 @@ def test_controller_screenshot_returns_base64_payload(tmp_path):
 
     result = asyncio.run(controller.screenshot(run_state))
 
+    assert result["ok"] is True
+    assert result["url"] == "https://shot.example"
+    assert result["title"] == "Shot"
     assert result["mime_type"] == "image/png"
-    assert result["base64"] == base64.b64encode(b"fake-image-bytes").decode("ascii")
     assert result["path"].endswith(".png")
     assert Path(result["path"]).exists()
+
+
+def test_page_actions_screenshot_returns_visual_conclusion(tmp_path):
+    page = FakePage("https://shot.example", "Shot")
+    run_state = RunState(
+        run_id="shot-run",
+        request_id="shot-req",
+        active=True,
+        current_url=page.url,
+        active_page_id="tab_1",
+        browser_context=FakeContext([page]),
+        page=page,
+        metadata={"screenshots_dir": str(tmp_path)},
+    )
+    feature = PageActionsFeature(
+        session_manager=BrowserSessionManager(downloads_dir=str(tmp_path)),
+        event_logger=BrowserEventLogger(tmp_path / "activity.db"),
+        llm_settings={"model": "gpt-5.2"},
+        screenshot_analyzer_llm_settings={"model": "gpt-5.2", "temperature": 0.0},
+        screenshot_analyzer_system_prompt="Return only the visual conclusion.",
+    )
+    feature.set_run_state(run_state)
+    fake_llm = FakeVisionLLM("The login button is visible.")
+    feature._create_screenshot_llm_client = lambda _run_state: fake_llm  # type: ignore[method-assign]
+    added_usage: list[dict] = []
+
+    class FakeRuntime:
+        def add_external_llm_usage(self, *, usage=None, cost=None):
+            added_usage.append({"usage": usage, "cost": cost})
+
+    original_current = ref_page_actions_module.ToolRuntime.current
+    ref_page_actions_module.ToolRuntime.current = staticmethod(lambda: FakeRuntime())
+
+    try:
+        result = asyncio.run(
+            feature.mcp_browser_screenshot(instruction="Is the login button visible?", full_page=False)
+        )
+    finally:
+        ref_page_actions_module.ToolRuntime.current = original_current
+
+    assert result == "The login button is visible."
+    assert len(fake_llm.message_calls) == 1
+    message = fake_llm.message_calls[0]["message"]
+    assert "Is the login button visible?" in message.content[0]["text"]
+    image_block = message.content[1]
+    assert image_block["type"] == "input_image"
+    assert image_block["image_url"].startswith("data:image/png;base64,")
+    assert added_usage == [
+        {
+            "usage": {"input_tokens": 13, "output_tokens": 5, "total_tokens": 18},
+            "cost": 0.0123,
+        }
+    ]
+
+
+def test_network_inspector_list_requests_returns_metadata_only():
+    run_state = RunState(run_id="req-run", request_id="req-1", active=True)
+    inspector = NetworkInspectorFeature(
+        session_manager=SimpleNamespace(),
+        event_logger=SimpleNamespace(),
+    )
+    inspector._history_by_run[str(run_state.run_id)] = {
+        "requests": [
+            {
+                "request_id": "r1",
+                "event_type": "response",
+                "method": "GET",
+                "url": "https://example.com/app.js",
+                "resource_type": "script",
+                "status_code": 200,
+                "mime_type": "application/javascript",
+                "response_body_kind": "text",
+                "response_body": "console.log('hello')",
+                "response_body_size": 20,
+                "response_body_truncated": False,
+                "is_download": False,
+                "download_reason": None,
+                "error_text": None,
+            }
+        ]
+    }
+
+    result = asyncio.run(inspector.list_requests(run_state))
+
+    assert result["ok"] is True
+    assert result["items"] == [
+        {
+            "request_id": "r1",
+            "event_type": "response",
+            "method": "GET",
+            "url": "https://example.com/app.js",
+            "resource_type": "script",
+            "status_code": 200,
+            "mime_type": "application/javascript",
+            "is_download": False,
+            "download_reason": None,
+            "error_text": None,
+        }
+    ]
 
 
 def test_controller_finalize_after_dom_mutation_suggests_snapshot(tmp_path):
@@ -377,7 +512,7 @@ def test_browser_automation_uses_collect_agent_loop_and_returns_loop_payload(tmp
 
     fake_loop_result = FakeLoopResult()
     fake_llm = FakeLLM(fake_loop_result)
-    automation._create_worker_llm_client = lambda tools: fake_llm  # type: ignore[method-assign]
+    automation._create_worker_llm_client = lambda tools, run_config=None: fake_llm  # type: ignore[method-assign]
 
     run_config = RunConfig(
         run_id="browser-run",
@@ -403,6 +538,7 @@ def test_browser_automation_uses_collect_agent_loop_and_returns_loop_payload(tmp
     assert result["network"]["failed_requests"][0]["status_code"] == 404
     assert result["loop"]["run_id"] == "loop_run"
     assert "events" not in result["loop"]
+    assert "raw_response" not in result["loop"]["final_response"]
     assert result["artifacts"]["activity_db_path"].endswith("activity.db")
     assert fake_llm.calls[0]["system_message"] == "system prompt"
     assert fake_llm.calls[0]["raise_on_error"] is False
@@ -414,6 +550,58 @@ def test_browser_automation_uses_collect_agent_loop_and_returns_loop_payload(tmp
     assert downloads.attached == 1
     assert downloads.detached == 1
     assert session_manager.shutdown_calls == 1
+
+
+def test_browser_automation_worker_uses_framework_llm_config_helper(tmp_path, monkeypatch):
+    run_state = RunState(
+        run_id="browser-run",
+        request_id="request-1",
+        active=True,
+        current_url="https://start.example",
+        active_page_id="tab_1",
+        metadata={},
+    )
+    automation = BrowserAutomation(
+        session_manager=FakeSessionManager(run_state),
+        page_actions=FakePageActions(FakeEventLogger(tmp_path / "activity.db")),
+        network_inspector=FakeNetworkInspector(),
+        downloads=FakeDownloads(),
+        llm_settings={
+            "model": "gpt-5.2",
+            "enable_multi_stage_reasoning": True,
+            "max_tool_iterations": 24,
+            "default_call_kwargs": {"reasoning": {"effort": "high"}},
+            "kwargs": {"use_responses_api": False},
+        },
+        logger=None,
+    )
+    captured: dict = {}
+
+    def fake_create(cfg, *, tools=None, agent_name=None, runtime_overrides=None):
+        captured["cfg"] = cfg
+        captured["tools"] = tools
+        captured["agent_name"] = agent_name
+        captured["runtime_overrides"] = runtime_overrides
+        return SimpleNamespace()
+
+    monkeypatch.setattr(loop_runtime_module, "create_llm_client_from_config", fake_create)
+
+    client = automation._create_worker_llm_client(
+        tools=[SimpleNamespace(name="browser_snapshot")],
+        run_config=RunConfig(
+            run_id="browser-run",
+            request_id="request-1",
+            user_prompt="hello",
+            timeout_ms=4321,
+        ),
+    )
+
+    assert client is not None
+    assert captured["cfg"]["enable_multi_stage_reasoning"] is True
+    assert captured["cfg"]["default_call_kwargs"]["reasoning"]["effort"] == "high"
+    assert captured["tools"][0].name == "browser_snapshot"
+    assert captured["agent_name"] == "playwright_agent"
+    assert captured["runtime_overrides"]["timeout"] == pytest.approx(4.321)
 
 
 def test_task_refiner_refines_prompt_and_target_url():

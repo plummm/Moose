@@ -1,10 +1,12 @@
 """Unit tests for LLM Core module."""
 
 import os
+from types import SimpleNamespace
 import pytest
 import tempfile
 from pathlib import Path
 from moose.framework.llm_core import LLMClient, Message, MessageRole, LLMResponse, LLMProvider
+import moose.framework.llm_core.client as llm_client_module
 from moose.framework.llm_core.cost_tracker import CostTracker
 from moose.framework.logging import init_core_logger, set_global_debug
 
@@ -74,6 +76,81 @@ class TestLLMCore:
                 assert client.provider.value == "azure_ai"
             except Exception as e:
                 pytest.skip(f"Azure AI model not available: {e}")
+
+    def test_upload_image_sync_uses_openai_client(self, tmp_path, monkeypatch):
+        """OpenAI image upload should return the uploaded file id."""
+        image_path = tmp_path / "screen.png"
+        image_path.write_bytes(b"fake-image")
+        captured = {}
+
+        class FakeOpenAI:
+            def __init__(self, *, api_key, timeout):
+                captured["api_key"] = api_key
+                captured["timeout"] = timeout
+                self.files = self
+
+            def create(self, *, file, purpose):
+                captured["filename"] = Path(file.name).name
+                captured["purpose"] = purpose
+                captured["bytes"] = file.read()
+                return SimpleNamespace(id="file-openai-123")
+
+        monkeypatch.setattr(llm_client_module, "OPENAI_SDK_AVAILABLE", True)
+        monkeypatch.setattr(llm_client_module, "OpenAI", FakeOpenAI)
+
+        client = LLMClient(model="gpt-4o", api_key="test-openai-key")
+        file_id = client.upload_image_sync(image_path)
+
+        assert file_id == "file-openai-123"
+        assert captured["api_key"] == "test-openai-key"
+        assert captured["timeout"] == 600.0
+        assert captured["filename"] == "screen.png"
+        assert captured["purpose"] == "vision"
+        assert captured["bytes"] == b"fake-image"
+
+    def test_upload_image_sync_uses_azure_client(self, tmp_path, monkeypatch):
+        """Azure image upload should use AzureOpenAI-compatible settings."""
+        image_path = tmp_path / "screen.png"
+        image_path.write_bytes(b"fake-image")
+        captured = {}
+
+        class FakeAzureOpenAI:
+            def __init__(self, *, api_key, azure_endpoint, api_version, timeout):
+                captured["api_key"] = api_key
+                captured["azure_endpoint"] = azure_endpoint
+                captured["api_version"] = api_version
+                captured["timeout"] = timeout
+                self.files = self
+
+            def create(self, *, file, purpose):
+                captured["filename"] = Path(file.name).name
+                captured["purpose"] = purpose
+                return SimpleNamespace(id="file-azure-123")
+
+        monkeypatch.setattr(llm_client_module, "OPENAI_SDK_AVAILABLE", True)
+        monkeypatch.setattr(llm_client_module, "AzureOpenAI", FakeAzureOpenAI)
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
+        monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+
+        client = LLMClient(model="azure:gpt-4o", provider=LLMProvider.AZURE_AI, api_key="test-azure-key")
+        file_id = client.upload_image_sync(image_path)
+
+        assert file_id == "file-azure-123"
+        assert captured["api_key"] == "test-azure-key"
+        assert captured["azure_endpoint"] == "https://example.openai.azure.com"
+        assert captured["api_version"] == "2024-10-21"
+        assert captured["timeout"] == 600.0
+        assert captured["filename"] == "screen.png"
+        assert captured["purpose"] == "vision"
+
+    def test_upload_image_sync_rejects_unsupported_provider(self, tmp_path):
+        """Only OpenAI-compatible providers should support image uploads."""
+        image_path = tmp_path / "screen.png"
+        image_path.write_bytes(b"fake-image")
+
+        client = LLMClient(model="gemini-2.5-flash")
+        with pytest.raises(ValueError, match="OpenAI and Azure providers"):
+            client.upload_image_sync(image_path)
     
     @pytest.mark.llm
     @pytest.mark.asyncio
@@ -790,6 +867,85 @@ class TestProviderReasoningThinking:
 
         response = asyncio.run(client.send_message("hello"))
         assert response.content == "answer text"
+
+    def test_tool_result_multimodal_blocks_are_preserved(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        tool = MagicMock()
+        tool.name = "browser_screenshot"
+        tool.ainvoke = AsyncMock(
+            return_value=[
+                {"type": "input_text", "text": "Analyze the screenshot and plan the next action."},
+                {"type": "input_image", "file_id": "file-123"},
+            ]
+        )
+
+        client = LLMClient(model="gpt-4o", tools=[tool])
+        messages = asyncio.run(
+            client._execute_tool_calls(
+                [{"name": "browser_screenshot", "id": "call_1", "args": {}}],
+                runtime=None,
+            )
+        )
+
+        assert len(messages) == 1
+        assert messages[0].role == MessageRole.TOOL
+        assert messages[0].content == [
+            {"type": "input_text", "text": "Analyze the screenshot and plan the next action."},
+            {"type": "input_image", "file_id": "file-123"},
+        ]
+
+    def test_collect_agent_loop_preserves_multimodal_tool_messages(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        tool = MagicMock()
+        tool.name = "browser_screenshot"
+        tool.ainvoke = AsyncMock(
+            return_value=[
+                {"type": "input_text", "text": "Analyze the screenshot and plan the next action."},
+                {"type": "input_image", "file_id": "file-123"},
+            ]
+        )
+
+        client = LLMClient(model="gpt-4o", tools=[tool], enable_multi_stage_reasoning=False)
+        client.langchain_llm = MagicMock()
+        client.langchain_llm.ainvoke = AsyncMock(
+            side_effect=[
+                MagicMock(
+                    content="Calling screenshot",
+                    tool_calls=[{"name": "browser_screenshot", "id": "call_1", "args": {}}],
+                    cost=0.001,
+                    usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    model="gpt-4o",
+                    finish_reason="tool_calls",
+                    raw_response=None,
+                    request_id="test_1",
+                ),
+                MagicMock(
+                    content="Done.",
+                    tool_calls=None,
+                    cost=0.001,
+                    usage={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+                    model="gpt-4o",
+                    finish_reason="stop",
+                    raw_response=None,
+                    request_id="test_2",
+                ),
+            ]
+        )
+
+        asyncio.run(client.collect_agent_loop("Analyze the page"))
+
+        second_call_kwargs = client.langchain_llm.ainvoke.call_args_list[1].kwargs
+        second_call_messages = second_call_kwargs["messages"]
+        tool_messages = [m for m in second_call_messages if getattr(m, "role", None) == MessageRole.TOOL]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].content == [
+            {"type": "input_text", "text": "Analyze the screenshot and plan the next action."},
+            {"type": "input_image", "file_id": "file-123"},
+        ]
 
 
 @pytest.mark.asyncio

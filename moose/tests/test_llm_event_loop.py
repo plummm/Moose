@@ -281,6 +281,151 @@ def test_chunked_execution_emits_chunk_lifecycle_events_and_aggregates_usage():
     assert result.final_response.usage == {"input_tokens": 15, "output_tokens": 7, "total_tokens": 22}
 
 
+def test_budget_compaction_stages_prefix_and_aggregates_compaction_usage():
+    client = LLMClient(model="gpt-4o")
+    client.langchain_llm = MagicMock()
+    client.langchain_llm.ainvoke = AsyncMock(
+        side_effect=[
+            _response(
+                content="summary-one",
+                usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                cost=0.01,
+                request_id="compact_1",
+            ),
+            _response(
+                content="summary-two",
+                usage={"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                cost=0.02,
+                request_id="compact_2",
+            ),
+        ]
+    )
+
+    def fake_count_message_tokens(message="", system_message=None, messages=None):
+        total = 0
+        for m in messages or []:
+            c = getattr(m, "content", "") or ""
+            c = c if isinstance(c, str) else str(c)
+            if "first-user" in c:
+                total += 5
+            elif "last-big" in c:
+                total += 100
+            elif "old-context" in c:
+                total += 10
+            elif "tool-output" in c:
+                total += 10
+            elif "summary-one" in c:
+                total += 5
+            elif "summary-two" in c:
+                total += 20
+            else:
+                total += 1
+        if message:
+            total += max(1, len(str(message)) // 20)
+        return total
+
+    client._count_message_tokens = MagicMock(side_effect=fake_count_message_tokens)
+    client._count_tokens = MagicMock(side_effect=lambda text: max(1, len(str(text)) // 20))
+
+    messages, usage, cost = asyncio.run(
+        client._compact_conversation_messages_for_budget_async(
+            conversation_messages=[
+                Message(role=MessageRole.USER, content="first-user"),
+                Message(role=MessageRole.ASSISTANT, content="old-context"),
+                Message(role=MessageRole.TOOL, name="browser_click", content="tool-output"),
+                Message(role=MessageRole.USER, content="last-big"),
+            ],
+            system_message="system",
+            safe_budget=100,
+            reserved_output_tokens=20,
+            iteration=0,
+            request_id="req_compact",
+        )
+    )
+
+    assert len(messages) == 2
+    assert messages[0].content == "first-user"
+    assert "summary-two" in str(messages[1].content)
+    assert all(getattr(m, "role", None) == MessageRole.USER for m in messages)
+    assert usage == {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+    assert cost == pytest.approx(0.03)
+
+
+def test_collect_agent_loop_uses_compaction_and_counts_compaction_usage():
+    client = LLMClient(model="gpt-4o")
+    client.langchain_llm = MagicMock()
+    client.langchain_llm.ainvoke = AsyncMock(
+        side_effect=[
+            _response(
+                content="summary-one",
+                usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                cost=0.01,
+                request_id="compact_1",
+            ),
+            _response(
+                content="summary-two",
+                usage={"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                cost=0.02,
+                request_id="compact_2",
+            ),
+            _response(
+                content="done",
+                usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                cost=0.02,
+                request_id="req_1",
+            ),
+        ]
+    )
+
+    def fake_count_message_tokens(message="", system_message=None, messages=None):
+        total = 0
+        for m in messages or []:
+            c = getattr(m, "content", "") or ""
+            c = c if isinstance(c, str) else str(c)
+            if "first-user" in c:
+                total += 5
+            elif "last-big" in c:
+                total += 90
+            elif "old-context" in c:
+                total += 10
+            elif "tool-output" in c:
+                total += 10
+            elif "summary-one" in c:
+                total += 5
+            elif "summary-two" in c:
+                total += 20
+            else:
+                total += 1
+        if message:
+            total += max(1, len(str(message)) // 20)
+        return total
+
+    client._safe_input_budget = MagicMock(return_value=100)
+    client._count_message_tokens = MagicMock(side_effect=fake_count_message_tokens)
+    client._count_tokens = MagicMock(side_effect=lambda text: max(1, len(str(text)) // 20))
+
+    result = asyncio.run(
+        client.collect_agent_loop(
+            message=Message(role=MessageRole.USER, content="last-big"),
+            messages=[
+                Message(role=MessageRole.USER, content="first-user"),
+                Message(role=MessageRole.ASSISTANT, content="old-context"),
+                Message(role=MessageRole.TOOL, name="browser_click", content="tool-output"),
+            ],
+            raise_on_error=True,
+        )
+    )
+
+    assert result.final_response.content == "done"
+    assert result.final_response.usage == {"input_tokens": 15, "output_tokens": 7, "total_tokens": 22}
+    assert result.final_response.cost == pytest.approx(0.05)
+    final_call_messages = client.langchain_llm.ainvoke.call_args_list[2].kwargs["messages"]
+    assert len(final_call_messages) == 2
+    assert final_call_messages[0].content == "first-user"
+    assert "summary-two" in str(final_call_messages[1].content)
+    assert all(getattr(m, "role", None) == MessageRole.USER for m in final_call_messages)
+
+
 def test_callbacks_are_fan_out_and_callback_failures_are_isolated():
     collector = _EventCollector()
     client = LLMClient(model="gpt-4o")

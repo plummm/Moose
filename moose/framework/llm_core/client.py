@@ -28,6 +28,14 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
     tiktoken = None
 
+try:
+    from openai import OpenAI, AzureOpenAI
+    OPENAI_SDK_AVAILABLE = True
+except ImportError:
+    OpenAI = None
+    AzureOpenAI = None
+    OPENAI_SDK_AVAILABLE = False
+
 
 def _infer_agent_name_from_stack() -> Optional[str]:
     """
@@ -493,6 +501,103 @@ class LLMClient:
             return asyncio.run(
                 self.send_message(message, messages, system_message, **kwargs)
             )
+
+    def _create_image_upload_client(self) -> Any:
+        """Create an OpenAI-compatible SDK client for image uploads."""
+        if not OPENAI_SDK_AVAILABLE:
+            raise ImportError(
+                "openai package is required for image upload support. Install it with `pip install openai`."
+            )
+        # Use LLM client timeout (seconds); default 600s for uploads (timeout_ms is for browser, not upload)
+        upload_timeout_sec = float(self.timeout) if self.timeout is not None else 600.0
+
+        if self.provider == LLMProvider.OPENAI:
+            api_key = str(self.api_key or os.getenv("OPENAI_API_KEY") or "").strip()
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY is required for OpenAI image uploads.")
+            return OpenAI(api_key=api_key, timeout=upload_timeout_sec)
+
+        if self.provider == LLMProvider.AZURE_AI:
+            api_key = str(
+                self.api_key
+                or os.getenv("AZURE_OPENAI_API_KEY")
+                or os.getenv("AZURE_AI_CREDENTIAL")
+                or ""
+            ).strip()
+            endpoint = str(
+                os.getenv("AZURE_OPENAI_ENDPOINT")
+                or os.getenv("AZURE_AI_ENDPOINT")
+                or ""
+            ).strip()
+            api_version = str(
+                os.getenv("AZURE_OPENAI_API_VERSION")
+                or os.getenv("OPENAI_API_VERSION")
+                or ""
+            ).strip()
+            if not api_key:
+                raise ValueError(
+                    "AZURE_OPENAI_API_KEY or AZURE_AI_CREDENTIAL is required for Azure image uploads."
+                )
+            if not endpoint:
+                raise ValueError(
+                    "AZURE_OPENAI_ENDPOINT or AZURE_AI_ENDPOINT is required for Azure image uploads."
+                )
+            if not api_version:
+                raise ValueError(
+                    "AZURE_OPENAI_API_VERSION or OPENAI_API_VERSION is required for Azure image uploads."
+                )
+            return AzureOpenAI(
+                api_key=api_key,
+                azure_endpoint=endpoint,
+                api_version=api_version,
+                timeout=upload_timeout_sec,
+            )
+
+        raise ValueError(
+            f"Image upload is only supported for OpenAI and Azure providers, got '{self.provider.value}'."
+        )
+
+    def _upload_image_sync(self, image_path: Union[str, Path], *, purpose: str = "vision") -> str:
+        """Upload a local image file and return the provider file id."""
+        path = Path(image_path).expanduser().resolve()
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"Image file not found: {path}")
+
+        upload_client = self._create_image_upload_client()
+        try:
+            with path.open("rb") as fh:
+                result = upload_client.files.create(file=fh, purpose=str(purpose or "vision"))
+        except Exception as e:
+            raise RuntimeError(f"Failed to upload image '{path}': {e}") from e
+
+        file_id = getattr(result, "id", None)
+        if not file_id:
+            raise RuntimeError(f"Provider did not return a file id for uploaded image '{path}'.")
+        return str(file_id)
+
+    async def upload_image(self, image_path: Union[str, Path], *, purpose: str = "vision") -> str:
+        """
+        Upload a local image file and return the provider file id.
+
+        Supported providers:
+        - OpenAI
+        - Azure (`azure:` models using Azure OpenAI-compatible uploads)
+        """
+        return await asyncio.to_thread(self._upload_image_sync, image_path, purpose=purpose)
+
+    def upload_image_sync(self, image_path: Union[str, Path], *, purpose: str = "vision") -> str:
+        """Synchronous wrapper for `upload_image()`."""
+        try:
+            asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    asyncio.run,
+                    self.upload_image(image_path, purpose=purpose),
+                )
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(self.upload_image(image_path, purpose=purpose))
     
     def _get_api_key(self) -> Optional[str]:
         """Get API key from environment variables based on provider."""
@@ -702,40 +807,82 @@ class LLMClient:
     ) -> List[Message]:
         """
         Deterministic last-resort compaction:
-        - Drop all assistant/tool messages (and prior internal partial-result messages).
-        - Keep user messages (objects), but if user messages alone exceed budget, truncate oldest-first.
+        - Preserve the first real user message.
+        - Replace the remaining conversation with a single synthetic USER summary message.
+        - If still too large, truncate the synthetic summary, then the first user message as the final fallback.
 
         This is intentionally lossy and exists only as a fallback when LLM-based partial-result compaction
         cannot fit within the budget.
         """
-        user_msgs: List[Message] = [
-            m
-            for m in (conversation_messages or [])
-            if getattr(m, "role", None) == MessageRole.USER and not self._is_compaction_summary_message(m)
-        ]
-        if not user_msgs:
+        first_user_idx = -1
+        first_user: Optional[Message] = None
+        for i, m in enumerate(conversation_messages or []):
+            if getattr(m, "role", None) == MessageRole.USER and not self._is_compaction_summary_message(m):
+                first_user_idx = i
+                first_user = m
+                break
+        if first_user is None:
             return conversation_messages
 
-        new_msgs: List[Message] = list(user_msgs)
+        tail_msgs = list((conversation_messages or [])[first_user_idx + 1 :])
+        if not tail_msgs:
+            new_msgs = [first_user]
+            after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
+            if after_tokens <= safe_budget:
+                return new_msgs
+            content = getattr(first_user, "content", "") or ""
+            if not isinstance(content, str):
+                content = str(content)
+            truncated = Message(role=MessageRole.USER, content=content[:200] + " …(truncated due to token budget)")
+            return [truncated]
+
+        def _msg_text(m: Message) -> str:
+            content = getattr(m, "content", "") or ""
+            text = self._extract_actual_response_text(content)
+            if not text:
+                text = content if isinstance(content, str) else str(content)
+            return str(text or "").strip()
+
+        lines: List[str] = []
+        for m in tail_msgs:
+            role = getattr(m, "role", None)
+            if role == MessageRole.TOOL:
+                label = f"TOOL[{getattr(m, 'name', None) or 'tool'}]"
+            elif role == MessageRole.ASSISTANT:
+                label = "ASSISTANT"
+            else:
+                label = "USER"
+            text = _msg_text(m)
+            if text:
+                lines.append(f"{label}: {text}")
+
+        compact_text = (
+            "CONTEXT_PARTIAL_RESULT (internal):\n"
+            "- reason: fallback deterministic compaction due to token budget\n\n"
+            + ("\n".join(lines) if lines else "(no remaining context)")
+        )
+        compact_msg = Message(role=MessageRole.USER, content=compact_text)
+        new_msgs: List[Message] = [first_user, compact_msg]
         after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
         if after_tokens <= safe_budget:
             return new_msgs
 
-        # Truncate oldest-first; keep the last user message intact as long as possible.
-        for i in range(max(0, len(new_msgs) - 1)):
-            if after_tokens <= safe_budget:
-                break
-            m = new_msgs[i]
-            c = getattr(m, "content", "")
-            if not isinstance(c, str):
-                c = str(c)
-            c = c.strip()
-            if len(c) <= 200:
-                continue
-            new_msgs[i] = Message(role=MessageRole.USER, content=c[:200] + " …(truncated due to token budget)")
+        summary_content = compact_text
+        while after_tokens > safe_budget and len(summary_content) > 200:
+            summary_content = summary_content[: max(200, int(len(summary_content) * 0.7))] + " …(truncated)"
+            new_msgs = [first_user, Message(role=MessageRole.USER, content=summary_content)]
             after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
 
-        return new_msgs
+        if after_tokens <= safe_budget:
+            return new_msgs
+
+        first_content = getattr(first_user, "content", "") or ""
+        if not isinstance(first_content, str):
+            first_content = str(first_content)
+        return [
+            Message(role=MessageRole.USER, content=first_content[:200] + " …(truncated due to token budget)"),
+            Message(role=MessageRole.USER, content=summary_content[:200] + " …(truncated due to token budget)"),
+        ]
 
     async def _compact_conversation_messages_for_budget_async(
         self,
@@ -746,28 +893,46 @@ class LLMClient:
         reserved_output_tokens: int,
         iteration: int,
         request_id: str,
-    ) -> List[Message]:
+    ) -> tuple[List[Message], Dict[str, int], float]:
         """
-        LLM-powered compaction with incremental updates (partial-result mode):
-        - Keep original user messages (do not remove them).
-        - Replace assistant/tool history with a single synthetic USER message containing a partial result.
-        - If a previous partial result exists, update it using only new assistant/tool messages since then.
+        LLM-powered staged conversation compaction:
+        - Preserve only the first real user message.
+        - Summarize all remaining messages into a single synthetic USER message.
+        - Use staged prefix passes when needed so very large tails can still be compacted safely.
 
         Safety:
         - Uses a separate direct `langchain_llm.ainvoke` call with a tiny, bounded prompt (no recursion).
         - Falls back to deterministic truncation if compaction fails or still cannot fit within the budget.
         """
         try:
-            # Preserve only real user messages; treat prior partial results as internal and replaceable.
-            user_msgs: List[Message] = [
-                m
-                for m in conversation_messages
-                if getattr(m, "role", None) == MessageRole.USER and not self._is_compaction_summary_message(m)
-            ]
-            if not user_msgs:
-                return conversation_messages
-            last_user = user_msgs[-1]
-            prefix_users = user_msgs[:-1]
+            total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            total_cost = 0.0
+            first_user_idx = -1
+            first_user: Optional[Message] = None
+            for i, m in enumerate(conversation_messages or []):
+                if getattr(m, "role", None) == MessageRole.USER and not self._is_compaction_summary_message(m):
+                    first_user_idx = i
+                    first_user = m
+                    break
+            if first_user is None:
+                return conversation_messages, total_usage, total_cost
+
+            current_tail = list((conversation_messages or [])[first_user_idx + 1 :])
+            if not current_tail:
+                return [first_user], total_usage, total_cost
+
+            def _msg_text(m: Message) -> str:
+                content = getattr(m, "content", "") or ""
+                text = self._extract_actual_response_text(content)
+                if not text:
+                    text = content if isinstance(content, str) else str(content)
+                return str(text or "").strip()
+
+            def _message_tokens(messages: List[Message]) -> int:
+                return self._count_message_tokens(message="", system_message=system_message, messages=messages)
+
+            def _segment_tokens(messages: List[Message]) -> int:
+                return self._count_message_tokens(message="", system_message=None, messages=messages)
 
             # Extract system text (keep original system prompt) and append compaction instructions.
             sys_text = ""
@@ -776,118 +941,80 @@ class LLMClient:
             compaction_instructions = (
                 "\n\n"
                 "COMPaction Mode (internal):\n"
-                "Objective: generate/maintain a PARTIAL RESULT based on the information available so far, to avoid exceeding token limits.\n"
-                "This partial result will be used later to produce a more complete final result; missing information is acceptable.\n"
+                "Objective: compress prior conversation into a single USER message while preserving all task-relevant meaning. Generate partial conclusion based on the existing context.\n"
                 "Rules:\n"
                 "- Do NOT call tools.\n"
-                "- Do NOT invent facts or numbers.\n"
-                "- Preserve key finance figures, dates, units, and source/tool hints when present.\n"
-                "- Focus on producing results (not summarizing logs). If something is unknown, mark it as unknown.\n"
+                "- Do NOT invent facts, numbers, URLs, or decisions.\n"
+                "- Preserve the user's intent, constraints, clarifications, completed work, failures, pending work, and any concrete outputs.\n"
+                "- Preserve key IDs, refs, URLs, file names, dates, numbers, tool call ids, and tool results when present.\n"
+                "- Write a compact task-oriented memory, not a transcript.\n"
+                "- Generate a partial conclusion using the existing evidence in the context.\n"
                 "- Output plain text only (no markdown fences).\n"
             )
             compaction_system = (sys_text or "") + compaction_instructions
 
-            # Find the most recent partial result (if any) and only summarize new assistant/tool messages after it.
-            last_summary_idx = -1
-            last_partial_text = ""
-            for i in range(len(conversation_messages) - 1, -1, -1):
-                if self._is_compaction_summary_message(conversation_messages[i]):
-                    last_summary_idx = i
-                    c = getattr(conversation_messages[i], "content", "") or ""
-                    last_partial_text = c if isinstance(c, str) else str(c)
-                    break
+            base_new_msgs: List[Message] = [first_user]
+            if _message_tokens(base_new_msgs) > safe_budget:
+                return (
+                    self._compact_conversation_messages_for_budget_truncate(
+                        conversation_messages=conversation_messages,
+                        system_message=system_message,
+                        safe_budget=safe_budget,
+                    ),
+                    total_usage,
+                    total_cost,
+                )
 
-            if last_summary_idx >= 0:
-                delta_msgs = [
-                    m
-                    for m in conversation_messages[last_summary_idx + 1 :]
-                    if getattr(m, "role", None) != MessageRole.USER
-                ]
-            else:
-                delta_msgs = [m for m in conversation_messages if getattr(m, "role", None) != MessageRole.USER]
+            pass_index = 0
+            while current_tail:
+                candidate_full = [first_user, *current_tail]
+                current_total = _message_tokens(candidate_full)
+                if current_total <= safe_budget and len(current_tail) == 1:
+                    return candidate_full, total_usage, total_cost
 
-            # Build a bounded "new events" digest from delta messages (newest-first, tool first).
-            max_delta_tokens = max(256, int(safe_budget * 0.20))
-            remaining = max_delta_tokens
-            delta_lines: List[str] = []
+                chosen_k = None
+                chosen_allowed = None
+                if current_total <= safe_budget:
+                    chosen_k = len(current_tail)
+                    chosen_allowed = max(1, int(min(_segment_tokens(current_tail), max(64, safe_budget * 0.5))))
+                else:
+                    excess = current_total - safe_budget
+                    for k in range(1, len(current_tail) + 1):
+                        prefix = current_tail[:k]
+                        prefix_tokens = _segment_tokens(prefix)
+                        allowed_summary_tokens = prefix_tokens - excess
+                        if allowed_summary_tokens >= 1:
+                            chosen_k = k
+                            chosen_allowed = max(1, int(allowed_summary_tokens))
+                            break
 
-            def _push(label: str, text: str) -> None:
-                nonlocal remaining
-                if remaining <= 0:
-                    return
-                s = (text or "").strip()
-                if not s:
-                    return
-                s = s[:2500]  # cap per item
-                line = f"{label}: {s}"
-                t = self._count_tokens(line)
-                if t <= 0:
-                    t = max(1, len(line) // 4)
-                if t > remaining:
-                    approx_chars = max(80, remaining * 4)
-                    line = line[:approx_chars] + " …(truncated)"
-                    t = self._count_tokens(line)
-                if t <= 0 or t > remaining:
-                    return
-                delta_lines.append(line)
-                remaining -= t
+                if chosen_k is None or chosen_allowed is None:
+                    chosen_k = len(current_tail)
+                    chosen_allowed = max(1, int(safe_budget * 0.10))
 
-            for m in reversed(delta_msgs):
-                if remaining <= 0:
-                    break
-                if getattr(m, "role", None) == MessageRole.TOOL:
-                    nm = getattr(m, "name", None) or "tool"
-                    _push(f"TOOL[{nm}]", str(getattr(m, "content", "") or ""))
-            for m in reversed(delta_msgs):
-                if remaining <= 0:
-                    break
-                if getattr(m, "role", None) == MessageRole.ASSISTANT:
-                    _push("ASSISTANT", str(getattr(m, "content", "") or ""))
+                prefix = current_tail[:chosen_k]
+                tail = current_tail[chosen_k:]
+                prefix_lines: List[str] = []
+                for m in prefix:
+                    role = getattr(m, "role", None)
+                    if role == MessageRole.TOOL:
+                        label = f"TOOL[{getattr(m, 'name', None) or 'tool'}]"
+                    elif role == MessageRole.ASSISTANT:
+                        label = "ASSISTANT"
+                    else:
+                        label = "USER"
+                    text = _msg_text(m)
+                    if text:
+                        prefix_lines.append(f"{label}: {text[:4000]}")
 
-            new_events = "\n".join(delta_lines) if delta_lines else "(no new assistant/tool messages)"
-
-            # Provide user context to the compaction model (newest-first, bounded).
-            user_context_budget = max(256, int(safe_budget * 0.20))
-            remaining_uc = user_context_budget
-            user_context_lines: List[str] = []
-            for m in reversed(user_msgs):
-                if remaining_uc <= 0:
-                    break
-                c = getattr(m, "content", "") or ""
-                c = c if isinstance(c, str) else str(c)
-                c = c.strip()
-                if not c:
-                    continue
-                c = c[:3000]
-                line = f"USER: {c}"
-                t = self._count_tokens(line)
-                if t <= 0:
-                    t = max(1, len(line) // 4)
-                if t > remaining_uc:
-                    approx_chars = max(80, remaining_uc * 4)
-                    line = line[:approx_chars] + " …(truncated)"
-                    t = self._count_tokens(line)
-                if t <= 0 or t > remaining_uc:
-                    continue
-                user_context_lines.append(line)
-                remaining_uc -= t
-            user_context = "\n".join(reversed(user_context_lines)) if user_context_lines else "(no user context)"
-
-            # Two attempts with shrinking output caps.
-            max_out_1 = max(512, int(safe_budget * 0.30))
-            max_out_2 = max(256, int(max_out_1 * 0.6))
-            for attempt, max_out in enumerate([max_out_1, max_out_2], start=1):
+                primary_task = _msg_text(first_user) or "(missing first user message)"
                 partial_user = (
-                    "Generate/Update PARTIAL RESULT.\n\n"
-                    "USER_CONTEXT:\n"
-                    f"{user_context}\n\n"
-                    "PREVIOUS_PARTIAL_RESULT (may be empty):\n"
-                    f"{(last_partial_text or '').strip()}\n\n"
-                    "NEW_EVENTS (assistant/tool messages since previous partial result):\n"
-                    f"{new_events}\n\n"
-                    "Return an UPDATED PARTIAL RESULT that is directly usable later.\n"
-                    "Prefer a structured format aligned with the task (headings + bullet points are OK).\n"
-                    "Do not apologize for missing data.\n"
+                    "Compress the following prior conversation into a shorter internal task-memory.\n\n"
+                    "PRIMARY_USER_TASK:\n"
+                    f"{primary_task}\n\n"
+                    "CONVERSATION_TO_COMPRESS:\n"
+                    f"{chr(10).join(prefix_lines) if prefix_lines else '(no conversation text)'}\n\n"
+                    "Return only the compressed task-memory."
                 )
                 from moose.framework.logging.tracing import span as trace_span
 
@@ -898,7 +1025,7 @@ class LLMClient:
                         "llm.model": str(self.model),
                         "llm.stage": "compact",
                         "llm.iteration": int(iteration),
-                        "llm.attempt": int(attempt),
+                        "llm.pass_index": int(pass_index),
                     },
                 ):
                     resp = await self.langchain_llm.ainvoke(
@@ -908,39 +1035,53 @@ class LLMClient:
                         request_id=str(request_id),
                         agent_name=self.agent_name,
                         temperature=0,
+                        max_tokens=chosen_allowed,
                     )
+                ru = getattr(resp, "usage", None)
+                if isinstance(ru, dict):
+                    total_usage["input_tokens"] += int(ru.get("input_tokens", 0) or 0)
+                    total_usage["output_tokens"] += int(ru.get("output_tokens", 0) or 0)
+                    total_usage["total_tokens"] += int(ru.get("total_tokens", 0) or 0)
+                if getattr(resp, "cost", None):
+                    total_cost += float(getattr(resp, "cost", 0.0) or 0.0)
+
                 partial = str(getattr(resp, "content", "") or "").strip()
                 if not partial:
-                    continue
+                    break
 
                 header = (
                     "CONTEXT_PARTIAL_RESULT (internal):\n"
                     f"- reason: input context exceeded model limit; compacting history at iteration={iteration}\n"
                     f"- safe_input_budget: {safe_budget} (reserved_output_tokens={reserved_output_tokens})\n"
+                    f"- compact_pass: {pass_index}\n"
                     "\n"
                 )
-                partial = header + partial
+                compact_msg = Message(role=MessageRole.USER, content=header + partial)
+                current_tail = [compact_msg, *tail]
+                pass_index += 1
 
-                # Build new conversation order: keep older user msgs, then partial result, then last user.
-                compact_msg = Message(role=MessageRole.USER, content=partial)
-                new_msgs: List[Message] = [*prefix_users, compact_msg, last_user]
+                # If compaction made no progress, stop and fallback.
+                if _message_tokens([first_user, *current_tail]) >= current_total and len(current_tail) <= 1:
+                    break
 
-                after_tokens = self._count_message_tokens(message="", system_message=system_message, messages=new_msgs)
-                if after_tokens > safe_budget:
-                    continue
-                return new_msgs
-
-            # Fallback: truncate user messages (drop assistant/tool history entirely)
-            return self._compact_conversation_messages_for_budget_truncate(
-                conversation_messages=conversation_messages,
-                system_message=system_message,
-                safe_budget=safe_budget,
+            return (
+                self._compact_conversation_messages_for_budget_truncate(
+                    conversation_messages=[first_user, *current_tail] if first_user else conversation_messages,
+                    system_message=system_message,
+                    safe_budget=safe_budget,
+                ),
+                total_usage,
+                total_cost,
             )
         except Exception:
-            return self._compact_conversation_messages_for_budget_truncate(
-                conversation_messages=conversation_messages,
-                system_message=system_message,
-                safe_budget=safe_budget,
+            return (
+                self._compact_conversation_messages_for_budget_truncate(
+                    conversation_messages=conversation_messages,
+                    system_message=system_message,
+                    safe_budget=safe_budget,
+                ),
+                {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                0.0,
             )
     
     def _chunk_content(self, content: str, chunk_size_tokens: int) -> List[str]:
@@ -1371,6 +1512,17 @@ Provide your final combined response:"""
         """
         tool_messages: List[Message] = []
 
+        def _tool_result_content(value: Any) -> Union[str, List[Dict[str, Any]]]:
+            if isinstance(value, str):
+                return value
+            if isinstance(value, list) and all(isinstance(item, (str, dict)) for item in value):
+                return value
+            if isinstance(value, dict):
+                block_type = str(value.get("type") or "").strip().lower()
+                if block_type in {"input_image", "input_file", "input_text", "text"}:
+                    return [value]
+            return str(value)
+
         # Provider-native web search tools are executed by the model provider when bound via LangChain.
         # They are NOT Moose/MCP tools and should not be executed by ToolRuntime.
         WEB_SEARCH_TOOL_NAMES = {
@@ -1445,15 +1597,9 @@ Provide your final combined response:"""
                 else:
                     result = await self._invoke_one_tool(tool, tool_name, tool_args, runtime=runtime)
 
-                # Convert result to string
-                if isinstance(result, str):
-                    result_str = result
-                else:
-                    result_str = str(result)
-                
                 tool_msg = Message(
                     role=MessageRole.TOOL,
-                    content=result_str,
+                    content=_tool_result_content(result),
                     name=tool_name,
                     tool_call_id=tool_call_id,
                     tool_calls=[{"name": tool_name, "args": tool_args}]
@@ -1609,26 +1755,28 @@ Provide your final combined response:"""
                 messages=conversation_messages,
             )
             
-            while current_tokens > safe_budget:
-                conversation_messages.pop(0)
+            if current_tokens > safe_budget and conversation_messages:
+                (
+                    conversation_messages,
+                    compaction_usage,
+                    compaction_cost,
+                ) = await self._compact_conversation_messages_for_budget_async(
+                    conversation_messages=conversation_messages,
+                    system_message=system_message,
+                    safe_budget=safe_budget,
+                    reserved_output_tokens=reserved_output_tokens,
+                    iteration=iteration,
+                    request_id=str(request_id),
+                )
                 current_tokens = self._count_message_tokens(
                     message="",
                     system_message=system_message,
                     messages=conversation_messages,
                 )
-            # if current_tokens > safe_budget:
-            #     self.logger.warning(
-            #         f"Context budget exceeded before LLM call (iter={iteration}): "
-            #         f"tokens_estimate={current_tokens} > safe_budget={safe_budget}. Compacting history."
-            #     )
-            #     conversation_messages = await self._compact_conversation_messages_for_budget_async(
-            #         conversation_messages=conversation_messages,
-            #         system_message=system_message,
-            #         safe_budget=safe_budget,
-            #         reserved_output_tokens=reserved_output_tokens,
-            #         iteration=iteration,
-            #         request_id=str(request_id),
-            #     )
+                total_cost += float(compaction_cost or 0.0)
+                total_usage["input_tokens"] += int(compaction_usage.get("input_tokens", 0) or 0)
+                total_usage["output_tokens"] += int(compaction_usage.get("output_tokens", 0) or 0)
+                total_usage["total_tokens"] += int(compaction_usage.get("total_tokens", 0) or 0)
 
             # Use LangChain LLM wrapper asynchronously
             from moose.framework.logging.tracing import span as trace_span

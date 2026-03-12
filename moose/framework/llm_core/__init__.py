@@ -12,6 +12,7 @@ from moose.framework.llm_core.agent_loop import (
     collect_agent_loop,
 )
 from moose.framework.llm_core.client import LLMClient
+from moose.framework.llm_core.config_utils import create_llm_client_from_config, merge_llm_config
 from moose.framework.llm_core.models import Message, MessageRole, LLMResponse
 from moose.framework.llm_core.providers import LLMProvider, get_provider
 from moose.framework.llm_core.cost_tracker import CostTracker
@@ -35,6 +36,8 @@ except ImportError:
 
 __all__ = [
     'LLMClient',
+    'create_llm_client_from_config',
+    'merge_llm_config',
     'AgentLoopCallback',
     'AgentLoopEvent',
     'AgentLoopEventType',

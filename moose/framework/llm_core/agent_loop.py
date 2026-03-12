@@ -658,14 +658,29 @@ class AgentLoopRunner:
                 )
 
                 removed_messages = 0
-                while current_tokens > safe_budget and conversation_messages:
-                    conversation_messages.pop(0)
-                    removed_messages += 1
+                if current_tokens > safe_budget and conversation_messages:
+                    before_count = len(conversation_messages)
+                    (
+                        conversation_messages,
+                        compaction_usage,
+                        compaction_cost,
+                    ) = await self.client._compact_conversation_messages_for_budget_async(
+                        conversation_messages=conversation_messages,
+                        system_message=system_message,
+                        safe_budget=safe_budget,
+                        reserved_output_tokens=reserved_output_tokens,
+                        iteration=iteration,
+                        request_id=self.request_id,
+                    )
                     current_tokens = self.client._count_message_tokens(
                         message="",
                         system_message=system_message,
                         messages=conversation_messages,
                     )
+                    removed_messages = max(0, before_count - len(conversation_messages))
+                    _accumulate_usage(total_usage, compaction_usage)
+                    if compaction_cost:
+                        total_cost += float(compaction_cost or 0.0)
                 if removed_messages > 0:
                     await self._emit(
                         ContextTrimEvent(
@@ -1349,14 +1364,10 @@ class AgentLoopRunner:
                     parent_span_id=parent_span_id,
                     tool_call_id=tool_call_id,
                 )
-                if isinstance(result, str):
-                    result_str = result
-                else:
-                    result_str = str(result)
 
                 tool_message = Message(
                     role=MessageRole.TOOL,
-                    content=result_str,
+                    content=self._tool_result_content(result),
                     name=tool_name,
                     tool_call_id=tool_call_id,
                     tool_calls=[{"name": tool_name, "args": tool_args}],
@@ -1523,6 +1534,18 @@ class AgentLoopRunner:
 
     def _tool_name_from_call(self, tool_call: Any) -> Optional[str]:
         return self._normalize_tool_call(tool_call)[0]
+
+    @staticmethod
+    def _tool_result_content(value: Any) -> Union[str, List[Dict[str, Any]]]:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list) and all(isinstance(item, (str, dict)) for item in value):
+            return value
+        if isinstance(value, dict):
+            block_type = str(value.get("type") or "").strip().lower()
+            if block_type in {"input_image", "input_file", "input_text", "text"}:
+                return [value]
+        return str(value)
 
     async def _emit(self, event: AgentLoopEvent) -> AgentLoopEvent:
         self._sequence += 1
